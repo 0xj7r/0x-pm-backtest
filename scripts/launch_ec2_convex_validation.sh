@@ -30,6 +30,7 @@ set -euo pipefail
 
 REGION="${AWS_REGION:-us-east-1}"
 INSTANCE_TYPE="${INSTANCE_TYPE:-c7i.4xlarge}"
+ALLOW_ON_DEMAND_LARGE="${ALLOW_ON_DEMAND_LARGE:-0}"
 RESULTS_BUCKET="${RESULTS_BUCKET:-pm-research-backtest-prod}"
 SOURCE_BUCKET="${SOURCE_BUCKET:-pm-research-backtest-prod}"
 SOURCE_PREFIX="${SOURCE_PREFIX:-source/polymarket-backtest}"
@@ -320,6 +321,7 @@ while [ $# -gt 0 ]; do
         --discovery-max-concurrent) DISCOVERY_MAX_CONCURRENT="$2"; shift 2 ;;
         --portfolio-checkpoint-every-markets) PORTFOLIO_CHECKPOINT_EVERY_MARKETS="$2"; shift 2 ;;
         --instance-type) INSTANCE_TYPE="$2"; shift 2 ;;
+        --allow-on-demand-large) ALLOW_ON_DEMAND_LARGE="1"; shift ;;
         --instance-profile) INSTANCE_PROFILE="$2"; shift 2 ;;
         --markets-parquet-bucket) MARKETS_PARQUET_BUCKET="$2"; shift 2 ;;
         --markets-parquet-key) MARKETS_PARQUET_KEY="$2"; shift 2 ;;
@@ -352,6 +354,16 @@ fi
 
 if [ "$FORBID_META_TRAINING" = "1" ] && [ "$DISABLE_META_CALIBRATION" != "1" ] && [ -z "$SNAPSHOT_S3_URI" ]; then
     echo "--forbid-meta-training requires --reuse-artifacts-run-id or --snapshot-s3-uri" >&2
+    exit 1
+fi
+
+case "$INSTANCE_TYPE" in
+    *.4xlarge|*.8xlarge|*.[0-9][0-9]xlarge) LARGE_INSTANCE="1" ;;
+    *) LARGE_INSTANCE="0" ;;
+esac
+if [ "$LARGE_INSTANCE" = "1" ] && [ "$ALLOW_ON_DEMAND_LARGE" != "1" ]; then
+    echo "Refusing on-demand $INSTANCE_TYPE launch without --allow-on-demand-large." >&2
+    echo "Set ALLOW_ON_DEMAND_LARGE=1 or pass --allow-on-demand-large when this large runner is intentional." >&2
     exit 1
 fi
 

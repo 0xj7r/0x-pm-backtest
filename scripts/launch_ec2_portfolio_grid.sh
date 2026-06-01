@@ -22,6 +22,10 @@ set -euo pipefail
 
 REGION="${AWS_REGION:-us-east-1}"
 INSTANCE_TYPE="${INSTANCE_TYPE:-c7i.4xlarge}"
+ARCH="${ARCH:-x86_64}"
+USE_SPOT="${USE_SPOT:-0}"
+SPOT_MAX_PRICE="${SPOT_MAX_PRICE:-}"
+ALLOW_ON_DEMAND_LARGE="${ALLOW_ON_DEMAND_LARGE:-0}"
 RESULTS_BUCKET="${RESULTS_BUCKET:-pm-research-backtest-prod}"
 SOURCE_BUCKET="${SOURCE_BUCKET:-pm-research-backtest-prod}"
 SOURCE_PREFIX="${SOURCE_PREFIX:-source/polymarket-backtest}"
@@ -295,6 +299,10 @@ while [ $# -gt 0 ]; do
         --discovery-max-concurrent) DISCOVERY_MAX_CONCURRENT="$2"; shift 2 ;;
         --portfolio-checkpoint-every-markets) PORTFOLIO_CHECKPOINT_EVERY_MARKETS="$2"; shift 2 ;;
         --instance-type) INSTANCE_TYPE="$2"; shift 2 ;;
+        --arch) ARCH="$2"; shift 2 ;;
+        --spot) USE_SPOT="1"; shift ;;
+        --spot-max-price) SPOT_MAX_PRICE="$2"; shift 2 ;;
+        --allow-on-demand-large) ALLOW_ON_DEMAND_LARGE="1"; shift ;;
         --instance-profile) INSTANCE_PROFILE="$2"; shift 2 ;;
         --markets-parquet-bucket) MARKETS_PARQUET_BUCKET="$2"; shift 2 ;;
         --markets-parquet-key) MARKETS_PARQUET_KEY="$2"; shift 2 ;;
@@ -330,6 +338,16 @@ if [ "$FORBID_META_TRAINING" = "1" ] && [ "$DISABLE_META_CALIBRATION" != "1" ] &
     exit 1
 fi
 
+case "$INSTANCE_TYPE" in
+    *.4xlarge|*.8xlarge|*.[0-9][0-9]xlarge) LARGE_INSTANCE="1" ;;
+    *) LARGE_INSTANCE="0" ;;
+esac
+if [ "$USE_SPOT" != "1" ] && [ "$LARGE_INSTANCE" = "1" ] && [ "$ALLOW_ON_DEMAND_LARGE" != "1" ]; then
+    echo "Refusing on-demand $INSTANCE_TYPE launch without --allow-on-demand-large." >&2
+    echo "Use --spot for interruptible research, or set ALLOW_ON_DEMAND_LARGE=1 when on-demand is intentional." >&2
+    exit 1
+fi
+
 if [ "$SYNC_SOURCE" = "1" ]; then
     echo "Syncing source to s3://${SOURCE_BUCKET}/${SOURCE_PREFIX}/"
     aws s3 rm "s3://${SOURCE_BUCKET}/${SOURCE_PREFIX}/" --recursive --quiet
@@ -344,14 +362,50 @@ fi
 
 SOURCE_GIT_SHA="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 
+case "$ARCH" in
+    x86_64|arm64) ;;
+    *) echo "--arch must be x86_64 or arm64" >&2; exit 1 ;;
+esac
+
+AMI_ARCH="$ARCH"
+AMI_PARAM="/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-${AMI_ARCH}"
+
+if [ "$ARCH" = "arm64" ] && [[ "$PM_APP_BINARY_S3_URI" == *x86* ]]; then
+    echo "arm64 launch cannot use an x86 pm-app binary: $PM_APP_BINARY_S3_URI" >&2
+    exit 1
+fi
+if [ "$ARCH" = "x86_64" ] && [[ "$PM_APP_BINARY_S3_URI" == *arm64* || "$PM_APP_BINARY_S3_URI" == *aarch64* ]]; then
+    echo "x86_64 launch cannot use an ARM pm-app binary: $PM_APP_BINARY_S3_URI" >&2
+    exit 1
+fi
+
 AMI=$(aws ssm get-parameter \
     --region "$REGION" \
-    --name /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64 \
+    --name "$AMI_PARAM" \
     --query Parameter.Value --output text)
 
 echo "AMI: $AMI"
+echo "AMI arch: $ARCH"
 echo "Run ID: $RUN_ID"
 echo "Source git SHA: $SOURCE_GIT_SHA"
+INSTANCE_MARKET_OPTIONS_ARGS=()
+if [ "$USE_SPOT" = "1" ]; then
+    if [ -n "$SPOT_MAX_PRICE" ]; then
+        INSTANCE_MARKET_OPTIONS_ARGS=(
+            --instance-market-options
+            "MarketType=spot,SpotOptions={MaxPrice=${SPOT_MAX_PRICE},SpotInstanceType=one-time,InstanceInterruptionBehavior=terminate}"
+        )
+    else
+        INSTANCE_MARKET_OPTIONS_ARGS=(
+            --instance-market-options
+            "MarketType=spot,SpotOptions={SpotInstanceType=one-time,InstanceInterruptionBehavior=terminate}"
+        )
+    fi
+    echo "EC2 market: spot"
+    [ -n "$SPOT_MAX_PRICE" ] && echo "Spot max price: $SPOT_MAX_PRICE"
+else
+    echo "EC2 market: on-demand"
+fi
 if [ -n "$SNAPSHOT_S3_URI" ]; then
     echo "Meta snapshot in: $SNAPSHOT_S3_URI"
 fi
@@ -670,6 +724,7 @@ INSTANCE_ID=$(aws ec2 run-instances \
     --iam-instance-profile "Name=$INSTANCE_PROFILE" \
     --instance-initiated-shutdown-behavior terminate \
     --block-device-mappings "DeviceName=/dev/xvda,Ebs={VolumeSize=${ROOT_VOLUME_GB},VolumeType=gp3,DeleteOnTermination=true}" \
+    "${INSTANCE_MARKET_OPTIONS_ARGS[@]}" \
     --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=pm-backtest-${RUN_ID}},{Key=run_id,Value=${RUN_ID}}]" \
     --user-data "$USER_DATA" \
     --query 'Instances[0].InstanceId' --output text)

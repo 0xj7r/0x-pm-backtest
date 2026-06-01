@@ -147,6 +147,53 @@ Only reuse a binary when the Rust crates are unchanged from the binary's source
 revision. Strategy-rule and sizing sweeps are fine; model or execution code
 changes require a fresh build and a new uploaded binary.
 
+## Cost controls
+
+Default launches are still on-demand x86_64 for compatibility, but interruptible
+research sweeps should normally use Spot. The launcher writes partial checkpoints
+every 250 markets and syncs them every 180 seconds, so a Spot interruption loses
+bounded work rather than the whole run.
+
+Large on-demand runners now require an explicit acknowledgement. If a
+`*.4xlarge`, `*.8xlarge`, or larger launch really must be on-demand, pass
+`--allow-on-demand-large` or set `ALLOW_ON_DEMAND_LARGE=1`; otherwise use Spot
+for research.
+
+Use a memory-safe Graviton runner when the run does not depend on a prebuilt
+x86_64 binary:
+
+```bash
+AWS_PROFILE=visumlabs \
+INSTANCE_TYPE=r7g.4xlarge \
+ARCH=arm64 \
+USE_SPOT=1 \
+./scripts/launch_ec2_portfolio_grid.sh \
+  --start-date 2026-02-12 \
+  --end-date 2026-05-20 \
+  --reuse-artifacts-run-id 20260528T225810Z-portfolio-grid-52322 \
+  --forbid-meta-training \
+  --clip-fractions 0.015 \
+  --gross-caps 250 \
+  --max-concurrent-fetches 8
+```
+
+Do not pass the existing `pm-app-al2023-x86_64-*` binary URI with `ARCH=arm64`;
+let the instance build natively, or upload a separate ARM binary artifact. For
+short CPU-bound smoke/ranking jobs, test `c7g.4xlarge`; for the full-history
+BTC5m profile that previously OOM-killed around half history, prefer `r7g.4xlarge`
+or another 128 GiB class until memory is reduced in the engine.
+
+For repeated sweeps at the same source revision, combine frozen artifacts,
+`--pm-app-binary-s3-uri`, and `--no-source-sync` so each launch does not delete
+and re-upload the repo source tree:
+
+```bash
+--reuse-artifacts-run-id <training-run-id> \
+--forbid-meta-training \
+--pm-app-binary-s3-uri s3://pm-research-backtest-prod/artifacts/binaries/<arch-specific-pm-app> \
+--no-source-sync
+```
+
 For drawdown-controlled sweeps, avoid a permanent hard freeze unless that is
 the explicit test. `--clip-drawdown-min-multiplier` keeps a small recovery lane
 open after the hard threshold:

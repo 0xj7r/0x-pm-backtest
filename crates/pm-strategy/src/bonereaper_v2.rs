@@ -225,7 +225,11 @@ impl ReversalScoreCoeffs {
         let mut logit = self.intercept;
         for term in &self.terms {
             let x = f.get(term.feature);
-            let std = if term.std.abs() < 1e-12 { 1.0 } else { term.std };
+            let std = if term.std.abs() < 1e-12 {
+                1.0
+            } else {
+                term.std
+            };
             logit += term.coef * (x - term.mean) / std;
         }
         sigmoid(logit)
@@ -882,7 +886,14 @@ impl BonereaperV2 {
     /// Directional-sizing modulator: `lerp(size_floor, size_ceiling, 1-score)`.
     /// Sizes UP stable loads (low score), DOWN fragile loads (high score).
     /// Returns 1.0 (no change) when inert.
-    fn reversal_size_mult(&self, ctx: &Ctx, spot: &SpotHistory, ts_ns: i64, side: Side, px: f32) -> f64 {
+    fn reversal_size_mult(
+        &self,
+        ctx: &Ctx,
+        spot: &SpotHistory,
+        ts_ns: i64,
+        side: Side,
+        px: f32,
+    ) -> f64 {
         match self.reversal_score(ctx, spot, ts_ns, side, px) {
             Some(score) => lerp(
                 self.cfg.reversal_score_size_floor,
@@ -1650,13 +1661,13 @@ impl Strategy for BonereaperV2 {
             let yes_px = buy_px(event, Side::BuyYes);
             let no_px = buy_px(event, Side::BuyNo);
             let pair_cost = yes_px + no_px;
-            if yes_px > 0.0
-                && no_px > 0.0
-                && pair_cost < self.cfg.hedged_base_max_pair_cost as f64
+            if yes_px > 0.0 && no_px > 0.0 && pair_cost < self.cfg.hedged_base_max_pair_cost as f64
             {
                 let remaining = self.cfg.hedged_base_max_notional_usdc as f64
                     - self.hedged_base_notional_emitted as f64;
-                let clip = (self.cfg.hedged_base_clip_usdc as f64).min(remaining).max(0.0);
+                let clip = (self.cfg.hedged_base_clip_usdc as f64)
+                    .min(remaining)
+                    .max(0.0);
                 if clip > 0.0 {
                     // Arb lock requires EQUAL shares on both legs, not equal
                     // dollars: the engine pays $1 per winning share, so a pair
@@ -2469,7 +2480,13 @@ mod tests {
                 calibrated_p,
                 risk_score: 0.10,
             }),
+            model_attribution: None,
             market_close_ns: ts_close_ns,
+            btc_net_exposure_shares: 0.0,
+            eth_net_exposure_shares: 0.0,
+            daily_start_cash_usdc: 0.0,
+            daily_loss_cap_pct: 1.0,
+            current_daily_loss_pct: 0.0,
         }
     }
 
@@ -2530,7 +2547,10 @@ mod tests {
         // logit = 0.5 + 1.5*(3-1)/2 + (-0.8)*(0.5-0.2)/0.1 = 0.5 + 1.5 - 2.4 = -0.4
         let expected = 1.0 / (1.0 + (0.4f64).exp());
         let got = coeffs.score(&values) as f64;
-        assert!((got - expected).abs() < 1e-6, "got={got} expected={expected}");
+        assert!(
+            (got - expected).abs() < 1e-6,
+            "got={got} expected={expected}"
+        );
     }
 
     #[test]
@@ -2564,8 +2584,7 @@ mod tests {
         let mut ctx = test_ctx(close_ns, 0.9, 0.98);
         ctx.yes_shares = 70.0;
         let mut baseline = BonereaperV2::new(base_cfg());
-        let baseline_out =
-            baseline.on_event(&event, &ctx, &spot, &TradeHistory::default());
+        let baseline_out = baseline.on_event(&event, &ctx, &spot, &TradeHistory::default());
 
         // Enabled + coeffs present but every knob at its inert sentinel.
         let mut ctx2 = test_ctx(close_ns, 0.9, 0.98);
@@ -2627,10 +2646,16 @@ mod tests {
             stable.reversal_modulated_coverage(&ctx, &spot, ts, Side::BuyYes, 0.90, base_coverage);
         let stable_size = stable.reversal_size_mult(&ctx, &spot, ts, Side::BuyYes, 0.90);
 
-        assert!(frag_cov > stable_cov, "frag_cov={frag_cov} stable_cov={stable_cov}");
+        assert!(
+            frag_cov > stable_cov,
+            "frag_cov={frag_cov} stable_cov={stable_cov}"
+        );
         assert!(frag_cov > 0.95, "frag_cov={frag_cov}");
         assert!(stable_cov < 0.45, "stable_cov={stable_cov}");
-        assert!(frag_size < stable_size, "frag_size={frag_size} stable_size={stable_size}");
+        assert!(
+            frag_size < stable_size,
+            "frag_size={frag_size} stable_size={stable_size}"
+        );
         assert!(frag_size < 0.30, "frag_size={frag_size}");
         assert!(stable_size > 0.95, "stable_size={stable_size}");
     }
@@ -2881,7 +2906,13 @@ mod tests {
                 calibrated_p: 0.76,
                 risk_score: 0.20,
             }),
+            model_attribution: None,
             market_close_ns: 0,
+            btc_net_exposure_shares: 0.0,
+            eth_net_exposure_shares: 0.0,
+            daily_start_cash_usdc: 0.0,
+            daily_loss_cap_pct: 1.0,
+            current_daily_loss_pct: 0.0,
         };
 
         let threshold = late_favourite_effective_skew_threshold(
@@ -2914,7 +2945,13 @@ mod tests {
                 calibrated_p: 0.76,
                 risk_score: 0.20,
             }),
+            model_attribution: None,
             market_close_ns: 0,
+            btc_net_exposure_shares: 0.0,
+            eth_net_exposure_shares: 0.0,
+            daily_start_cash_usdc: 0.0,
+            daily_loss_cap_pct: 1.0,
+            current_daily_loss_pct: 0.0,
         };
 
         assert_eq!(
@@ -2990,7 +3027,13 @@ mod tests {
                 calibrated_p: 0.88,
                 risk_score: 0.1,
             }),
+            model_attribution: None,
             market_close_ns: 0,
+            btc_net_exposure_shares: 0.0,
+            eth_net_exposure_shares: 0.0,
+            daily_start_cash_usdc: 0.0,
+            daily_loss_cap_pct: 1.0,
+            current_daily_loss_pct: 0.0,
         };
 
         assert!((model_limited_buy_price(&ctx, Side::BuyYes, 0.93, 0.02) - 0.86).abs() < 1e-6);

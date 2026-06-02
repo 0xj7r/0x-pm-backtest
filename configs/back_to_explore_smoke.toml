@@ -1,0 +1,33 @@
+# Back-to-explore strategy profile for backtesting and quick smoke checks.
+# Keep [strategy].name at the strategy key that should consume these values.
+[strategy]
+name = "back_to_explore"
+
+[back_to_explore]
+# Clip/risk sizing
+base_clip_usdc = 7.24
+max_clip_usdc = 200.0
+
+# Pair economics and participation behavior
+min_pair_cost_for_two_sided = 0.96
+pair_clip_multiplier = 0.95
+directional_strength_mult = 1.6
+residual_taper_start_frac = 0.55
+residual_min_clip_multiplier = 0.35
+max_residual_shares = 120.0
+min_clip_multiplier_to_emit = 0.18
+
+# Execution shape and timing
+refresh_secs = 2.8
+stop_secs_before_close = 4.0
+min_entry_price = 0.02
+max_entry_price = 0.99
+sweep_depth = 6
+high_activity_hours = [14, 15, 16, 17, 18, 19]
+
+# Participation and house-bias controls
+base_participation_rate = 0.90
+two_sided_preference = 3.5
+target_risk_per_clip_frac = 0.0025
+base_target_net_shares = 6.0
+good_hour_target_net_mult = 3.0

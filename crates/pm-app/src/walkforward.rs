@@ -20,12 +20,14 @@ use pm_strategy::{
     BonereaperLite, BonereaperV2, BuyYesAtOpen, DeltaNeutralMm, LateBigBet, LateConfirmation,
     LateConvexTail, NoopStrategy, PairedMmDense, ReactiveDirectional, SpotMomentumFollower,
     UnlawfulRecycler,
+    back_to_explore::{BackToExploreConfig, BackToExploreTaker},
     bonereaper::BonereaperLiteConfig,
     bonereaper_v2::{BonereaperV2Config, BonereaperV2GateStats, ReversalScoreCoeffs},
     delta_neutral_mm::DeltaNeutralMmConfig,
     late_big_bet::LateBigBetConfig,
     late_confirmation::LateConfirmationConfig,
     late_convex_tail::LateConvexTailConfig,
+    low_vol_specialist::LowVolDecisionSurface,
     paired_mm::PairedMmDenseConfig,
     reactive::ReactiveDirectionalConfig,
     spot_follower::SpotMomentumFollowerConfig,
@@ -37,6 +39,7 @@ use pm_telonex_loader::{
 };
 use pm_types::{MarketId, ReplayEvent, SpotHistory, SpotTick, TradeHistory};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -161,16 +164,7 @@ pub struct BonereaperV2Profile {
 
 impl BonereaperV2Profile {
     pub fn load(path: &Path) -> Result<Self> {
-        let content = std::fs::read_to_string(path)
-            .with_context(|| format!("failed to read profile {}", path.display()))?;
-        let file: StrategyProfileFile = toml::from_str(&content)
-            .with_context(|| format!("failed to parse profile {} as TOML", path.display()))?;
-        if let Some(profile) = file.bonereaper_v2 {
-            Ok(profile)
-        } else {
-            toml::from_str(&content)
-                .with_context(|| format!("failed to parse flat profile {} as TOML", path.display()))
-        }
+        StrategyProfileFile::load(path)?.into_bonereaper_v2()
     }
 
     pub fn apply_to_walkforward_config(&self, cfg: &mut WalkForwardConfig) {
@@ -434,8 +428,270 @@ impl BonereaperV2Profile {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
-struct StrategyProfileFile {
+pub struct StrategyProfileFile {
+    strategy: Option<StrategyProfileSelection>,
     bonereaper_v2: Option<BonereaperV2Profile>,
+    back_to_explore: Option<BackToExploreProfile>,
+}
+
+#[derive(Debug, Clone, Serialize, Default, Deserialize)]
+#[serde(default, rename_all = "snake_case")]
+pub struct StrategyProfileSelection {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Default, Deserialize)]
+#[serde(default, rename_all = "snake_case")]
+pub struct BackToExploreProfile {
+    /// Use this as a world-class baseline clip, then applies `max(4.0, clip)` in
+    /// the runner. Keep non-zero so small accounts still receive action.
+    pub base_clip_usdc: Option<f64>,
+    pub max_clip_usdc: Option<f64>,
+    pub min_pair_cost_for_two_sided: Option<f64>,
+    pub pair_clip_multiplier: Option<f64>,
+    pub directional_strength_mult: Option<f64>,
+    pub residual_taper_start_frac: Option<f64>,
+    pub residual_min_clip_multiplier: Option<f64>,
+    pub max_residual_shares: Option<f64>,
+    pub min_clip_multiplier_to_emit: Option<f64>,
+    pub refresh_secs: Option<f64>,
+    pub stop_secs_before_close: Option<f32>,
+    pub min_entry_price: Option<f32>,
+    pub max_entry_price: Option<f32>,
+    pub sweep_depth: Option<usize>,
+    pub high_activity_hours: Option<Vec<u8>>,
+    pub base_participation_rate: Option<f64>,
+    pub two_sided_preference: Option<f64>,
+    pub target_risk_per_clip_frac: Option<f64>,
+    pub base_target_net_shares: Option<f64>,
+    pub good_hour_target_net_mult: Option<f64>,
+}
+
+impl BackToExploreProfile {
+    pub fn apply_to_walkforward_config(&self, cfg: &mut WalkForwardConfig) {
+        macro_rules! apply {
+            ($profile_field:ident, $cfg_field:ident) => {
+                if let Some(value) = self.$profile_field {
+                    cfg.$cfg_field = value;
+                }
+            };
+        }
+
+        apply!(base_clip_usdc, back_to_explore_base_clip_usdc);
+        apply!(max_clip_usdc, back_to_explore_max_clip_usdc);
+        apply!(
+            min_pair_cost_for_two_sided,
+            back_to_explore_min_pair_cost_for_two_sided
+        );
+        apply!(pair_clip_multiplier, back_to_explore_pair_clip_multiplier);
+        apply!(
+            directional_strength_mult,
+            back_to_explore_directional_strength_mult
+        );
+        apply!(
+            residual_taper_start_frac,
+            back_to_explore_residual_taper_start_frac
+        );
+        apply!(
+            residual_min_clip_multiplier,
+            back_to_explore_residual_min_clip_multiplier
+        );
+        apply!(max_residual_shares, back_to_explore_max_residual_shares);
+        apply!(
+            min_clip_multiplier_to_emit,
+            back_to_explore_min_clip_multiplier_to_emit
+        );
+        apply!(refresh_secs, back_to_explore_refresh_secs);
+        apply!(
+            stop_secs_before_close,
+            back_to_explore_stop_secs_before_close
+        );
+        apply!(min_entry_price, back_to_explore_min_entry_price);
+        apply!(max_entry_price, back_to_explore_max_entry_price);
+        apply!(sweep_depth, back_to_explore_sweep_depth);
+        if let Some(hours) = &self.high_activity_hours {
+            cfg.back_to_explore_high_activity_hours = hours.clone();
+        }
+        apply!(
+            base_participation_rate,
+            back_to_explore_base_participation_rate
+        );
+        apply!(two_sided_preference, back_to_explore_two_sided_preference);
+        apply!(
+            target_risk_per_clip_frac,
+            back_to_explore_target_risk_per_clip_frac
+        );
+        apply!(
+            base_target_net_shares,
+            back_to_explore_base_target_net_shares
+        );
+        apply!(
+            good_hour_target_net_mult,
+            back_to_explore_good_hour_target_net_mult
+        );
+    }
+}
+
+impl StrategyProfileFile {
+    pub fn load(path: &Path) -> Result<Self> {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read profile {}", path.display()))?;
+        let mut file: StrategyProfileFile = toml::from_str(&content)
+            .with_context(|| format!("failed to parse profile {} as TOML", path.display()))?;
+
+        if file.bonereaper_v2.is_none() && file.back_to_explore.is_none() {
+            let fallback: BonereaperV2Profile = toml::from_str(&content).with_context(|| {
+                format!(
+                    "failed to parse legacy profile format {} as TOML",
+                    path.display()
+                )
+            })?;
+            file.strategy = Some(StrategyProfileSelection {
+                name: "bonereaper_v2".to_string(),
+            });
+            file.bonereaper_v2 = Some(fallback);
+        }
+
+        if file.strategy.is_none() {
+            let has_bonereaper_v2 = file.bonereaper_v2.is_some();
+            let has_back_to_explore = file.back_to_explore.is_some();
+            match (has_bonereaper_v2, has_back_to_explore) {
+                (true, false) => {
+                    file.strategy = Some(StrategyProfileSelection {
+                        name: "bonereaper_v2".to_string(),
+                    });
+                }
+                (false, true) => {
+                    file.strategy = Some(StrategyProfileSelection {
+                        name: "back_to_explore".to_string(),
+                    });
+                }
+                (true, true) => {
+                    return Err(anyhow!(
+                        "profile has both [bonereaper_v2] and [back_to_explore] sections but no [strategy].name; set one strategy"
+                    ));
+                }
+                (false, false) => {}
+            }
+        }
+
+        if file.strategy.is_none() {
+            return Err(anyhow!(
+                "profile missing strategy declaration and no strategy section found"
+            ));
+        }
+
+        Ok(file)
+    }
+
+    pub fn strategy_name(&self) -> Option<&str> {
+        self.strategy
+            .as_ref()
+            .map(|strategy| strategy.name.as_str())
+    }
+
+    pub fn selected_strategy_profile(
+        &self,
+        active: &[StratId],
+    ) -> Result<Option<ResolvedStrategyProfile>> {
+        let requested = self
+            .strategy_name()
+            .ok_or_else(|| anyhow!("profile missing [strategy].name"))?
+            .to_ascii_lowercase();
+
+        let resolved = match requested.as_str() {
+            "bonereaper_v2" => {
+                if !active.iter().any(|s| *s == StratId::BonereaperV2) {
+                    return Ok(None);
+                }
+                self.bonereaper_v2
+                    .clone()
+                    .ok_or_else(|| anyhow!("bonereaper_v2 profile missing [bonereaper_v2] block"))?
+                    .into()
+            }
+            "back_to_explore" => {
+                if !active.iter().any(|s| *s == StratId::BackToExplore) {
+                    return Ok(None);
+                }
+                self.back_to_explore
+                    .clone()
+                    .ok_or_else(|| {
+                        anyhow!("back_to_explore profile missing [back_to_explore] block")
+                    })?
+                    .into()
+            }
+            other => {
+                return Err(anyhow!(
+                    "profile strategy '{}' does not match any known strategy (supported: bonereaper_v2, back_to_explore)",
+                    other
+                ));
+            }
+        };
+
+        Ok(Some(resolved))
+    }
+
+    pub fn warn_if_inactive(&self, active: &[StratId]) -> bool {
+        let Some(requested) = self
+            .strategy_name()
+            .map(|strategy| strategy.to_ascii_lowercase())
+        else {
+            return false;
+        };
+        if requested == "bonereaper_v2" {
+            !active.iter().any(|s| *s == StratId::BonereaperV2)
+        } else if requested == "back_to_explore" {
+            !active.iter().any(|s| *s == StratId::BackToExplore)
+        } else {
+            false
+        }
+    }
+
+    pub fn into_bonereaper_v2(self) -> Result<BonereaperV2Profile> {
+        match self.bonereaper_v2 {
+            Some(profile) => Ok(profile),
+            None => Err(anyhow!(
+                "requested strategy profile path is not a bonereaper_v2 profile"
+            )),
+        }
+    }
+}
+
+pub enum ResolvedStrategyProfile {
+    BonereaperV2(BonereaperV2Profile),
+    BackToExplore(BackToExploreProfile),
+}
+
+impl ResolvedStrategyProfile {
+    pub fn strategy_id(&self) -> StratId {
+        match self {
+            Self::BonereaperV2(_) => StratId::BonereaperV2,
+            Self::BackToExplore(_) => StratId::BackToExplore,
+        }
+    }
+
+    pub fn strategy_name(&self) -> &'static str {
+        self.strategy_id().name()
+    }
+
+    pub fn apply_to_walkforward_config(&self, cfg: &mut WalkForwardConfig) {
+        match self {
+            Self::BonereaperV2(profile) => profile.apply_to_walkforward_config(cfg),
+            Self::BackToExplore(profile) => profile.apply_to_walkforward_config(cfg),
+        }
+    }
+}
+
+impl From<BonereaperV2Profile> for ResolvedStrategyProfile {
+    fn from(profile: BonereaperV2Profile) -> Self {
+        Self::BonereaperV2(profile)
+    }
+}
+
+impl From<BackToExploreProfile> for ResolvedStrategyProfile {
+    fn from(profile: BackToExploreProfile) -> Self {
+        Self::BackToExplore(profile)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
@@ -450,6 +706,7 @@ pub enum StratId {
     DeltaNeutralMm,
     LateConfirmation,
     LateConvexTail,
+    BackToExplore,
     UnlawfulRecycler,
 }
 
@@ -469,6 +726,53 @@ impl VolatilityBand {
 }
 
 impl StratId {
+    pub const ACTIVE: [Self; 3] = [Self::BackToExplore, Self::PairedMm, Self::BonereaperV2];
+
+    pub const ARCHIVED: [Self; 9] = [
+        Self::BuyYesAtOpen,
+        Self::ReactiveDirectional,
+        Self::SpotMomentumFollower,
+        Self::LateBigBet,
+        Self::BonereaperLite,
+        Self::DeltaNeutralMm,
+        Self::LateConfirmation,
+        Self::LateConvexTail,
+        Self::UnlawfulRecycler,
+    ];
+
+    pub const ALL: [Self; 12] = [
+        Self::BuyYesAtOpen,
+        Self::ReactiveDirectional,
+        Self::SpotMomentumFollower,
+        Self::LateBigBet,
+        Self::BonereaperLite,
+        Self::DeltaNeutralMm,
+        Self::LateConfirmation,
+        Self::LateConvexTail,
+        Self::UnlawfulRecycler,
+        Self::PairedMm,
+        Self::BackToExplore,
+        Self::BonereaperV2,
+    ];
+
+    pub fn from_name(value: &str) -> Option<Self> {
+        match value {
+            "buy_yes_at_open" => Some(Self::BuyYesAtOpen),
+            "reactive_directional" => Some(Self::ReactiveDirectional),
+            "paired_mm" => Some(Self::PairedMm),
+            "spot_momentum_follower" => Some(Self::SpotMomentumFollower),
+            "late_big_bet" => Some(Self::LateBigBet),
+            "bonereaper_lite" => Some(Self::BonereaperLite),
+            "bonereaper_v2" => Some(Self::BonereaperV2),
+            "delta_neutral_mm" => Some(Self::DeltaNeutralMm),
+            "late_confirmation" => Some(Self::LateConfirmation),
+            "late_convex_tail" => Some(Self::LateConvexTail),
+            "back_to_explore" => Some(Self::BackToExplore),
+            "unlawful_recycler" => Some(Self::UnlawfulRecycler),
+            _ => None,
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             StratId::BuyYesAtOpen => "buy_yes_at_open",
@@ -481,8 +785,25 @@ impl StratId {
             StratId::DeltaNeutralMm => "delta_neutral_mm",
             StratId::LateConfirmation => "late_confirmation",
             StratId::LateConvexTail => "late_convex_tail",
+            StratId::BackToExplore => "back_to_explore",
             StratId::UnlawfulRecycler => "unlawful_recycler",
         }
+    }
+
+    pub fn active_names() -> Vec<&'static str> {
+        Self::ACTIVE.iter().map(|strat| strat.name()).collect()
+    }
+
+    pub fn archived_names() -> Vec<&'static str> {
+        Self::ARCHIVED.iter().map(|strat| strat.name()).collect()
+    }
+
+    pub fn all_names() -> Vec<&'static str> {
+        Self::ALL.iter().map(|strat| strat.name()).collect()
+    }
+
+    pub fn is_active(self) -> bool {
+        Self::ACTIVE.iter().any(|id| *id == self)
     }
 }
 
@@ -496,6 +817,10 @@ pub struct WalkForwardConfig {
     pub max_per_market_exposure_frac: Option<f64>,
     pub spot_symbol: String,
     pub strategies: Vec<StratId>,
+    pub low_vol_specialist_surface: Option<LowVolDecisionSurface>,
+    pub low_vol_specialist_min_edge: f64,
+    pub low_vol_specialist_min_legacy_edge: f64,
+    pub low_vol_specialist_max_depth: usize,
     pub max_concurrent_fetches: usize,
     /// Optional research-speed replay thinning. `0` keeps every raw event.
     /// Non-zero keeps first/last plus at most one event per interval.
@@ -530,6 +855,18 @@ pub struct WalkForwardConfig {
     /// Minimum multiplier after the hard drawdown threshold. Default `0.0`
     /// preserves hard-stop behavior; non-zero keeps a recovery-sized lane open.
     pub clip_drawdown_min_multiplier: f64,
+    /// Session-level drawdown where clips begin scaling down. Sessions reset
+    /// when the market date changes. Disabled when this is greater than or
+    /// equal to `clip_session_drawdown_hard_pct`.
+    pub clip_session_drawdown_soft_pct: f64,
+    /// Session-level drawdown where clips scale to the session floor.
+    pub clip_session_drawdown_hard_pct: f64,
+    /// Minimum multiplier after the session hard drawdown threshold.
+    pub clip_session_drawdown_min_multiplier: f64,
+    /// Daily loss cap as % of the day's starting bankroll (resets on calendar date change).
+    /// E.g. 0.05 caps losses at 5% of the equity at the start of the day. 1.0 disables.
+    /// Simple hard stop for the rest of the day once breached.
+    pub daily_loss_cap_pct: f64,
     pub br2_disable_internal_model_gates: bool,
     pub br2_participation_clip_frac: f32,
     pub br2_participation_max_pair_cost: f32,
@@ -634,6 +971,26 @@ pub struct WalkForwardConfig {
     pub br2_tail_regime_boost_min_reversal_pressure: f32,
     pub br2_tail_regime_boost_min_realized_vol_180s_bps: f32,
     pub br2_tail_regime_boost_max_path_efficiency: f32,
+    pub back_to_explore_base_clip_usdc: f64,
+    pub back_to_explore_max_clip_usdc: f64,
+    pub back_to_explore_min_pair_cost_for_two_sided: f64,
+    pub back_to_explore_pair_clip_multiplier: f64,
+    pub back_to_explore_directional_strength_mult: f64,
+    pub back_to_explore_residual_taper_start_frac: f64,
+    pub back_to_explore_residual_min_clip_multiplier: f64,
+    pub back_to_explore_max_residual_shares: f64,
+    pub back_to_explore_min_clip_multiplier_to_emit: f64,
+    pub back_to_explore_refresh_secs: f64,
+    pub back_to_explore_stop_secs_before_close: f32,
+    pub back_to_explore_min_entry_price: f32,
+    pub back_to_explore_max_entry_price: f32,
+    pub back_to_explore_sweep_depth: usize,
+    pub back_to_explore_high_activity_hours: Vec<u8>,
+    pub back_to_explore_base_participation_rate: f64,
+    pub back_to_explore_two_sided_preference: f64,
+    pub back_to_explore_target_risk_per_clip_frac: f64,
+    pub back_to_explore_base_target_net_shares: f64,
+    pub back_to_explore_good_hour_target_net_mult: f64,
     /// Phase-3 reversal-risk score modulators. OFF by default; inert defaults
     /// keep orders byte-identical to baseline.
     pub br2_reversal_score_enabled: bool,
@@ -643,6 +1000,21 @@ pub struct WalkForwardConfig {
     pub br2_reversal_score_cov_max: f32,
     pub br2_reversal_score_size_floor: f32,
     pub br2_reversal_score_size_ceiling: f32,
+    pub competitor_recycler_child_clip_shares: Option<f64>,
+    pub competitor_recycler_max_leg_shares: Option<f64>,
+    pub competitor_recycler_max_pair_cost: f64,
+    pub competitor_recycler_repair_delta_shares: Option<f64>,
+    pub competitor_recycler_lean_delta_shares: Option<f64>,
+    pub competitor_recycler_stop_secs_before_close: f32,
+    pub competitor_recycler_min_regime_realized_vol_180s_bps: f32,
+    pub competitor_recycler_min_regime_sign_flip_rate: f32,
+    pub competitor_recycler_max_regime_path_efficiency: f32,
+    pub competitor_recycler_max_abs_spot_flow_30s: f64,
+    pub competitor_recycler_stress_warmup_events: u64,
+    pub competitor_recycler_max_attractive_pair_frac_so_far: f64,
+    pub competitor_recycler_min_top_bid_ask_size_ratio: f64,
+    pub competitor_recycler_stress_clip_multiplier: f64,
+    pub competitor_recycler_quote_mode: String,
     pub enforce_model_gate: bool,
     pub model_gate_min_confidence: f32,
     pub model_gate_max_risk: f32,
@@ -706,6 +1078,10 @@ pub struct WalkForwardConfig {
     /// In portfolio mode, write partial outputs every N evaluated markets.
     /// Set to zero to disable checkpointing.
     pub portfolio_checkpoint_every_markets: usize,
+    /// Optional portfolio-mode per-decision JSONL path.
+    pub decision_log_jsonl: Option<PathBuf>,
+    /// Log every Nth replay event when `decision_log_jsonl` is set.
+    pub decision_log_every_n: usize,
     /// Optional per-market JSONL path used for portfolio checkpoints.
     pub checkpoint_markets_out: Option<PathBuf>,
     /// Optional summary JSON path used for portfolio checkpoints.
@@ -722,7 +1098,11 @@ impl Default for WalkForwardConfig {
             max_per_market_exposure_usdc: 50.0,
             max_per_market_exposure_frac: None,
             spot_symbol: "BTCUSDT".to_string(),
-            strategies: vec![StratId::ReactiveDirectional, StratId::PairedMm],
+            strategies: StratId::ACTIVE.to_vec(),
+            low_vol_specialist_surface: None,
+            low_vol_specialist_min_edge: 0.0,
+            low_vol_specialist_min_legacy_edge: f64::NEG_INFINITY,
+            low_vol_specialist_max_depth: 1,
             max_concurrent_fetches: 64,
             replay_sample_ms: 0,
             replay_event_cache_dir: None,
@@ -736,6 +1116,10 @@ impl Default for WalkForwardConfig {
             clip_drawdown_soft_pct: 1.0,
             clip_drawdown_hard_pct: 1.0,
             clip_drawdown_min_multiplier: 0.0,
+            clip_session_drawdown_soft_pct: 1.0,
+            clip_session_drawdown_hard_pct: 1.0,
+            clip_session_drawdown_min_multiplier: 0.0,
+            daily_loss_cap_pct: 1.0,
             br2_disable_internal_model_gates: false,
             br2_participation_clip_frac: 0.0,
             br2_participation_max_pair_cost: 0.99,
@@ -840,12 +1224,47 @@ impl Default for WalkForwardConfig {
             br2_tail_regime_boost_min_reversal_pressure: 1.0,
             br2_tail_regime_boost_min_realized_vol_180s_bps: 1.0e9,
             br2_tail_regime_boost_max_path_efficiency: -1.0,
+            back_to_explore_base_clip_usdc: 7.24,
+            back_to_explore_max_clip_usdc: 200.0,
+            back_to_explore_min_pair_cost_for_two_sided: 0.96,
+            back_to_explore_pair_clip_multiplier: 0.95,
+            back_to_explore_directional_strength_mult: 1.6,
+            back_to_explore_residual_taper_start_frac: 0.55,
+            back_to_explore_residual_min_clip_multiplier: 0.35,
+            back_to_explore_max_residual_shares: 120.0,
+            back_to_explore_min_clip_multiplier_to_emit: 0.18,
+            back_to_explore_refresh_secs: 2.8,
+            back_to_explore_stop_secs_before_close: 4.0,
+            back_to_explore_min_entry_price: 0.02,
+            back_to_explore_max_entry_price: 0.99,
+            back_to_explore_sweep_depth: 6,
+            back_to_explore_high_activity_hours: vec![14, 15, 16, 17, 18, 19],
+            back_to_explore_base_participation_rate: 0.90,
+            back_to_explore_two_sided_preference: 3.5,
+            back_to_explore_target_risk_per_clip_frac: 0.0025,
+            back_to_explore_base_target_net_shares: 6.0,
+            back_to_explore_good_hour_target_net_mult: 3.0,
             br2_reversal_score_enabled: false,
             br2_reversal_score_coeffs_path: None,
             br2_reversal_score_cov_min: f32::NAN,
             br2_reversal_score_cov_max: f32::NAN,
             br2_reversal_score_size_floor: 1.0,
             br2_reversal_score_size_ceiling: 1.0,
+            competitor_recycler_child_clip_shares: None,
+            competitor_recycler_max_leg_shares: None,
+            competitor_recycler_max_pair_cost: 0.970,
+            competitor_recycler_repair_delta_shares: None,
+            competitor_recycler_lean_delta_shares: None,
+            competitor_recycler_stop_secs_before_close: 30.0,
+            competitor_recycler_min_regime_realized_vol_180s_bps: 0.0,
+            competitor_recycler_min_regime_sign_flip_rate: 0.0,
+            competitor_recycler_max_regime_path_efficiency: 1.0,
+            competitor_recycler_max_abs_spot_flow_30s: f64::INFINITY,
+            competitor_recycler_stress_warmup_events: 20,
+            competitor_recycler_max_attractive_pair_frac_so_far: f64::INFINITY,
+            competitor_recycler_min_top_bid_ask_size_ratio: 0.0,
+            competitor_recycler_stress_clip_multiplier: 0.0,
+            competitor_recycler_quote_mode: "passive_bid".to_string(),
             enforce_model_gate: true,
             model_gate_min_confidence: 0.68,
             model_gate_max_risk: 0.72,
@@ -873,8 +1292,44 @@ impl Default for WalkForwardConfig {
             forbid_meta_training: false,
             enable_meta_calibration: true,
             portfolio_checkpoint_every_markets: 0,
+            decision_log_jsonl: None,
+            decision_log_every_n: 1,
             checkpoint_markets_out: None,
             checkpoint_summary_out: None,
+        }
+    }
+}
+
+impl WalkForwardConfig {
+    fn build_back_to_explore_config(
+        &self,
+        clip: f64,
+        market_window_ns: i64,
+    ) -> BackToExploreConfig {
+        let base_clip_usdc = (clip.max(self.back_to_explore_base_clip_usdc).max(4.0))
+            .min(self.back_to_explore_max_clip_usdc);
+        BackToExploreConfig {
+            base_clip_usdc,
+            max_clip_usdc: self.back_to_explore_max_clip_usdc,
+            min_pair_cost_for_two_sided: self.back_to_explore_min_pair_cost_for_two_sided,
+            pair_clip_multiplier: self.back_to_explore_pair_clip_multiplier,
+            directional_strength_mult: self.back_to_explore_directional_strength_mult,
+            residual_taper_start_frac: self.back_to_explore_residual_taper_start_frac,
+            residual_min_clip_multiplier: self.back_to_explore_residual_min_clip_multiplier,
+            max_residual_shares: self.back_to_explore_max_residual_shares,
+            min_clip_multiplier_to_emit: self.back_to_explore_min_clip_multiplier_to_emit,
+            refresh_secs: self.back_to_explore_refresh_secs,
+            stop_secs_before_close: self.back_to_explore_stop_secs_before_close,
+            min_entry_price: self.back_to_explore_min_entry_price,
+            max_entry_price: self.back_to_explore_max_entry_price,
+            sweep_depth: self.back_to_explore_sweep_depth,
+            market_window_ns,
+            high_activity_hours: self.back_to_explore_high_activity_hours.clone(),
+            base_participation_rate: self.back_to_explore_base_participation_rate,
+            two_sided_preference: self.back_to_explore_two_sided_preference,
+            target_risk_per_clip_frac: self.back_to_explore_target_risk_per_clip_frac,
+            base_target_net_shares: self.back_to_explore_base_target_net_shares,
+            good_hour_target_net_mult: self.back_to_explore_good_hour_target_net_mult,
         }
     }
 }
@@ -925,14 +1380,29 @@ pub struct StrategyMarketResult {
     pub model_training_samples: Vec<MetaTrainingSample>,
 }
 
+fn market_duration_secs_from_slug(slug: &str) -> i64 {
+    let slug = slug.to_ascii_lowercase();
+    if slug.contains("-updown-15m-") {
+        900
+    } else if slug.contains("-updown-4h-") {
+        14_400
+    } else {
+        300
+    }
+}
+
 fn market_open_ts(m: &MarketHandle) -> i64 {
-    parse_close_ts(&m.slug).unwrap_or_else(|| m.close_ts.saturating_sub(300))
+    parse_close_ts(&m.slug).unwrap_or_else(|| {
+        m.close_ts
+            .saturating_sub(market_duration_secs_from_slug(&m.slug))
+    })
 }
 
 fn market_close_ts(m: &MarketHandle) -> i64 {
     let open_ts = market_open_ts(m);
+    let duration_secs = market_duration_secs_from_slug(&m.slug);
     if m.close_ts <= open_ts {
-        open_ts.saturating_add(300)
+        open_ts.saturating_add(duration_secs)
     } else {
         m.close_ts
     }
@@ -944,6 +1414,30 @@ fn market_open_ns(m: &MarketHandle) -> i64 {
 
 fn market_close_ns(m: &MarketHandle) -> i64 {
     market_close_ts(m).saturating_mul(1_000_000_000)
+}
+
+fn outcome_label_resolved_yes(outcome: &str) -> Option<bool> {
+    if outcome.eq_ignore_ascii_case("up") || outcome.eq_ignore_ascii_case("yes") {
+        Some(true)
+    } else if outcome.eq_ignore_ascii_case("down") || outcome.eq_ignore_ascii_case("no") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+pub(crate) fn validate_outcome_labels(markets: &[MarketHandle]) -> Result<()> {
+    let invalid = markets
+        .iter()
+        .find(|market| outcome_label_resolved_yes(&market.outcome).is_none());
+    if let Some(market) = invalid {
+        return Err(anyhow!(
+            "--use-outcome-label requires explicit Up/Down outcome labels; market {} has outcome={:?}",
+            market.slug,
+            market.outcome
+        ));
+    }
+    Ok(())
 }
 
 fn prior_market_range_mean(results: &[MarketResult], window: usize) -> f32 {
@@ -981,12 +1475,24 @@ pub struct WalkForwardSummary {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SummaryRunConfig {
+    /// Controls shared by every strategy at runtime.
+    pub shared: SharedRunConfig,
+    /// Strategy-specific runtime knobs included only for strategies included in
+    /// the requested strategy set.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub strategies: Vec<StrategyRunConfig>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SharedRunConfig {
     pub starting_cash_usdc: f64,
     pub kelly_fraction: f64,
     pub max_clip_usdc: f64,
     pub max_order_clip_multiplier: f64,
     pub max_per_market_exposure_usdc: f64,
     pub max_per_market_exposure_frac: Option<f64>,
+    pub spot_symbol: String,
+    pub portfolio_mode: bool,
     pub max_concurrent_fetches: usize,
     pub replay_sample_ms: u64,
     pub taker_latency_ms: u64,
@@ -996,110 +1502,29 @@ pub struct SummaryRunConfig {
     pub clip_drawdown_soft_pct: f64,
     pub clip_drawdown_hard_pct: f64,
     pub clip_drawdown_min_multiplier: f64,
-    pub br2_disable_internal_model_gates: bool,
-    pub br2_participation_clip_frac: f32,
-    pub br2_participation_max_pair_cost: f32,
-    pub br2_participation_max_orders_per_leg: usize,
-    pub br2_participation_max_inventory_delta_shares: f64,
-    pub br2_participation_repair_inventory_delta_shares: f64,
-    pub br2_participation_refresh_secs: f32,
-    pub br2_participation_stop_secs_before_close: f32,
-    pub br2_hedged_base_enabled: bool,
-    pub br2_hedged_base_max_secs_in: f32,
-    pub br2_hedged_base_max_pair_cost: f32,
-    pub br2_hedged_base_min_minority_leg_frac: f32,
-    pub br2_hedged_base_clip_usdc: f32,
-    pub br2_hedged_base_max_notional_usdc: f32,
-    pub br2_late_directional_overlay_frac: f32,
-    pub br2_min_composite_direction: f32,
-    pub br2_early_clip_frac: f32,
-    pub br2_mid_clip_frac: f32,
-    pub br2_late_clip_frac: f32,
-    pub br2_late_max_fires: usize,
-    pub br2_late_confirm_min_model_confidence: f32,
-    pub br2_late_confirm_max_model_risk: f32,
-    pub br2_late_confirm_min_model_side_p: f32,
-    pub br2_late_confirm_min_model_edge: f32,
-    pub br2_late_confirm_min_book_skew: f32,
-    pub br2_late_confirm_max_whipsaw_score: f32,
-    pub br2_late_confirm_min_realized_vol_180s_bps: f32,
-    pub br2_late_confirm_max_observed_range: f32,
-    pub br2_recent_regime_gate_enabled: bool,
-    pub br2_recent_regime_gate_min_edge: f32,
-    pub br2_recent_regime_gate_late_confirm: bool,
-    pub br2_recent_regime_gate_high_skew: bool,
-    pub br2_recent_regime_gate_late_favourite: bool,
-    pub br2_high_skew_clip_frac: f32,
-    pub br2_lane_size_late_favourite: f32,
-    pub br2_lane_size_late_confirm: f32,
-    pub br2_lane_size_high_skew: f32,
-    pub br2_regime_gate_enabled: bool,
-    pub br2_regime_gate_window: u8,
-    pub br2_regime_gate_threshold: f32,
-    pub br2_regime_gate_soft_band: f32,
-    pub br2_regime_gate_lane_floor: f32,
-    pub br2_regime_gate_whipsaw_weight: f32,
-    pub br2_high_skew_max_clips: usize,
-    pub br2_high_skew_max_whipsaw_score: f32,
-    pub br2_high_skew_min_realized_vol_180s_bps: f32,
-    pub br2_late_favourite_start_secs: f32,
-    pub br2_late_favourite_threshold: f32,
-    pub br2_late_favourite_min_ask: f32,
-    pub br2_late_favourite_max_ask: f32,
-    pub br2_late_favourite_clip_frac: f32,
-    pub br2_late_favourite_high_cert_clip_frac: f32,
-    pub br2_late_favourite_high_cert_full_clip_edge: f32,
-    pub br2_late_favourite_fragile_high_cert_ask: f32,
-    pub br2_late_favourite_fragile_high_cert_max_edge: f32,
-    pub br2_late_favourite_fragile_high_cert_max_path_efficiency: f32,
-    pub br2_late_favourite_fragile_high_cert_size_frac: f32,
-    pub br2_late_favourite_max_clips: usize,
-    pub br2_late_favourite_min_sustain_secs: f32,
-    pub br2_late_favourite_sweep_depth: usize,
-    pub br2_late_favourite_min_model_confidence: f32,
-    pub br2_late_favourite_min_model_direction_abs: f32,
-    pub br2_late_favourite_max_model_risk: f32,
-    pub br2_late_favourite_min_model_side_p: f32,
-    pub br2_late_favourite_min_model_edge: f32,
-    pub br2_late_favourite_high_cert_min_model_edge: f32,
-    pub br2_late_favourite_high_cert_bypass_model_edge: bool,
-    pub br2_late_favourite_max_whipsaw_score: f32,
-    pub br2_late_favourite_max_reversal_pressure: f32,
-    pub br2_late_favourite_min_path_efficiency: f32,
-    pub br2_late_favourite_min_realized_vol_180s_bps: f32,
-    pub br2_late_favourite_max_observed_range: f32,
-    pub br2_late_favourite_range_soft_throttle: f32,
-    pub br2_late_favourite_range_hard_throttle: f32,
-    pub br2_late_favourite_range_extra_edge: f32,
-    pub br2_late_favourite_range_extra_confidence: f32,
-    pub br2_late_favourite_max_adverse_fast_momentum: f32,
-    pub br2_late_favourite_max_adverse_broad_momentum: f32,
-    pub br2_late_favourite_max_entry_pullback: f32,
-    pub br2_late_favourite_max_avg_entry_drawdown: f32,
-    pub br2_tail_clip_frac: f32,
-    pub br2_tail_max_clips: usize,
-    pub br2_tail_sweep_depth: usize,
-    pub br2_tail_min_ask: f32,
-    pub br2_tail_max_ask: f32,
-    pub br2_tail_min_seconds_to_close: f32,
-    pub br2_tail_min_favourite_unrealized_edge: f32,
-    pub br2_tail_min_observed_range: f32,
-    pub br2_tail_target_favourite_loss_coverage_frac: f32,
-    pub br2_tail_reversal_coverage_frac: f32,
-    pub br2_tail_reversal_min_seconds_to_close: f32,
-    pub br2_tail_reversal_max_seconds_to_close: f32,
-    pub br2_tail_reversal_min_favourite_ask: f32,
-    pub br2_tail_extreme_threshold: f32,
-    pub br2_tail_min_skew_step: f32,
-    pub br2_tail_budget_favourite_spend_frac: f32,
-    pub br2_tail_budget_favourite_upside_frac: f32,
-    pub br2_tail_regime_boost_coverage_frac: f32,
-    pub br2_tail_regime_boost_budget_spend_frac: f32,
-    pub br2_tail_regime_boost_budget_upside_frac: f32,
-    pub br2_tail_regime_boost_min_whipsaw_score: f32,
-    pub br2_tail_regime_boost_min_reversal_pressure: f32,
-    pub br2_tail_regime_boost_min_realized_vol_180s_bps: f32,
-    pub br2_tail_regime_boost_max_path_efficiency: f32,
+    pub clip_session_drawdown_soft_pct: f64,
+    pub clip_session_drawdown_hard_pct: f64,
+    pub clip_session_drawdown_min_multiplier: f64,
+    pub daily_loss_cap_pct: f64,
+    pub low_vol_specialist_surface_loaded: bool,
+    pub low_vol_specialist_min_edge: f64,
+    pub low_vol_specialist_min_legacy_edge: f64,
+    pub low_vol_specialist_max_depth: usize,
+    pub competitor_recycler_child_clip_shares: Option<f64>,
+    pub competitor_recycler_max_leg_shares: Option<f64>,
+    pub competitor_recycler_max_pair_cost: f64,
+    pub competitor_recycler_repair_delta_shares: Option<f64>,
+    pub competitor_recycler_lean_delta_shares: Option<f64>,
+    pub competitor_recycler_stop_secs_before_close: f32,
+    pub competitor_recycler_min_regime_realized_vol_180s_bps: f32,
+    pub competitor_recycler_min_regime_sign_flip_rate: f32,
+    pub competitor_recycler_max_regime_path_efficiency: f32,
+    pub competitor_recycler_max_abs_spot_flow_30s: f64,
+    pub competitor_recycler_stress_warmup_events: u64,
+    pub competitor_recycler_max_attractive_pair_frac_so_far: f64,
+    pub competitor_recycler_min_top_bid_ask_size_ratio: f64,
+    pub competitor_recycler_stress_clip_multiplier: f64,
+    pub competitor_recycler_quote_mode: String,
     pub enforce_model_gate: bool,
     pub model_gate_min_confidence: f32,
     pub model_gate_max_risk: f32,
@@ -1108,11 +1533,19 @@ pub struct SummaryRunConfig {
     pub model_btc_path_inefficiency_risk_weight: f32,
     pub model_btc_reversal_pressure_risk_weight: f32,
     pub enable_market_context_features: bool,
-    pub min_train_markets: usize,
-    pub meta_epochs: usize,
-    pub meta_learning_rate: f32,
-    pub meta_l2: f32,
-    pub meta_weight_clip: f32,
+    pub volatility_regime_threshold: f64,
+    pub walk_forward_folds: Option<usize>,
+    pub fold_size: Option<usize>,
+    pub purge_markets: usize,
+    pub use_outcome_label: bool,
+    pub maker_rebate_bps: f64,
+    pub taker_fee_bps: f64,
+    pub maker_rebates: Option<f64>,
+    pub decision_log_every_n: usize,
+    pub portfolio_checkpoint_every_markets: usize,
+    pub decision_log_jsonl: Option<String>,
+    pub checkpoint_markets_out: Option<String>,
+    pub checkpoint_summary_out: Option<String>,
     pub meta_max_fit_samples: usize,
     pub meta_max_validation_samples: usize,
     pub meta_max_samples_per_market: usize,
@@ -1120,7 +1553,430 @@ pub struct SummaryRunConfig {
     pub meta_train_min_base_p: f32,
     pub meta_train_max_early_penalty: f32,
     pub meta_train_min_mid_distance: f32,
+    pub min_train_markets: usize,
+    pub meta_training_config: MetaTrainingConfig,
+    pub meta_training_samples_cache: Option<String>,
+    pub meta_calibrator_snapshot_in: Option<String>,
+    pub meta_calibrator_snapshot_out: Option<String>,
     pub enable_meta_calibration: bool,
+    pub forbid_meta_training: bool,
+}
+
+impl From<&WalkForwardConfig> for SharedRunConfig {
+    fn from(cfg: &WalkForwardConfig) -> Self {
+        Self {
+            starting_cash_usdc: cfg.starting_cash_usdc,
+            kelly_fraction: cfg.kelly_fraction,
+            max_clip_usdc: cfg.max_clip_usdc,
+            max_order_clip_multiplier: cfg.max_order_clip_multiplier,
+            max_per_market_exposure_usdc: cfg.max_per_market_exposure_usdc,
+            max_per_market_exposure_frac: cfg.max_per_market_exposure_frac,
+            spot_symbol: cfg.spot_symbol.clone(),
+            portfolio_mode: cfg.portfolio_mode,
+            max_concurrent_fetches: cfg.max_concurrent_fetches,
+            replay_sample_ms: cfg.replay_sample_ms,
+            taker_latency_ms: cfg.taker_latency_ms,
+            replay_event_cache_dir: cfg
+                .replay_event_cache_dir
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string()),
+            load_pm_trades: cfg.load_pm_trades,
+            clip_fraction_of_equity: cfg.clip_fraction_of_equity,
+            clip_drawdown_soft_pct: cfg.clip_drawdown_soft_pct,
+            clip_drawdown_hard_pct: cfg.clip_drawdown_hard_pct,
+            clip_drawdown_min_multiplier: cfg.clip_drawdown_min_multiplier,
+            clip_session_drawdown_soft_pct: cfg.clip_session_drawdown_soft_pct,
+            clip_session_drawdown_hard_pct: cfg.clip_session_drawdown_hard_pct,
+            clip_session_drawdown_min_multiplier: cfg.clip_session_drawdown_min_multiplier,
+            daily_loss_cap_pct: cfg.daily_loss_cap_pct,
+            low_vol_specialist_surface_loaded: cfg.low_vol_specialist_surface.is_some(),
+            low_vol_specialist_min_edge: cfg.low_vol_specialist_min_edge,
+            low_vol_specialist_min_legacy_edge: cfg.low_vol_specialist_min_legacy_edge,
+            low_vol_specialist_max_depth: cfg.low_vol_specialist_max_depth,
+            competitor_recycler_child_clip_shares: cfg.competitor_recycler_child_clip_shares,
+            competitor_recycler_max_leg_shares: cfg.competitor_recycler_max_leg_shares,
+            competitor_recycler_max_pair_cost: cfg.competitor_recycler_max_pair_cost,
+            competitor_recycler_repair_delta_shares: cfg.competitor_recycler_repair_delta_shares,
+            competitor_recycler_lean_delta_shares: cfg.competitor_recycler_lean_delta_shares,
+            competitor_recycler_stop_secs_before_close: cfg
+                .competitor_recycler_stop_secs_before_close,
+            competitor_recycler_min_regime_realized_vol_180s_bps: cfg
+                .competitor_recycler_min_regime_realized_vol_180s_bps,
+            competitor_recycler_min_regime_sign_flip_rate: cfg
+                .competitor_recycler_min_regime_sign_flip_rate,
+            competitor_recycler_max_regime_path_efficiency: cfg
+                .competitor_recycler_max_regime_path_efficiency,
+            competitor_recycler_max_abs_spot_flow_30s: cfg
+                .competitor_recycler_max_abs_spot_flow_30s,
+            competitor_recycler_stress_warmup_events: cfg.competitor_recycler_stress_warmup_events,
+            competitor_recycler_max_attractive_pair_frac_so_far: cfg
+                .competitor_recycler_max_attractive_pair_frac_so_far,
+            competitor_recycler_min_top_bid_ask_size_ratio: cfg
+                .competitor_recycler_min_top_bid_ask_size_ratio,
+            competitor_recycler_stress_clip_multiplier: cfg
+                .competitor_recycler_stress_clip_multiplier,
+            competitor_recycler_quote_mode: cfg.competitor_recycler_quote_mode.clone(),
+            enforce_model_gate: cfg.enforce_model_gate,
+            model_gate_min_confidence: cfg.model_gate_min_confidence,
+            model_gate_max_risk: cfg.model_gate_max_risk,
+            model_gate_min_edge: cfg.model_gate_min_edge,
+            model_btc_whipsaw_risk_weight: cfg.model_btc_whipsaw_risk_weight,
+            model_btc_path_inefficiency_risk_weight: cfg.model_btc_path_inefficiency_risk_weight,
+            model_btc_reversal_pressure_risk_weight: cfg.model_btc_reversal_pressure_risk_weight,
+            enable_market_context_features: cfg.enable_market_context_features,
+            volatility_regime_threshold: cfg.volatility_regime_threshold,
+            walk_forward_folds: cfg.walk_forward_folds,
+            fold_size: cfg.fold_size,
+            purge_markets: cfg.purge_markets,
+            meta_max_fit_samples: cfg.meta_max_fit_samples,
+            meta_max_validation_samples: cfg.meta_max_validation_samples,
+            meta_max_samples_per_market: cfg.meta_max_samples_per_market,
+            meta_max_oos_evaluation_samples: cfg.meta_max_oos_evaluation_samples,
+            meta_train_min_base_p: cfg.meta_train_min_base_p,
+            meta_train_max_early_penalty: cfg.meta_train_max_early_penalty,
+            meta_train_min_mid_distance: cfg.meta_train_min_mid_distance,
+            min_train_markets: cfg.min_train_markets,
+            meta_training_config: cfg.meta_training_config,
+            meta_training_samples_cache: cfg
+                .meta_training_samples_cache
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string()),
+            meta_calibrator_snapshot_in: cfg
+                .meta_calibrator_snapshot_in
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string()),
+            meta_calibrator_snapshot_out: cfg
+                .meta_calibrator_snapshot_out
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string()),
+            enable_meta_calibration: cfg.enable_meta_calibration,
+            forbid_meta_training: cfg.forbid_meta_training,
+            decision_log_every_n: cfg.decision_log_every_n,
+            portfolio_checkpoint_every_markets: cfg.portfolio_checkpoint_every_markets,
+            decision_log_jsonl: cfg
+                .decision_log_jsonl
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string()),
+            checkpoint_markets_out: cfg
+                .checkpoint_markets_out
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string()),
+            checkpoint_summary_out: cfg
+                .checkpoint_summary_out
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string()),
+            use_outcome_label: cfg.use_outcome_label,
+            maker_rebate_bps: cfg.maker_rebate_bps,
+            taker_fee_bps: cfg.taker_fee_bps,
+            maker_rebates: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BonereaperV2SummaryConfig {
+    pub disable_internal_model_gates: bool,
+    pub participation_clip_frac: f32,
+    pub participation_max_pair_cost: f32,
+    pub participation_max_orders_per_leg: usize,
+    pub participation_max_inventory_delta_shares: f64,
+    pub participation_repair_inventory_delta_shares: f64,
+    pub participation_refresh_secs: f32,
+    pub participation_stop_secs_before_close: f32,
+    pub hedged_base_enabled: bool,
+    pub hedged_base_max_secs_in: f32,
+    pub hedged_base_max_pair_cost: f32,
+    pub hedged_base_min_minority_leg_frac: f32,
+    pub hedged_base_clip_usdc: f32,
+    pub hedged_base_max_notional_usdc: f32,
+    pub late_directional_overlay_frac: f32,
+    pub min_composite_direction: f32,
+    pub early_clip_frac: f32,
+    pub mid_clip_frac: f32,
+    pub late_clip_frac: f32,
+    pub late_max_fires: usize,
+    pub late_confirm_min_model_confidence: f32,
+    pub late_confirm_max_model_risk: f32,
+    pub late_confirm_min_model_side_p: f32,
+    pub late_confirm_min_model_edge: f32,
+    pub late_confirm_min_book_skew: f32,
+    pub late_confirm_max_whipsaw_score: f32,
+    pub late_confirm_min_realized_vol_180s_bps: f32,
+    pub late_confirm_max_observed_range: f32,
+    pub recent_regime_gate_enabled: bool,
+    pub recent_regime_gate_min_edge: f32,
+    pub recent_regime_gate_late_confirm: bool,
+    pub recent_regime_gate_high_skew: bool,
+    pub recent_regime_gate_late_favourite: bool,
+    pub high_skew_clip_frac: f32,
+    pub lane_size_late_favourite: f32,
+    pub lane_size_late_confirm: f32,
+    pub lane_size_high_skew: f32,
+    pub regime_gate_enabled: bool,
+    pub regime_gate_window: u8,
+    pub regime_gate_threshold: f32,
+    pub regime_gate_soft_band: f32,
+    pub regime_gate_lane_floor: f32,
+    pub regime_gate_whipsaw_weight: f32,
+    pub high_skew_max_clips: usize,
+    pub high_skew_max_whipsaw_score: f32,
+    pub high_skew_min_realized_vol_180s_bps: f32,
+    pub late_favourite_start_secs: f32,
+    pub late_favourite_threshold: f32,
+    pub late_favourite_min_ask: f32,
+    pub late_favourite_max_ask: f32,
+    pub late_favourite_clip_frac: f32,
+    pub late_favourite_high_cert_clip_frac: f32,
+    pub late_favourite_high_cert_full_clip_edge: f32,
+    pub late_favourite_fragile_high_cert_ask: f32,
+    pub late_favourite_fragile_high_cert_max_edge: f32,
+    pub late_favourite_fragile_high_cert_max_path_efficiency: f32,
+    pub late_favourite_fragile_high_cert_size_frac: f32,
+    pub late_favourite_max_clips: usize,
+    pub late_favourite_min_sustain_secs: f32,
+    pub late_favourite_sweep_depth: usize,
+    pub late_favourite_min_model_confidence: f32,
+    pub late_favourite_min_model_direction_abs: f32,
+    pub late_favourite_max_model_risk: f32,
+    pub late_favourite_min_model_side_p: f32,
+    pub late_favourite_min_model_edge: f32,
+    pub late_favourite_high_cert_min_model_edge: f32,
+    pub late_favourite_high_cert_bypass_model_edge: bool,
+    pub late_favourite_max_whipsaw_score: f32,
+    pub late_favourite_max_reversal_pressure: f32,
+    pub late_favourite_min_path_efficiency: f32,
+    pub late_favourite_min_realized_vol_180s_bps: f32,
+    pub late_favourite_max_observed_range: f32,
+    pub late_favourite_range_soft_throttle: f32,
+    pub late_favourite_range_hard_throttle: f32,
+    pub late_favourite_range_extra_edge: f32,
+    pub late_favourite_range_extra_confidence: f32,
+    pub late_favourite_max_adverse_fast_momentum: f32,
+    pub late_favourite_max_adverse_broad_momentum: f32,
+    pub late_favourite_max_entry_pullback: f32,
+    pub late_favourite_max_avg_entry_drawdown: f32,
+    pub tail_clip_frac: f32,
+    pub tail_max_clips: usize,
+    pub tail_sweep_depth: usize,
+    pub tail_min_ask: f32,
+    pub tail_max_ask: f32,
+    pub tail_min_seconds_to_close: f32,
+    pub tail_min_favourite_unrealized_edge: f32,
+    pub tail_min_observed_range: f32,
+    pub tail_target_favourite_loss_coverage_frac: f32,
+    pub tail_reversal_coverage_frac: f32,
+    pub tail_reversal_min_seconds_to_close: f32,
+    pub tail_reversal_max_seconds_to_close: f32,
+    pub tail_reversal_min_favourite_ask: f32,
+    pub tail_extreme_threshold: f32,
+    pub tail_min_skew_step: f32,
+    pub tail_budget_favourite_spend_frac: f32,
+    pub tail_budget_favourite_upside_frac: f32,
+    pub tail_regime_boost_coverage_frac: f32,
+    pub tail_regime_boost_budget_spend_frac: f32,
+    pub tail_regime_boost_budget_upside_frac: f32,
+    pub tail_regime_boost_min_whipsaw_score: f32,
+    pub tail_regime_boost_min_reversal_pressure: f32,
+    pub tail_regime_boost_min_realized_vol_180s_bps: f32,
+    pub tail_regime_boost_max_path_efficiency: f32,
+    pub reversal_score_enabled: bool,
+    pub reversal_score_cov_min: f32,
+    pub reversal_score_cov_max: f32,
+    pub reversal_score_size_floor: f32,
+    pub reversal_score_size_ceiling: f32,
+    pub reversal_score_coeffs_path: Option<String>,
+}
+
+impl From<&WalkForwardConfig> for BonereaperV2SummaryConfig {
+    fn from(cfg: &WalkForwardConfig) -> Self {
+        Self {
+            disable_internal_model_gates: cfg.br2_disable_internal_model_gates,
+            participation_clip_frac: cfg.br2_participation_clip_frac,
+            participation_max_pair_cost: cfg.br2_participation_max_pair_cost,
+            participation_max_orders_per_leg: cfg.br2_participation_max_orders_per_leg,
+            participation_max_inventory_delta_shares: cfg
+                .br2_participation_max_inventory_delta_shares,
+            participation_repair_inventory_delta_shares: cfg
+                .br2_participation_repair_inventory_delta_shares,
+            participation_refresh_secs: cfg.br2_participation_refresh_secs,
+            participation_stop_secs_before_close: cfg.br2_participation_stop_secs_before_close,
+            hedged_base_enabled: cfg.br2_hedged_base_enabled,
+            hedged_base_max_secs_in: cfg.br2_hedged_base_max_secs_in,
+            hedged_base_max_pair_cost: cfg.br2_hedged_base_max_pair_cost,
+            hedged_base_min_minority_leg_frac: cfg.br2_hedged_base_min_minority_leg_frac,
+            hedged_base_clip_usdc: cfg.br2_hedged_base_clip_usdc,
+            hedged_base_max_notional_usdc: cfg.br2_hedged_base_max_notional_usdc,
+            late_directional_overlay_frac: cfg.br2_late_directional_overlay_frac,
+            min_composite_direction: cfg.br2_min_composite_direction,
+            early_clip_frac: cfg.br2_early_clip_frac,
+            mid_clip_frac: cfg.br2_mid_clip_frac,
+            late_clip_frac: cfg.br2_late_clip_frac,
+            late_max_fires: cfg.br2_late_max_fires,
+            late_confirm_min_model_confidence: cfg.br2_late_confirm_min_model_confidence,
+            late_confirm_max_model_risk: cfg.br2_late_confirm_max_model_risk,
+            late_confirm_min_model_side_p: cfg.br2_late_confirm_min_model_side_p,
+            late_confirm_min_model_edge: cfg.br2_late_confirm_min_model_edge,
+            late_confirm_min_book_skew: cfg.br2_late_confirm_min_book_skew,
+            late_confirm_max_whipsaw_score: cfg.br2_late_confirm_max_whipsaw_score,
+            late_confirm_min_realized_vol_180s_bps: cfg.br2_late_confirm_min_realized_vol_180s_bps,
+            late_confirm_max_observed_range: cfg.br2_late_confirm_max_observed_range,
+            recent_regime_gate_enabled: cfg.br2_recent_regime_gate_enabled,
+            recent_regime_gate_min_edge: cfg.br2_recent_regime_gate_min_edge,
+            recent_regime_gate_late_confirm: cfg.br2_recent_regime_gate_late_confirm,
+            recent_regime_gate_high_skew: cfg.br2_recent_regime_gate_high_skew,
+            recent_regime_gate_late_favourite: cfg.br2_recent_regime_gate_late_favourite,
+            high_skew_clip_frac: cfg.br2_high_skew_clip_frac,
+            lane_size_late_favourite: cfg.br2_lane_size_late_favourite,
+            lane_size_late_confirm: cfg.br2_lane_size_late_confirm,
+            lane_size_high_skew: cfg.br2_lane_size_high_skew,
+            regime_gate_enabled: cfg.br2_regime_gate_enabled,
+            regime_gate_window: cfg.br2_regime_gate_window,
+            regime_gate_threshold: cfg.br2_regime_gate_threshold,
+            regime_gate_soft_band: cfg.br2_regime_gate_soft_band,
+            regime_gate_lane_floor: cfg.br2_regime_gate_lane_floor,
+            regime_gate_whipsaw_weight: cfg.br2_regime_gate_whipsaw_weight,
+            high_skew_max_clips: cfg.br2_high_skew_max_clips,
+            high_skew_max_whipsaw_score: cfg.br2_high_skew_max_whipsaw_score,
+            high_skew_min_realized_vol_180s_bps: cfg.br2_high_skew_min_realized_vol_180s_bps,
+            late_favourite_start_secs: cfg.br2_late_favourite_start_secs,
+            late_favourite_threshold: cfg.br2_late_favourite_threshold,
+            late_favourite_min_ask: cfg.br2_late_favourite_min_ask,
+            late_favourite_max_ask: cfg.br2_late_favourite_max_ask,
+            late_favourite_clip_frac: cfg.br2_late_favourite_clip_frac,
+            late_favourite_high_cert_clip_frac: cfg.br2_late_favourite_high_cert_clip_frac,
+            late_favourite_high_cert_full_clip_edge: cfg
+                .br2_late_favourite_high_cert_full_clip_edge,
+            late_favourite_fragile_high_cert_ask: cfg.br2_late_favourite_fragile_high_cert_ask,
+            late_favourite_fragile_high_cert_max_edge: cfg
+                .br2_late_favourite_fragile_high_cert_max_edge,
+            late_favourite_fragile_high_cert_max_path_efficiency: cfg
+                .br2_late_favourite_fragile_high_cert_max_path_efficiency,
+            late_favourite_fragile_high_cert_size_frac: cfg
+                .br2_late_favourite_fragile_high_cert_size_frac,
+            late_favourite_max_clips: cfg.br2_late_favourite_max_clips,
+            late_favourite_min_sustain_secs: cfg.br2_late_favourite_min_sustain_secs,
+            late_favourite_sweep_depth: cfg.br2_late_favourite_sweep_depth,
+            late_favourite_min_model_confidence: cfg.br2_late_favourite_min_model_confidence,
+            late_favourite_min_model_direction_abs: cfg.br2_late_favourite_min_model_direction_abs,
+            late_favourite_max_model_risk: cfg.br2_late_favourite_max_model_risk,
+            late_favourite_min_model_side_p: cfg.br2_late_favourite_min_model_side_p,
+            late_favourite_min_model_edge: cfg.br2_late_favourite_min_model_edge,
+            late_favourite_high_cert_min_model_edge: cfg
+                .br2_late_favourite_high_cert_min_model_edge,
+            late_favourite_high_cert_bypass_model_edge: cfg
+                .br2_late_favourite_high_cert_bypass_model_edge,
+            late_favourite_max_whipsaw_score: cfg.br2_late_favourite_max_whipsaw_score,
+            late_favourite_max_reversal_pressure: cfg.br2_late_favourite_max_reversal_pressure,
+            late_favourite_min_path_efficiency: cfg.br2_late_favourite_min_path_efficiency,
+            late_favourite_min_realized_vol_180s_bps: cfg
+                .br2_late_favourite_min_realized_vol_180s_bps,
+            late_favourite_max_observed_range: cfg.br2_late_favourite_max_observed_range,
+            late_favourite_range_soft_throttle: cfg.br2_late_favourite_range_soft_throttle,
+            late_favourite_range_hard_throttle: cfg.br2_late_favourite_range_hard_throttle,
+            late_favourite_range_extra_edge: cfg.br2_late_favourite_range_extra_edge,
+            late_favourite_range_extra_confidence: cfg.br2_late_favourite_range_extra_confidence,
+            late_favourite_max_adverse_fast_momentum: cfg
+                .br2_late_favourite_max_adverse_fast_momentum,
+            late_favourite_max_adverse_broad_momentum: cfg
+                .br2_late_favourite_max_adverse_broad_momentum,
+            late_favourite_max_entry_pullback: cfg.br2_late_favourite_max_entry_pullback,
+            late_favourite_max_avg_entry_drawdown: cfg.br2_late_favourite_max_avg_entry_drawdown,
+            tail_clip_frac: cfg.br2_tail_clip_frac,
+            tail_max_clips: cfg.br2_tail_max_clips,
+            tail_sweep_depth: cfg.br2_tail_sweep_depth,
+            tail_min_ask: cfg.br2_tail_min_ask,
+            tail_max_ask: cfg.br2_tail_max_ask,
+            tail_min_seconds_to_close: cfg.br2_tail_min_seconds_to_close,
+            tail_min_favourite_unrealized_edge: cfg.br2_tail_min_favourite_unrealized_edge,
+            tail_min_observed_range: cfg.br2_tail_min_observed_range,
+            tail_target_favourite_loss_coverage_frac: cfg
+                .br2_tail_target_favourite_loss_coverage_frac,
+            tail_reversal_coverage_frac: cfg.br2_tail_reversal_coverage_frac,
+            tail_reversal_min_seconds_to_close: cfg.br2_tail_reversal_min_seconds_to_close,
+            tail_reversal_max_seconds_to_close: cfg.br2_tail_reversal_max_seconds_to_close,
+            tail_reversal_min_favourite_ask: cfg.br2_tail_reversal_min_favourite_ask,
+            tail_extreme_threshold: cfg.br2_tail_extreme_threshold,
+            tail_min_skew_step: cfg.br2_tail_min_skew_step,
+            tail_budget_favourite_spend_frac: cfg.br2_tail_budget_favourite_spend_frac,
+            tail_budget_favourite_upside_frac: cfg.br2_tail_budget_favourite_upside_frac,
+            tail_regime_boost_coverage_frac: cfg.br2_tail_regime_boost_coverage_frac,
+            tail_regime_boost_budget_spend_frac: cfg.br2_tail_regime_boost_budget_spend_frac,
+            tail_regime_boost_budget_upside_frac: cfg.br2_tail_regime_boost_budget_upside_frac,
+            tail_regime_boost_min_whipsaw_score: cfg.br2_tail_regime_boost_min_whipsaw_score,
+            tail_regime_boost_min_reversal_pressure: cfg
+                .br2_tail_regime_boost_min_reversal_pressure,
+            tail_regime_boost_min_realized_vol_180s_bps: cfg
+                .br2_tail_regime_boost_min_realized_vol_180s_bps,
+            tail_regime_boost_max_path_efficiency: cfg.br2_tail_regime_boost_max_path_efficiency,
+            reversal_score_enabled: cfg.br2_reversal_score_enabled,
+            reversal_score_cov_min: cfg.br2_reversal_score_cov_min,
+            reversal_score_cov_max: cfg.br2_reversal_score_cov_max,
+            reversal_score_size_floor: cfg.br2_reversal_score_size_floor,
+            reversal_score_size_ceiling: cfg.br2_reversal_score_size_ceiling,
+            reversal_score_coeffs_path: cfg
+                .br2_reversal_score_coeffs_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StrategyRunConfig {
+    pub strategy: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BackToExploreSummaryConfig {
+    pub base_clip_usdc: f64,
+    pub max_clip_usdc: f64,
+    pub min_pair_cost_for_two_sided: f64,
+    pub pair_clip_multiplier: f64,
+    pub directional_strength_mult: f64,
+    pub residual_taper_start_frac: f64,
+    pub residual_min_clip_multiplier: f64,
+    pub max_residual_shares: f64,
+    pub min_clip_multiplier_to_emit: f64,
+    pub refresh_secs: f64,
+    pub stop_secs_before_close: f32,
+    pub min_entry_price: f32,
+    pub max_entry_price: f32,
+    pub sweep_depth: usize,
+    pub high_activity_hours: Vec<u8>,
+    pub base_participation_rate: f64,
+    pub two_sided_preference: f64,
+    pub target_risk_per_clip_frac: f64,
+    pub base_target_net_shares: f64,
+    pub good_hour_target_net_mult: f64,
+}
+
+impl From<&WalkForwardConfig> for BackToExploreSummaryConfig {
+    fn from(cfg: &WalkForwardConfig) -> Self {
+        Self {
+            base_clip_usdc: cfg.back_to_explore_base_clip_usdc,
+            max_clip_usdc: cfg.back_to_explore_max_clip_usdc,
+            min_pair_cost_for_two_sided: cfg.back_to_explore_min_pair_cost_for_two_sided,
+            pair_clip_multiplier: cfg.back_to_explore_pair_clip_multiplier,
+            directional_strength_mult: cfg.back_to_explore_directional_strength_mult,
+            residual_taper_start_frac: cfg.back_to_explore_residual_taper_start_frac,
+            residual_min_clip_multiplier: cfg.back_to_explore_residual_min_clip_multiplier,
+            max_residual_shares: cfg.back_to_explore_max_residual_shares,
+            min_clip_multiplier_to_emit: cfg.back_to_explore_min_clip_multiplier_to_emit,
+            refresh_secs: cfg.back_to_explore_refresh_secs,
+            stop_secs_before_close: cfg.back_to_explore_stop_secs_before_close,
+            min_entry_price: cfg.back_to_explore_min_entry_price,
+            max_entry_price: cfg.back_to_explore_max_entry_price,
+            sweep_depth: cfg.back_to_explore_sweep_depth,
+            high_activity_hours: cfg.back_to_explore_high_activity_hours.clone(),
+            base_participation_rate: cfg.back_to_explore_base_participation_rate,
+            two_sided_preference: cfg.back_to_explore_two_sided_preference,
+            target_risk_per_clip_frac: cfg.back_to_explore_target_risk_per_clip_frac,
+            base_target_net_shares: cfg.back_to_explore_base_target_net_shares,
+            good_hour_target_net_mult: cfg.back_to_explore_good_hour_target_net_mult,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3119,7 +3975,10 @@ async fn collect_training_samples_for_market(
         events.as_slice()
     };
     let resolved_yes = if use_outcome_label {
-        Some(matches!(m.outcome.as_str(), "Up" | "Yes" | "yes" | "UP"))
+        Some(
+            outcome_label_resolved_yes(&m.outcome)
+                .expect("outcome labels are validated before replay"),
+        )
     } else {
         None
     };
@@ -3139,6 +3998,10 @@ async fn collect_training_samples_for_market(
         update_model_state_on_resolution: true,
         meta_calibrator_snapshot: None,
         enable_meta_calibration: true,
+        current_btc_net_shares: 0.0,
+        current_eth_net_shares: 0.0,
+        daily_start_cash_usdc: 0.0,
+        daily_loss_cap_pct: 1.0,
         model_market_context: if enable_market_context_features {
             model_market_context_for_slug(&m.slug)
         } else {
@@ -3158,6 +4021,7 @@ async fn collect_training_samples_for_market(
         model_gate_min_confidence: 0.68,
         model_gate_max_risk: 0.72,
         model_gate_min_edge: 0.05,
+        current_daily_loss_pct: 0.0,
     };
     let mut strat = NoopStrategy;
     match run_backtest(
@@ -3252,7 +4116,10 @@ async fn run_markets(
             let spot = spot_history_for_market(&spot_map, &spot_empty, &cfg_arc, &m);
 
             let resolved_yes = if cfg_arc.use_outcome_label {
-                Some(matches!(m.outcome.as_str(), "Up" | "Yes" | "yes" | "UP"))
+                Some(
+                    outcome_label_resolved_yes(&m.outcome)
+                        .expect("outcome labels are validated before replay"),
+                )
             } else {
                 None
             };
@@ -3297,6 +4164,11 @@ async fn run_markets(
                 model_gate_min_confidence: cfg_arc.model_gate_min_confidence,
                 model_gate_max_risk: cfg_arc.model_gate_max_risk,
                 model_gate_min_edge: cfg_arc.model_gate_min_edge,
+                current_btc_net_shares: 0.0,
+                current_eth_net_shares: 0.0,
+                daily_start_cash_usdc: 0.0,
+                daily_loss_cap_pct: 1.0,
+                current_daily_loss_pct: 0.0,
             };
 
             Some((m.clone(), events_for_run, spot, trades, runner_cfg, idx))
@@ -3316,8 +4188,32 @@ async fn run_markets(
 
     if cfg.portfolio_mode {
         loaded.sort_by_key(|(_, _, _, _, _, idx)| *idx);
+
+        // Cross-market ladder exposure tracking (for BackToExplore etc.)
+        // We maintain committed net per asset from markets that have already resolved.
+        // When starting a new market we pass the current ladder state so the strategy
+        // can see exposure across other simultaneous windows.
+        let mut asset_net: std::collections::HashMap<String, f64> =
+            std::collections::HashMap::new();
+
         // Must stay strictly serial — each market's starting equity depends on previous.
         for (m, events_for_run, spot, trades, runner_cfg, idx) in loaded {
+            let asset = if m.slug.starts_with("btc-updown-") || m.slug.starts_with("bitcoin-") {
+                "btc"
+            } else if m.slug.starts_with("eth-updown-") || m.slug.starts_with("ethereum-") {
+                "eth"
+            } else {
+                "other"
+            };
+
+            let btc_net = *asset_net.get("btc").unwrap_or(&0.0);
+            let eth_net = *asset_net.get("eth").unwrap_or(&0.0);
+
+            // Create a per-market runner config with the current ladder state injected.
+            let mut market_runner_cfg = runner_cfg.clone();
+            market_runner_cfg.current_btc_net_shares = btc_net;
+            market_runner_cfg.current_eth_net_shares = eth_net;
+
             let mut per_strategy = HashMap::new();
             for &strat in &cfg.strategies {
                 match run_one_strategy(
@@ -3326,7 +4222,7 @@ async fn run_markets(
                     &events_for_run,
                     &spot,
                     &trades,
-                    &runner_cfg,
+                    &market_runner_cfg,
                     cfg.starting_cash_usdc,
                     cfg.max_clip_usdc,
                     None,
@@ -3347,6 +4243,20 @@ async fn run_markets(
             let volatility_band =
                 volatility_band(volatility_range, cfg.volatility_regime_threshold);
             let close_ts = market_close_ts(&m);
+
+            // Update committed ladder exposure from this market's fills (for future markets).
+            if let Some(r) = per_strategy.get("back_to_explore") {
+                let mut delta = 0.0;
+                for fill in &r.fills_detail {
+                    let signed = match fill.side.as_str() {
+                        "BuyYes" | "SellNo" => fill.shares,
+                        "BuyNo" | "SellYes" => -fill.shares,
+                        _ => 0.0,
+                    };
+                    delta += signed;
+                }
+                *asset_net.entry(asset.to_string()).or_insert(0.0) += delta;
+            }
 
             results.push(MarketResult {
                 asset_id: m.asset_id,
@@ -3707,6 +4617,18 @@ fn run_one_strategy(
                 None,
             )
         }
+        StratId::BackToExplore => {
+            let market_window_ns = runner_cfg
+                .market_close_ns
+                .saturating_sub(runner_cfg.market_open_ns)
+                .max(1);
+            let bte_cfg = cfg.build_back_to_explore_config(clip, market_window_ns);
+            let mut s = BackToExploreTaker::new(bte_cfg);
+            (
+                run_backtest(events, spot, trades, &mut s, runner_cfg)?,
+                None,
+            )
+        }
     };
     let filled_notional_usdc = report.filled_notional_usdc;
     let avg_slippage_bps = if filled_notional_usdc > 0.0 {
@@ -3778,6 +4700,13 @@ async fn run_portfolio(
         .map(|s| (s.name(), cfg.starting_cash_usdc))
         .collect();
     let mut peak_equity_by_strategy = equity_by_strategy.clone();
+    let mut session_peak_equity_by_strategy = equity_by_strategy.clone();
+    let mut session_date_by_strategy: HashMap<&'static str, String> = cfg
+        .strategies
+        .iter()
+        .map(|s| (s.name(), String::new()))
+        .collect();
+    let mut daily_start_equity_by_strategy = equity_by_strategy.clone();
     let mut shared_skew_tables: HashMap<&'static str, Arc<Mutex<SkewWinRateTable>>> =
         HashMap::new();
     let mut shared_model_states: HashMap<&'static str, Arc<Mutex<ModelState>>> = HashMap::new();
@@ -3801,6 +4730,11 @@ async fn run_portfolio(
     }
     let mut results: Vec<MarketResult> = Vec::with_capacity(markets.len());
     let mut oos_meta_samples: Vec<MetaTrainingSample> = Vec::with_capacity(markets.len());
+    if let Some(path) = cfg.decision_log_jsonl.as_deref() {
+        if path.exists() {
+            std::fs::remove_file(path)?;
+        }
+    }
 
     for (idx, m) in markets.iter().enumerate() {
         let events = match load_replay_events_for_market(
@@ -3838,7 +4772,10 @@ async fn run_portfolio(
         };
         let spot = spot_history_for_market(spot_map, &empty_spot, cfg, m);
         let resolved_yes = if cfg.use_outcome_label {
-            Some(matches!(m.outcome.as_str(), "Up" | "Yes" | "yes" | "UP"))
+            Some(
+                outcome_label_resolved_yes(&m.outcome)
+                    .expect("outcome labels are validated before replay"),
+            )
         } else {
             None
         };
@@ -3857,12 +4794,49 @@ async fn run_portfolio(
             } else {
                 0.0
             };
-            let clip_multiplier = drawdown_clip_multiplier(
+            let global_clip_multiplier = drawdown_clip_multiplier(
                 drawdown_pct,
                 cfg.clip_drawdown_soft_pct,
                 cfg.clip_drawdown_hard_pct,
                 cfg.clip_drawdown_min_multiplier,
             );
+            let session_date = session_date_by_strategy.entry(strat.name()).or_default();
+            if session_date != &m.date {
+                *session_date = m.date.clone();
+                session_peak_equity_by_strategy.insert(strat.name(), bankroll);
+                daily_start_equity_by_strategy.insert(strat.name(), bankroll);
+            }
+            let session_peak_equity = *session_peak_equity_by_strategy
+                .get(strat.name())
+                .unwrap_or(&bankroll);
+            let session_drawdown_pct = if session_peak_equity > 0.0 {
+                1.0 - bankroll / session_peak_equity
+            } else {
+                0.0
+            };
+            let session_clip_multiplier = drawdown_clip_multiplier(
+                session_drawdown_pct,
+                cfg.clip_session_drawdown_soft_pct,
+                cfg.clip_session_drawdown_hard_pct,
+                cfg.clip_session_drawdown_min_multiplier,
+            );
+            let daily_start_equity = *daily_start_equity_by_strategy
+                .get(strat.name())
+                .unwrap_or(&bankroll);
+            let daily_loss_pct = if daily_start_equity > 0.0 {
+                (daily_start_equity - bankroll) / daily_start_equity
+            } else {
+                0.0
+            };
+            let daily_clip_multiplier =
+                if cfg.daily_loss_cap_pct < 1.0 && daily_loss_pct >= cfg.daily_loss_cap_pct {
+                    0.0
+                } else {
+                    1.0
+                };
+            let clip_multiplier = global_clip_multiplier
+                .min(session_clip_multiplier)
+                .min(daily_clip_multiplier);
             // Per-market clip: a fraction of current equity (compounds), else
             // static fallback. Hard floor + ceiling for sanity.
             let clip = match cfg.clip_fraction_of_equity {
@@ -3880,11 +4854,13 @@ async fn run_portfolio(
                     max_daily_exposure_usdc: bankroll * 5.0,
                     ..PortfolioLimits::default()
                 },
+                current_btc_net_shares: 0.0,
+                current_eth_net_shares: 0.0,
                 equity_curve_jsonl: None,
                 snapshot_every_n: 1_000_000,
                 maker_rebate_bps: cfg.maker_rebate_bps,
                 taker_fee_bps: cfg.taker_fee_bps,
-                decision_log_jsonl: None,
+                decision_log_jsonl: cfg.decision_log_jsonl.clone(),
                 decision_log_parquet: None,
                 shared_model_state: if strat == StratId::ReactiveDirectional {
                     None
@@ -3903,7 +4879,7 @@ async fn run_portfolio(
                     .model_btc_path_inefficiency_risk_weight,
                 model_btc_reversal_pressure_risk_weight: cfg
                     .model_btc_reversal_pressure_risk_weight,
-                decision_log_every_n: 1_000_000,
+                decision_log_every_n: cfg.decision_log_every_n,
                 max_inventory_imbalance_shares: 1.5,
                 taker_slippage_bps: 15.0,
                 taker_latency_ms: cfg.taker_latency_ms,
@@ -3911,6 +4887,9 @@ async fn run_portfolio(
                 model_gate_min_confidence: cfg.model_gate_min_confidence,
                 model_gate_max_risk: cfg.model_gate_max_risk,
                 model_gate_min_edge: cfg.model_gate_min_edge,
+                daily_start_cash_usdc: daily_start_equity,
+                daily_loss_cap_pct: cfg.daily_loss_cap_pct,
+                current_daily_loss_pct: daily_loss_pct,
             };
             match run_one_strategy(
                 strat,
@@ -3934,6 +4913,10 @@ async fn run_portfolio(
                     }
                     equity_by_strategy.insert(strat.name(), r.end_equity_usdc);
                     peak_equity_by_strategy
+                        .entry(strat.name())
+                        .and_modify(|peak| *peak = peak.max(r.end_equity_usdc))
+                        .or_insert(r.end_equity_usdc);
+                    session_peak_equity_by_strategy
                         .entry(strat.name())
                         .and_modify(|peak| *peak = peak.max(r.end_equity_usdc))
                         .or_insert(r.end_equity_usdc);
@@ -4363,164 +5346,27 @@ fn aggregate(results: &[MarketResult], strategies: &[StratId]) -> WalkForwardSum
 }
 
 fn summary_run_config(cfg: &WalkForwardConfig) -> SummaryRunConfig {
+    let mut strategies = Vec::with_capacity(cfg.strategies.len());
+    for strat in &cfg.strategies {
+        let config = match strat {
+            StratId::BonereaperV2 => Some(
+                serde_json::to_value(BonereaperV2SummaryConfig::from(cfg))
+                    .expect("serialize bonereaper_v2 summary config"),
+            ),
+            StratId::BackToExplore => Some(
+                serde_json::to_value(BackToExploreSummaryConfig::from(cfg))
+                    .expect("serialize back_to_explore summary config"),
+            ),
+            _ => None,
+        };
+        strategies.push(StrategyRunConfig {
+            strategy: strat.name(),
+            config,
+        });
+    }
     SummaryRunConfig {
-        starting_cash_usdc: cfg.starting_cash_usdc,
-        kelly_fraction: cfg.kelly_fraction,
-        max_clip_usdc: cfg.max_clip_usdc,
-        max_order_clip_multiplier: cfg.max_order_clip_multiplier,
-        max_per_market_exposure_usdc: cfg.max_per_market_exposure_usdc,
-        max_per_market_exposure_frac: cfg.max_per_market_exposure_frac,
-        max_concurrent_fetches: cfg.max_concurrent_fetches,
-        replay_sample_ms: cfg.replay_sample_ms,
-        taker_latency_ms: cfg.taker_latency_ms,
-        replay_event_cache_dir: cfg
-            .replay_event_cache_dir
-            .as_ref()
-            .map(|path| path.to_string_lossy().to_string()),
-        load_pm_trades: cfg.load_pm_trades,
-        clip_fraction_of_equity: cfg.clip_fraction_of_equity,
-        clip_drawdown_soft_pct: cfg.clip_drawdown_soft_pct,
-        clip_drawdown_hard_pct: cfg.clip_drawdown_hard_pct,
-        clip_drawdown_min_multiplier: cfg.clip_drawdown_min_multiplier,
-        br2_disable_internal_model_gates: cfg.br2_disable_internal_model_gates,
-        br2_participation_clip_frac: cfg.br2_participation_clip_frac,
-        br2_participation_max_pair_cost: cfg.br2_participation_max_pair_cost,
-        br2_participation_max_orders_per_leg: cfg.br2_participation_max_orders_per_leg,
-        br2_participation_max_inventory_delta_shares: cfg
-            .br2_participation_max_inventory_delta_shares,
-        br2_participation_repair_inventory_delta_shares: cfg
-            .br2_participation_repair_inventory_delta_shares,
-        br2_participation_refresh_secs: cfg.br2_participation_refresh_secs,
-        br2_participation_stop_secs_before_close: cfg.br2_participation_stop_secs_before_close,
-        br2_hedged_base_enabled: cfg.br2_hedged_base_enabled,
-        br2_hedged_base_max_secs_in: cfg.br2_hedged_base_max_secs_in,
-        br2_hedged_base_max_pair_cost: cfg.br2_hedged_base_max_pair_cost,
-        br2_hedged_base_min_minority_leg_frac: cfg.br2_hedged_base_min_minority_leg_frac,
-        br2_hedged_base_clip_usdc: cfg.br2_hedged_base_clip_usdc,
-        br2_hedged_base_max_notional_usdc: cfg.br2_hedged_base_max_notional_usdc,
-        br2_late_directional_overlay_frac: cfg.br2_late_directional_overlay_frac,
-        br2_min_composite_direction: cfg.br2_min_composite_direction,
-        br2_early_clip_frac: cfg.br2_early_clip_frac,
-        br2_mid_clip_frac: cfg.br2_mid_clip_frac,
-        br2_late_clip_frac: cfg.br2_late_clip_frac,
-        br2_late_max_fires: cfg.br2_late_max_fires,
-        br2_late_confirm_min_model_confidence: cfg.br2_late_confirm_min_model_confidence,
-        br2_late_confirm_max_model_risk: cfg.br2_late_confirm_max_model_risk,
-        br2_late_confirm_min_model_side_p: cfg.br2_late_confirm_min_model_side_p,
-        br2_late_confirm_min_model_edge: cfg.br2_late_confirm_min_model_edge,
-        br2_late_confirm_min_book_skew: cfg.br2_late_confirm_min_book_skew,
-        br2_late_confirm_max_whipsaw_score: cfg.br2_late_confirm_max_whipsaw_score,
-        br2_late_confirm_min_realized_vol_180s_bps: cfg.br2_late_confirm_min_realized_vol_180s_bps,
-        br2_late_confirm_max_observed_range: cfg.br2_late_confirm_max_observed_range,
-        br2_recent_regime_gate_enabled: cfg.br2_recent_regime_gate_enabled,
-        br2_recent_regime_gate_min_edge: cfg.br2_recent_regime_gate_min_edge,
-        br2_recent_regime_gate_late_confirm: cfg.br2_recent_regime_gate_late_confirm,
-        br2_recent_regime_gate_high_skew: cfg.br2_recent_regime_gate_high_skew,
-        br2_recent_regime_gate_late_favourite: cfg.br2_recent_regime_gate_late_favourite,
-        br2_high_skew_clip_frac: cfg.br2_high_skew_clip_frac,
-        br2_lane_size_late_favourite: cfg.br2_lane_size_late_favourite,
-        br2_lane_size_late_confirm: cfg.br2_lane_size_late_confirm,
-        br2_lane_size_high_skew: cfg.br2_lane_size_high_skew,
-        br2_regime_gate_enabled: cfg.br2_regime_gate_enabled,
-        br2_regime_gate_window: cfg.br2_regime_gate_window,
-        br2_regime_gate_threshold: cfg.br2_regime_gate_threshold,
-        br2_regime_gate_soft_band: cfg.br2_regime_gate_soft_band,
-        br2_regime_gate_lane_floor: cfg.br2_regime_gate_lane_floor,
-        br2_regime_gate_whipsaw_weight: cfg.br2_regime_gate_whipsaw_weight,
-        br2_high_skew_max_clips: cfg.br2_high_skew_max_clips,
-        br2_high_skew_max_whipsaw_score: cfg.br2_high_skew_max_whipsaw_score,
-        br2_high_skew_min_realized_vol_180s_bps: cfg.br2_high_skew_min_realized_vol_180s_bps,
-        br2_late_favourite_start_secs: cfg.br2_late_favourite_start_secs,
-        br2_late_favourite_threshold: cfg.br2_late_favourite_threshold,
-        br2_late_favourite_min_ask: cfg.br2_late_favourite_min_ask,
-        br2_late_favourite_max_ask: cfg.br2_late_favourite_max_ask,
-        br2_late_favourite_clip_frac: cfg.br2_late_favourite_clip_frac,
-        br2_late_favourite_high_cert_clip_frac: cfg.br2_late_favourite_high_cert_clip_frac,
-        br2_late_favourite_high_cert_full_clip_edge: cfg
-            .br2_late_favourite_high_cert_full_clip_edge,
-        br2_late_favourite_fragile_high_cert_ask: cfg.br2_late_favourite_fragile_high_cert_ask,
-        br2_late_favourite_fragile_high_cert_max_edge: cfg
-            .br2_late_favourite_fragile_high_cert_max_edge,
-        br2_late_favourite_fragile_high_cert_max_path_efficiency: cfg
-            .br2_late_favourite_fragile_high_cert_max_path_efficiency,
-        br2_late_favourite_fragile_high_cert_size_frac: cfg
-            .br2_late_favourite_fragile_high_cert_size_frac,
-        br2_late_favourite_max_clips: cfg.br2_late_favourite_max_clips,
-        br2_late_favourite_min_sustain_secs: cfg.br2_late_favourite_min_sustain_secs,
-        br2_late_favourite_sweep_depth: cfg.br2_late_favourite_sweep_depth,
-        br2_late_favourite_min_model_confidence: cfg.br2_late_favourite_min_model_confidence,
-        br2_late_favourite_min_model_direction_abs: cfg.br2_late_favourite_min_model_direction_abs,
-        br2_late_favourite_max_model_risk: cfg.br2_late_favourite_max_model_risk,
-        br2_late_favourite_min_model_side_p: cfg.br2_late_favourite_min_model_side_p,
-        br2_late_favourite_min_model_edge: cfg.br2_late_favourite_min_model_edge,
-        br2_late_favourite_high_cert_min_model_edge: cfg
-            .br2_late_favourite_high_cert_min_model_edge,
-        br2_late_favourite_high_cert_bypass_model_edge: cfg
-            .br2_late_favourite_high_cert_bypass_model_edge,
-        br2_late_favourite_max_whipsaw_score: cfg.br2_late_favourite_max_whipsaw_score,
-        br2_late_favourite_max_reversal_pressure: cfg.br2_late_favourite_max_reversal_pressure,
-        br2_late_favourite_min_path_efficiency: cfg.br2_late_favourite_min_path_efficiency,
-        br2_late_favourite_min_realized_vol_180s_bps: cfg
-            .br2_late_favourite_min_realized_vol_180s_bps,
-        br2_late_favourite_max_observed_range: cfg.br2_late_favourite_max_observed_range,
-        br2_late_favourite_range_soft_throttle: cfg.br2_late_favourite_range_soft_throttle,
-        br2_late_favourite_range_hard_throttle: cfg.br2_late_favourite_range_hard_throttle,
-        br2_late_favourite_range_extra_edge: cfg.br2_late_favourite_range_extra_edge,
-        br2_late_favourite_range_extra_confidence: cfg.br2_late_favourite_range_extra_confidence,
-        br2_late_favourite_max_adverse_fast_momentum: cfg
-            .br2_late_favourite_max_adverse_fast_momentum,
-        br2_late_favourite_max_adverse_broad_momentum: cfg
-            .br2_late_favourite_max_adverse_broad_momentum,
-        br2_late_favourite_max_entry_pullback: cfg.br2_late_favourite_max_entry_pullback,
-        br2_late_favourite_max_avg_entry_drawdown: cfg.br2_late_favourite_max_avg_entry_drawdown,
-        br2_tail_clip_frac: cfg.br2_tail_clip_frac,
-        br2_tail_max_clips: cfg.br2_tail_max_clips,
-        br2_tail_sweep_depth: cfg.br2_tail_sweep_depth,
-        br2_tail_min_ask: cfg.br2_tail_min_ask,
-        br2_tail_max_ask: cfg.br2_tail_max_ask,
-        br2_tail_min_seconds_to_close: cfg.br2_tail_min_seconds_to_close,
-        br2_tail_min_favourite_unrealized_edge: cfg.br2_tail_min_favourite_unrealized_edge,
-        br2_tail_min_observed_range: cfg.br2_tail_min_observed_range,
-        br2_tail_target_favourite_loss_coverage_frac: cfg
-            .br2_tail_target_favourite_loss_coverage_frac,
-        br2_tail_reversal_coverage_frac: cfg.br2_tail_reversal_coverage_frac,
-        br2_tail_reversal_min_seconds_to_close: cfg.br2_tail_reversal_min_seconds_to_close,
-        br2_tail_reversal_max_seconds_to_close: cfg.br2_tail_reversal_max_seconds_to_close,
-        br2_tail_reversal_min_favourite_ask: cfg.br2_tail_reversal_min_favourite_ask,
-        br2_tail_extreme_threshold: cfg.br2_tail_extreme_threshold,
-        br2_tail_min_skew_step: cfg.br2_tail_min_skew_step,
-        br2_tail_budget_favourite_spend_frac: cfg.br2_tail_budget_favourite_spend_frac,
-        br2_tail_budget_favourite_upside_frac: cfg.br2_tail_budget_favourite_upside_frac,
-        br2_tail_regime_boost_coverage_frac: cfg.br2_tail_regime_boost_coverage_frac,
-        br2_tail_regime_boost_budget_spend_frac: cfg.br2_tail_regime_boost_budget_spend_frac,
-        br2_tail_regime_boost_budget_upside_frac: cfg.br2_tail_regime_boost_budget_upside_frac,
-        br2_tail_regime_boost_min_whipsaw_score: cfg.br2_tail_regime_boost_min_whipsaw_score,
-        br2_tail_regime_boost_min_reversal_pressure: cfg
-            .br2_tail_regime_boost_min_reversal_pressure,
-        br2_tail_regime_boost_min_realized_vol_180s_bps: cfg
-            .br2_tail_regime_boost_min_realized_vol_180s_bps,
-        br2_tail_regime_boost_max_path_efficiency: cfg.br2_tail_regime_boost_max_path_efficiency,
-        enforce_model_gate: cfg.enforce_model_gate,
-        model_gate_min_confidence: cfg.model_gate_min_confidence,
-        model_gate_max_risk: cfg.model_gate_max_risk,
-        model_gate_min_edge: cfg.model_gate_min_edge,
-        model_btc_whipsaw_risk_weight: cfg.model_btc_whipsaw_risk_weight,
-        model_btc_path_inefficiency_risk_weight: cfg.model_btc_path_inefficiency_risk_weight,
-        model_btc_reversal_pressure_risk_weight: cfg.model_btc_reversal_pressure_risk_weight,
-        enable_market_context_features: cfg.enable_market_context_features,
-        min_train_markets: cfg.min_train_markets,
-        meta_epochs: cfg.meta_training_config.epochs,
-        meta_learning_rate: cfg.meta_training_config.learning_rate,
-        meta_l2: cfg.meta_training_config.l2,
-        meta_weight_clip: cfg.meta_training_config.weight_clip,
-        meta_max_fit_samples: cfg.meta_max_fit_samples,
-        meta_max_validation_samples: cfg.meta_max_validation_samples,
-        meta_max_samples_per_market: cfg.meta_max_samples_per_market,
-        meta_max_oos_evaluation_samples: cfg.meta_max_oos_evaluation_samples,
-        meta_train_min_base_p: cfg.meta_train_min_base_p,
-        meta_train_max_early_penalty: cfg.meta_train_max_early_penalty,
-        meta_train_min_mid_distance: cfg.meta_train_min_mid_distance,
-        enable_meta_calibration: cfg.enable_meta_calibration,
+        shared: SharedRunConfig::from(cfg),
+        strategies,
     }
 }
 
@@ -4657,6 +5503,59 @@ mod tests {
     }
 
     #[test]
+    fn market_close_ts_uses_slug_duration_for_longer_horizons() {
+        let mut market = MarketHandle {
+            asset_id: "asset".to_string(),
+            slug: "btc-updown-15m-1778763000".to_string(),
+            close_ts: 1_778_763_000,
+            outcome: "Up".to_string(),
+            date: "2026-05-14".to_string(),
+        };
+
+        assert_eq!(market_open_ts(&market), 1_778_763_000);
+        assert_eq!(market_close_ts(&market), 1_778_763_900);
+
+        market.close_ts = 1_778_763_900;
+        assert_eq!(market_close_ts(&market), 1_778_763_900);
+
+        market.slug = "eth-updown-4h-1778760000".to_string();
+        market.close_ts = 1_778_760_000;
+        assert_eq!(market_open_ts(&market), 1_778_760_000);
+        assert_eq!(market_close_ts(&market), 1_778_774_400);
+    }
+
+    #[test]
+    fn outcome_label_validation_rejects_unknown_labels() {
+        let markets = vec![MarketHandle {
+            asset_id: "asset".to_string(),
+            slug: "btc-updown-5m-1778763000".to_string(),
+            close_ts: 1_778_763_300,
+            outcome: "Unknown".to_string(),
+            date: "2026-05-14".to_string(),
+        }];
+
+        let err = validate_outcome_labels(&markets).expect_err("Unknown must fail closed");
+        assert!(err.to_string().contains("requires explicit Up/Down"));
+    }
+
+    #[test]
+    fn outcome_label_validation_accepts_yes_no_and_up_down() {
+        let markets = ["Up", "Down", "Yes", "No"]
+            .into_iter()
+            .enumerate()
+            .map(|(idx, outcome)| MarketHandle {
+                asset_id: format!("asset-{idx}"),
+                slug: format!("btc-updown-5m-{}", 1_778_763_000 + idx as i64 * 300),
+                close_ts: 1_778_763_300 + idx as i64 * 300,
+                outcome: outcome.to_string(),
+                date: "2026-05-14".to_string(),
+            })
+            .collect::<Vec<_>>();
+
+        validate_outcome_labels(&markets).expect("explicit labels should pass");
+    }
+
+    #[test]
     fn profile_loads_nested_bonereaper_v2_section_without_zeroing_missing_fields() {
         let root = unique_tmp_dir("pm-profile-test");
         std::fs::create_dir_all(&root).expect("create profile temp dir");
@@ -4698,13 +5597,70 @@ model_btc_whipsaw_risk_weight = 0.31
     }
 
     #[test]
+    fn profile_load_resolves_strategy_to_back_to_explore() {
+        let root = unique_tmp_dir("pm-profile-test-bte");
+        std::fs::create_dir_all(&root).expect("create profile temp dir");
+        let path = root.join("back_to_explore.toml");
+        std::fs::write(
+            &path,
+            r#"
+[strategy]
+name = "back_to_explore"
+
+[back_to_explore]
+base_clip_usdc = 9.0
+max_clip_usdc = 88.0
+refresh_secs = 1.5
+high_activity_hours = [10, 11]
+"#,
+        )
+        .expect("write profile");
+
+        let file = StrategyProfileFile::load(&path).expect("load profile");
+        assert_eq!(file.strategy_name(), Some("back_to_explore"));
+
+        let inactive = file
+            .selected_strategy_profile(&[StratId::BonereaperV2])
+            .expect("selected strategy should be parsed");
+        assert!(inactive.is_none());
+
+        let resolved = file
+            .selected_strategy_profile(&[StratId::BackToExplore])
+            .expect("selected strategy should resolve")
+            .expect("strategy selected");
+        assert_eq!(resolved.strategy_name(), "back_to_explore");
+        let mut cfg = WalkForwardConfig::default();
+        resolved.apply_to_walkforward_config(&mut cfg);
+        assert!((cfg.back_to_explore_base_clip_usdc - 9.0).abs() < f64::EPSILON);
+        assert!((cfg.back_to_explore_max_clip_usdc - 88.0).abs() < f64::EPSILON);
+        assert!((cfg.back_to_explore_refresh_secs - 1.5).abs() < f64::EPSILON);
+        assert_eq!(cfg.back_to_explore_high_activity_hours, vec![10, 11]);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn back_to_explore_config_uses_walkforward_fields_and_run_clip_floor() {
+        let mut cfg = WalkForwardConfig::default();
+        cfg.back_to_explore_base_clip_usdc = 15.0;
+        cfg.back_to_explore_max_clip_usdc = 20.0;
+        cfg.back_to_explore_base_participation_rate = 0.77;
+
+        let bte_cfg = cfg.build_back_to_explore_config(6.0, 123_456_789);
+
+        assert!((bte_cfg.base_clip_usdc - 15.0).abs() < f64::EPSILON);
+        assert!((bte_cfg.market_window_ns - 123_456_789) == 0);
+        assert!((bte_cfg.base_participation_rate - 0.77).abs() < f64::EPSILON);
+    }
+
+    #[test]
     fn hedged_first_profile_enables_arb_base_and_overlay_cap() {
         // The shipped profile must parse and turn the hedge-first lane on while
         // capping the directional overlay. Resolve the path relative to the
         // workspace root (CARGO_MANIFEST_DIR points at crates/pm-app).
         let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let path = manifest
-            .join("../../configs/bonereaper_v2_hedged_first.toml")
+            .join("../../configs/archive/2026-06-02/bonereaper_v2_hedged_first.toml")
             .canonicalize()
             .expect("resolve hedged-first profile path");
 

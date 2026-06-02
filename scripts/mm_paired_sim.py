@@ -98,7 +98,9 @@ def load_book(path):
     if len(df) == 0:
         return None, None
     slug = df.slug.iloc[0]
-    close = int(slug.split('-')[-1])
+    # Polymarket BTC 5m slugs encode the window start timestamp. Resolution is
+    # exactly five minutes later.
+    close = int(slug.split('-')[-1]) + int(WINDOW)
     t = close - df.timestamp_us.values.astype(np.float64) / 1e6
     bp = np.asarray(df.bid_price_0, dtype=np.float64)
     ap = np.asarray(df.ask_price_0, dtype=np.float64)

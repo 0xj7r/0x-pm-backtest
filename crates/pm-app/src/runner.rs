@@ -423,6 +423,21 @@ pub struct RunnerConfig {
     pub model_gate_max_risk: f32,
     /// Minimum edge over implied side probability required for an order.
     pub model_gate_min_edge: f32,
+
+    /// Current net ladder exposure for the asset (yes - no shares summed across open windows).
+    /// Used by BackToExplore and similar strategies for cross-market hedging and sizing.
+    /// Populated by the walk-forward harness in portfolio mode.
+    pub current_btc_net_shares: f64,
+    pub current_eth_net_shares: f64,
+
+    /// Daily loss tracking for smart capping inside strategies (e.g. BackToExplore
+    /// can still do pair/repair on capped days instead of blunt stop-everything).
+    pub daily_start_cash_usdc: f64,
+    pub daily_loss_cap_pct: f64,
+
+    /// Current realized loss this day (fraction of daily_start_equity). Passed from
+    /// walkforward so strategies can adapt sizing/pair/target instead of hard zeroing.
+    pub current_daily_loss_pct: f64,
 }
 
 impl Default for RunnerConfig {
@@ -460,6 +475,11 @@ impl Default for RunnerConfig {
             model_gate_min_confidence: 0.68,
             model_gate_max_risk: 0.72,
             model_gate_min_edge: 0.05,
+            current_btc_net_shares: 0.0,
+            current_eth_net_shares: 0.0,
+            daily_start_cash_usdc: 0.0,
+            daily_loss_cap_pct: 1.0,
+            current_daily_loss_pct: 0.0,
         }
     }
 }
@@ -544,7 +564,12 @@ pub fn run_backtest<S: Strategy>(
         None => None,
     };
     let mut decision_file = match cfg.decision_log_jsonl.as_deref() {
-        Some(p) => Some(std::fs::File::create(p)?),
+        Some(p) => Some(
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(p)?,
+        ),
         None => None,
     };
     let mut decision_rows = if cfg.decision_log_parquet.is_some() {
@@ -721,7 +746,16 @@ pub fn run_backtest<S: Strategy>(
             prior_market_range_3d: cfg.prior_market_range_3d,
             prior_market_range_7d: cfg.prior_market_range_7d,
             model_output: Some(canonical_model_eval.output),
+            model_attribution: Some(canonical_model_eval.attribution),
             market_close_ns: cfg.market_close_ns,
+            // Ladder exposure populated at walk-forward level for portfolio runs.
+            // For now zeroed here; real values come from higher-level asset aggregation
+            // (see future cross-market accounting work for BackToExplore).
+            btc_net_exposure_shares: cfg.current_btc_net_shares,
+            eth_net_exposure_shares: cfg.current_eth_net_shares,
+            daily_start_cash_usdc: cfg.daily_start_cash_usdc,
+            daily_loss_cap_pct: cfg.daily_loss_cap_pct,
+            current_daily_loss_pct: cfg.current_daily_loss_pct,
         };
         let (output, strategy_model_output) = strategy.on_event_scored(event, &ctx, spot, trades);
         let strategy_emitted_model_output = strategy_model_output.is_some();
@@ -1615,6 +1649,19 @@ fn order_adds_yes_exposure(side: Side) -> bool {
     matches!(side, Side::BuyYes | Side::SellNo)
 }
 
+/// Returns true if filling this buy would reduce |current_yes - current_no|.
+/// Used to identify repair/pair legs that should be allowed through exposure
+/// gates even after caps are hit (so we don't get stranded without repair).
+fn would_reduce_imbalance(side: Side, shares: f64, current_yes: f64, current_no: f64) -> bool {
+    let current = current_yes - current_no;
+    let new = match side {
+        Side::BuyYes => current + shares,
+        Side::BuyNo => current - shares,
+        _ => current,
+    };
+    new.abs() < current.abs() - 1e-12
+}
+
 #[allow(clippy::too_many_arguments)]
 fn apply_maker_fill(
     market_id: u32,
@@ -1634,9 +1681,11 @@ fn apply_maker_fill(
     maker_rebate_bps: f64,
 ) -> bool {
     let notional = shares * fill_price_native as f64;
+    let is_repair = matches!(side, Side::BuyYes | Side::BuyNo)
+        && would_reduce_imbalance(side, shares, *yes_shares, *no_shares);
     match side {
         Side::BuyYes | Side::BuyNo => {
-            if !portfolio.can_open_position(market_id, notional) {
+            if !portfolio.can_open_position_ex(market_id, notional, is_repair) {
                 counters.orders_rejected_risk_gate += 1;
                 return false;
             }
@@ -1849,7 +1898,8 @@ fn check_resting_fills(
         let mut rejected = false;
         match r.side {
             Side::BuyYes | Side::BuyNo => {
-                if !portfolio.can_open_position(event.market_id.0, notional) {
+                let is_repair = would_reduce_imbalance(r.side, r.shares, *yes_shares, *no_shares);
+                if !portfolio.can_open_position_ex(event.market_id.0, notional, is_repair) {
                     counters.orders_rejected_risk_gate += 1;
                     rejected = true;
                 } else if notional > *cash {
@@ -1941,7 +1991,9 @@ fn check_resting_fills(
             binance_adverse_vol_5s: r.model_context.map(|m| m.flow.adverse_vol_5s),
             binance_adverse_vol_15s: r.model_context.map(|m| m.flow.adverse_vol_15s),
             binance_adverse_vol_30s: r.model_context.map(|m| m.flow.adverse_vol_30s),
-            binance_large_adverse_count_10s: r.model_context.map(|m| m.flow.large_adverse_count_10s),
+            binance_large_adverse_count_10s: r
+                .model_context
+                .map(|m| m.flow.large_adverse_count_10s),
             binance_trade_intensity_15s: r.model_context.map(|m| m.flow.trade_intensity_15s),
             spot_ret_5s: r.model_context.map(|m| m.flow.spot_ret_5s),
             spot_ret_15s: r.model_context.map(|m| m.flow.spot_ret_15s),
@@ -2022,11 +2074,13 @@ fn submit_maker_order(
         }
         _ => 0.0,
     };
-    if matches!(req.side, Side::BuyYes | Side::BuyNo)
-        && !portfolio.can_open_position(event.market_id.0, prospective_notional)
-    {
-        counters.orders_rejected_risk_gate += 1;
-        return;
+    if matches!(req.side, Side::BuyYes | Side::BuyNo) {
+        let is_repair =
+            would_reduce_imbalance(req.side, req.shares as f64, *yes_shares, *no_shares);
+        if !portfolio.can_open_position_ex(event.market_id.0, prospective_notional, is_repair) {
+            counters.orders_rejected_risk_gate += 1;
+            return;
+        }
     }
     let _ = (total_rebates, maker_rebate_bps); // not credited until fill
 
@@ -2174,7 +2228,9 @@ fn apply_taker_order(
 
     match req.side {
         Side::BuyYes | Side::BuyNo => {
-            if !portfolio.can_open_position(event.market_id.0, notional + fee) {
+            let is_repair =
+                would_reduce_imbalance(req.side, fillable_shares, *yes_shares, *no_shares);
+            if !portfolio.can_open_position_ex(event.market_id.0, notional + fee, is_repair) {
                 counters.orders_rejected_risk_gate += 1;
                 return;
             }
@@ -2307,7 +2363,7 @@ fn depth_weighted_fill(event: &ReplayEvent, req: &OrderRequest) -> Option<(f32, 
 }
 
 fn order_requires_model_gate(tag: &str) -> bool {
-    !tag.starts_with("br2_participation_")
+    !tag.starts_with("br2_participation_") && tag != "lively_momentum_taker"
 }
 
 fn fill_respects_limit(side: Side, price: f32, limit_price: Option<f32>) -> bool {
@@ -2423,6 +2479,14 @@ mod tests {
             spot_price: 0.0,
             flags: ReplayFlags::BOOK_UPDATE,
         }
+    }
+
+    #[test]
+    fn pure_execution_lanes_bypass_generic_model_gate() {
+        assert!(!order_requires_model_gate("br2_participation_yes"));
+        assert!(!order_requires_model_gate("lively_momentum_taker"));
+        assert!(order_requires_model_gate("br2_late_favourite"));
+        assert!(order_requires_model_gate("smf_directional"));
     }
 
     #[test]

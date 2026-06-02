@@ -20,14 +20,10 @@ crates/
 ├── pm-strategy/           # strategy candidates + execution lanes
 │   ├── signals             (direction/confidence/calibrated_p/risk scores)
 │   ├── regime              (BtcRegime: Flat/Whipsaw/DirectionalSmooth/TrendingVolatile)
-│   ├── spot_momentum       (multi-TF weighted spot returns)
-│   ├── reactive            (ReactiveDirectional — paired probes + dominant load)
+│   ├── back_to_explore     (BackToExplore paired-maker strategy)
 │   ├── paired_mm           (PairedMmDense — unlawful-shear ladder)
-│   ├── delta_neutral_mm    (DeltaNeutralMm — touch-tick spread capture)
-│   ├── late_big_bet        (LateBigBet — single high-conviction last-60s bet)
-│   ├── spot_follower       (SpotMomentumFollower — pure spot trend follower)
-│   ├── bonereaper          (BonereaperLite — 4-lane composite)
-│   └── trivial             (BuyYesAtOpen baseline)
+│   ├── bonereaper_v2       (BonereaperV2 composite lanes)
+│   └── archive             (legacy strategy implementations)
 ├── pm-risk/               # Kelly sizing + PortfolioState (drawdown, daily/per-market caps)
 └── pm-app/                # CLI: discover-day | inspect-s3 | backtest-s3 | quotes-s3 | walk-forward
 ```
@@ -51,10 +47,10 @@ export PM_TELONEX_REGION=us-east-1
 ./target/release/pm-app discover-local-cache-book-metadata \
     --cache-dir data/cache --date 2026-05-12 --out /tmp/markets.jsonl
 
-# Run walk-forward across all 7 strategies
+# Run walk-forward across all active strategies
 ./target/release/pm-app walk-forward \\
     --markets /tmp/markets.jsonl \\
-    --strategies "reactive_directional,paired_mm,delta_neutral_mm,late_big_bet,bonereaper_lite,spot_momentum_follower,buy_yes_at_open" \\
+    --strategies "back_to_explore,paired_mm,bonereaper_v2" \\
     --starting-cash 100 --max-clip-usdc 5 --spot-symbol BTCUSDT \\
     --use-outcome-label \\
     --out-markets /tmp/wf.jsonl --out-summary /tmp/wf-summary.json
@@ -63,21 +59,24 @@ export PM_TELONEX_REGION=us-east-1
 For full AWS portfolio runs, sizing grids, and checkpointed monitoring, see
 [docs/aws-backtest-runbook.md](docs/aws-backtest-runbook.md).
 
-## Empirical findings (1-day, 288 BTC-5m markets, 2026-05-12)
+If you only want one strategy, pass an explicit `--strategies` value (for example
+`--strategies back_to_explore`) so legacy strategy knobs are not mixed into the
+same manifest.
 
-| Strategy | Total P&L | Hit | Fills | Worst | Notes |
-|---|---|---|---|---|---|
-| **LateBigBet** | **+$141.50** | 35.8% | 181 | -$4.90 | Single high-conviction bet in last 60s; negated 15% trade-flow weight |
-| ReactiveDirectional | +$106 | 29.1% | 786 | -$16.29 | Long-YES bias; edge tail-concentrated |
-| BonereaperLite | -$2.29 | 55.2% | 572 | -$0.09 | 4-lane composite; nearly break-even |
-| PairedMm | -$7.14 | 92.4% | 1,662 | -$0.45 | High hit rate, tail-eats-gains |
-| DeltaNeutralMm | -$26.22 | 55.6% | 1,614 | -$4.74 | Inventory leaks; needs tighter cancel |
-| SpotMomentumFollower | $0 | — | 0 | — | Threshold too tight |
+## Empirical findings
 
-**Key empirical truth**: aggressor flow (`trades.side`) on PM BTC-5m is **contra-indicating**.
-- Positive 30% weight to trade flow: RD goes from +$106 → -$331
-- Negated 15% weight: brings it within break-even
-- Best LBB config uses negated 15% weight
+Current in-flight strategy focus is now:
+
+- `back_to_explore`
+- `paired_mm`
+- `bonereaper_v2`
+
+Recent active summaries and command history are tracked in:
+- `docs/active_btc5m_experiments.md`
+- `docs/autoresearch-ml-loop.md`
+
+Strategy implementation history is archived in `crates/pm-strategy/src/archive`.
+Non-active strategy profile experiments are archived under `configs/archive/2026-06-02`.
 
 ## Architecture notes
 

@@ -68,25 +68,29 @@ DEEP_SPOT_GATE = 0.0003
 
 def load_book_laddered(path):
     """Like base.load_book but also returns 25-level price/size arrays for queue lookup."""
+    nlv = 3  # only the first 3 price levels are ever used by the ladder (touch + 2 deep)
     cols = ['timestamp_us', 'slug']
-    for j in range(5):
+    for j in range(nlv):
         cols += [f'bid_price_{j}', f'bid_size_{j}', f'ask_price_{j}', f'ask_size_{j}']
     df = base.read_parquet(path, cols)
     if len(df) == 0:
         return None, None
     slug = df.slug.iloc[0]
-    close = int(slug.split('-')[-1])
+    # Polymarket BTC 5m slugs encode the window start timestamp. Resolution is
+    # exactly five minutes later.
+    close = int(slug.split('-')[-1]) + int(WINDOW)
     t = close - df.timestamp_us.values.astype(np.float64) / 1e6
     bp = np.asarray(df.bid_price_0, dtype=np.float64)
     ap = np.asarray(df.ask_price_0, dtype=np.float64)
     bsz = np.asarray(df.bid_size_0, dtype=np.float64)
     asz = np.asarray(df.ask_size_0, dtype=np.float64)
     ok = np.isfinite(bp) & np.isfinite(ap) & (t >= 0) & (t <= ACTIVE_WIN)
-    bid_lv = np.stack([np.asarray(df[f'bid_price_{j}'], dtype=np.float64) for j in range(5)], axis=1)
-    bsz_lv = np.stack([np.asarray(df[f'bid_size_{j}'], dtype=np.float64) for j in range(5)], axis=1)
-    ask_lv = np.stack([np.asarray(df[f'ask_price_{j}'], dtype=np.float64) for j in range(5)], axis=1)
-    asz_lv = np.stack([np.asarray(df[f'ask_size_{j}'], dtype=np.float64) for j in range(5)], axis=1)
-    bp, ap, bsz, asz, t = bp[ok], ap[ok], bsz[ok], asz[ok], t[ok]
+    bid_lv = np.stack([np.asarray(df[f'bid_price_{j}'], dtype=np.float64) for j in range(nlv)], axis=1)
+    bsz_lv = np.stack([np.asarray(df[f'bid_size_{j}'], dtype=np.float64) for j in range(nlv)], axis=1)
+    ask_lv = np.stack([np.asarray(df[f'ask_price_{j}'], dtype=np.float64) for j in range(nlv)], axis=1)
+    asz_lv = np.stack([np.asarray(df[f'ask_size_{j}'], dtype=np.float64) for j in range(nlv)], axis=1)
+    bp, ap, bsz, asz = bp[ok], ap[ok], bsz[ok], asz[ok]
+    t = t[ok]
     bid_lv, bsz_lv, ask_lv, asz_lv = bid_lv[ok], bsz_lv[ok], ask_lv[ok], asz_lv[ok]
     if len(t) < 5:
         return None, None

@@ -52,6 +52,9 @@ KELLY="0.25"
 CLIP_DRAWDOWN_SOFT_PCT="1.0"
 CLIP_DRAWDOWN_HARD_PCT="1.0"
 CLIP_DRAWDOWN_MIN_MULTIPLIER="0.0"
+CLIP_SESSION_DRAWDOWN_SOFT_PCT="1.0"
+CLIP_SESSION_DRAWDOWN_HARD_PCT="1.0"
+CLIP_SESSION_DRAWDOWN_MIN_MULTIPLIER="0.0"
 BR2_DISABLE_INTERNAL_MODEL_GATES="0"
 BR2_PARTICIPATION_CLIP_FRAC="0.0"
 BR2_PARTICIPATION_MAX_PAIR_COST="0.99"
@@ -133,6 +136,21 @@ BR2_TAIL_REGIME_BOOST_MIN_WHIPSAW_SCORE="1.0"
 BR2_TAIL_REGIME_BOOST_MIN_REVERSAL_PRESSURE="1.0"
 BR2_TAIL_REGIME_BOOST_MIN_REALIZED_VOL_180S_BPS="1000000000.0"
 BR2_TAIL_REGIME_BOOST_MAX_PATH_EFFICIENCY="0.0"
+COMPETITOR_RECYCLER_CHILD_CLIP_SHARES=""
+COMPETITOR_RECYCLER_MAX_LEG_SHARES=""
+COMPETITOR_RECYCLER_MAX_PAIR_COST="0.970"
+COMPETITOR_RECYCLER_REPAIR_DELTA_SHARES=""
+COMPETITOR_RECYCLER_LEAN_DELTA_SHARES=""
+COMPETITOR_RECYCLER_STOP_SECS_BEFORE_CLOSE="30.0"
+COMPETITOR_RECYCLER_MIN_REGIME_REALIZED_VOL_180S_BPS="0.0"
+COMPETITOR_RECYCLER_MIN_REGIME_SIGN_FLIP_RATE="0.0"
+COMPETITOR_RECYCLER_MAX_REGIME_PATH_EFFICIENCY="1.0"
+COMPETITOR_RECYCLER_MAX_ABS_SPOT_FLOW_30S="inf"
+COMPETITOR_RECYCLER_STRESS_WARMUP_EVENTS="20"
+COMPETITOR_RECYCLER_MAX_ATTRACTIVE_PAIR_FRAC_SO_FAR="inf"
+COMPETITOR_RECYCLER_MIN_TOP_BID_ASK_SIZE_RATIO="0.0"
+COMPETITOR_RECYCLER_STRESS_CLIP_MULTIPLIER="0.0"
+COMPETITOR_RECYCLER_QUOTE_MODE="passive_bid"
 ENFORCE_MODEL_GATE="true"
 MODEL_GATE_MIN_CONFIDENCE="0.68"
 MODEL_GATE_MAX_RISK="0.72"
@@ -186,6 +204,9 @@ while [ $# -gt 0 ]; do
         --clip-drawdown-soft-pct) CLIP_DRAWDOWN_SOFT_PCT="$2"; shift 2 ;;
         --clip-drawdown-hard-pct) CLIP_DRAWDOWN_HARD_PCT="$2"; shift 2 ;;
         --clip-drawdown-min-multiplier) CLIP_DRAWDOWN_MIN_MULTIPLIER="$2"; shift 2 ;;
+        --clip-session-drawdown-soft-pct) CLIP_SESSION_DRAWDOWN_SOFT_PCT="$2"; shift 2 ;;
+        --clip-session-drawdown-hard-pct) CLIP_SESSION_DRAWDOWN_HARD_PCT="$2"; shift 2 ;;
+        --clip-session-drawdown-min-multiplier) CLIP_SESSION_DRAWDOWN_MIN_MULTIPLIER="$2"; shift 2 ;;
         --br2-disable-internal-model-gates) BR2_DISABLE_INTERNAL_MODEL_GATES="1"; shift ;;
         --br2-participation-clip-frac) BR2_PARTICIPATION_CLIP_FRAC="$2"; shift 2 ;;
         --br2-participation-max-pair-cost) BR2_PARTICIPATION_MAX_PAIR_COST="$2"; shift 2 ;;
@@ -267,6 +288,21 @@ while [ $# -gt 0 ]; do
         --br2-tail-regime-boost-min-reversal-pressure) BR2_TAIL_REGIME_BOOST_MIN_REVERSAL_PRESSURE="$2"; shift 2 ;;
         --br2-tail-regime-boost-min-realized-vol-180s-bps) BR2_TAIL_REGIME_BOOST_MIN_REALIZED_VOL_180S_BPS="$2"; shift 2 ;;
         --br2-tail-regime-boost-max-path-efficiency) BR2_TAIL_REGIME_BOOST_MAX_PATH_EFFICIENCY="$2"; shift 2 ;;
+        --competitor-recycler-child-clip-shares) COMPETITOR_RECYCLER_CHILD_CLIP_SHARES="$2"; shift 2 ;;
+        --competitor-recycler-max-leg-shares) COMPETITOR_RECYCLER_MAX_LEG_SHARES="$2"; shift 2 ;;
+        --competitor-recycler-max-pair-cost) COMPETITOR_RECYCLER_MAX_PAIR_COST="$2"; shift 2 ;;
+        --competitor-recycler-repair-delta-shares) COMPETITOR_RECYCLER_REPAIR_DELTA_SHARES="$2"; shift 2 ;;
+        --competitor-recycler-lean-delta-shares) COMPETITOR_RECYCLER_LEAN_DELTA_SHARES="$2"; shift 2 ;;
+        --competitor-recycler-stop-secs-before-close) COMPETITOR_RECYCLER_STOP_SECS_BEFORE_CLOSE="$2"; shift 2 ;;
+        --competitor-recycler-min-regime-realized-vol-180s-bps) COMPETITOR_RECYCLER_MIN_REGIME_REALIZED_VOL_180S_BPS="$2"; shift 2 ;;
+        --competitor-recycler-min-regime-sign-flip-rate) COMPETITOR_RECYCLER_MIN_REGIME_SIGN_FLIP_RATE="$2"; shift 2 ;;
+        --competitor-recycler-max-regime-path-efficiency) COMPETITOR_RECYCLER_MAX_REGIME_PATH_EFFICIENCY="$2"; shift 2 ;;
+        --competitor-recycler-max-abs-spot-flow-30s) COMPETITOR_RECYCLER_MAX_ABS_SPOT_FLOW_30S="$2"; shift 2 ;;
+        --competitor-recycler-stress-warmup-events) COMPETITOR_RECYCLER_STRESS_WARMUP_EVENTS="$2"; shift 2 ;;
+        --competitor-recycler-max-attractive-pair-frac-so-far) COMPETITOR_RECYCLER_MAX_ATTRACTIVE_PAIR_FRAC_SO_FAR="$2"; shift 2 ;;
+        --competitor-recycler-min-top-bid-ask-size-ratio) COMPETITOR_RECYCLER_MIN_TOP_BID_ASK_SIZE_RATIO="$2"; shift 2 ;;
+        --competitor-recycler-stress-clip-multiplier) COMPETITOR_RECYCLER_STRESS_CLIP_MULTIPLIER="$2"; shift 2 ;;
+        --competitor-recycler-quote-mode) COMPETITOR_RECYCLER_QUOTE_MODE="$2"; shift 2 ;;
         --enforce-model-gate) ENFORCE_MODEL_GATE="$2"; shift 2 ;;
         --model-gate-min-confidence) MODEL_GATE_MIN_CONFIDENCE="$2"; shift 2 ;;
         --model-gate-max-risk) MODEL_GATE_MAX_RISK="$2"; shift 2 ;;
@@ -483,6 +519,31 @@ MODEL_GATE_ARGS=()
 if [ "${ENFORCE_MODEL_GATE}" != "true" ]; then
   MODEL_GATE_ARGS=(--disable-model-gate)
 fi
+COMPETITOR_RECYCLER_ARGS=(
+  --competitor-recycler-max-pair-cost "${COMPETITOR_RECYCLER_MAX_PAIR_COST}"
+  --competitor-recycler-stop-secs-before-close "${COMPETITOR_RECYCLER_STOP_SECS_BEFORE_CLOSE}"
+  --competitor-recycler-min-regime-realized-vol-180s-bps "${COMPETITOR_RECYCLER_MIN_REGIME_REALIZED_VOL_180S_BPS}"
+  --competitor-recycler-min-regime-sign-flip-rate "${COMPETITOR_RECYCLER_MIN_REGIME_SIGN_FLIP_RATE}"
+  --competitor-recycler-max-regime-path-efficiency "${COMPETITOR_RECYCLER_MAX_REGIME_PATH_EFFICIENCY}"
+  --competitor-recycler-max-abs-spot-flow-30s "${COMPETITOR_RECYCLER_MAX_ABS_SPOT_FLOW_30S}"
+  --competitor-recycler-stress-warmup-events "${COMPETITOR_RECYCLER_STRESS_WARMUP_EVENTS}"
+  --competitor-recycler-max-attractive-pair-frac-so-far "${COMPETITOR_RECYCLER_MAX_ATTRACTIVE_PAIR_FRAC_SO_FAR}"
+  --competitor-recycler-min-top-bid-ask-size-ratio "${COMPETITOR_RECYCLER_MIN_TOP_BID_ASK_SIZE_RATIO}"
+  --competitor-recycler-stress-clip-multiplier "${COMPETITOR_RECYCLER_STRESS_CLIP_MULTIPLIER}"
+  --competitor-recycler-quote-mode "${COMPETITOR_RECYCLER_QUOTE_MODE}"
+)
+if [ -n "${COMPETITOR_RECYCLER_CHILD_CLIP_SHARES}" ]; then
+  COMPETITOR_RECYCLER_ARGS+=(--competitor-recycler-child-clip-shares "${COMPETITOR_RECYCLER_CHILD_CLIP_SHARES}")
+fi
+if [ -n "${COMPETITOR_RECYCLER_MAX_LEG_SHARES}" ]; then
+  COMPETITOR_RECYCLER_ARGS+=(--competitor-recycler-max-leg-shares "${COMPETITOR_RECYCLER_MAX_LEG_SHARES}")
+fi
+if [ -n "${COMPETITOR_RECYCLER_REPAIR_DELTA_SHARES}" ]; then
+  COMPETITOR_RECYCLER_ARGS+=(--competitor-recycler-repair-delta-shares "${COMPETITOR_RECYCLER_REPAIR_DELTA_SHARES}")
+fi
+if [ -n "${COMPETITOR_RECYCLER_LEAN_DELTA_SHARES}" ]; then
+  COMPETITOR_RECYCLER_ARGS+=(--competitor-recycler-lean-delta-shares "${COMPETITOR_RECYCLER_LEAN_DELTA_SHARES}")
+fi
 FORBID_META_TRAINING_ARGS=()
 if [ "${FORBID_META_TRAINING}" = "1" ]; then
   FORBID_META_TRAINING_ARGS=(--forbid-meta-training)
@@ -579,6 +640,9 @@ for CLIP_FRAC in "\${CLIPS[@]}"; do
       --clip-drawdown-soft-pct "${CLIP_DRAWDOWN_SOFT_PCT}" \\
       --clip-drawdown-hard-pct "${CLIP_DRAWDOWN_HARD_PCT}" \\
       --clip-drawdown-min-multiplier "${CLIP_DRAWDOWN_MIN_MULTIPLIER}" \\
+      --clip-session-drawdown-soft-pct "${CLIP_SESSION_DRAWDOWN_SOFT_PCT}" \\
+      --clip-session-drawdown-hard-pct "${CLIP_SESSION_DRAWDOWN_HARD_PCT}" \\
+      --clip-session-drawdown-min-multiplier "${CLIP_SESSION_DRAWDOWN_MIN_MULTIPLIER}" \\
       "\${BR2_INTERNAL_MODEL_GATE_ARGS[@]}" \\
       --br2-participation-clip-frac "${BR2_PARTICIPATION_CLIP_FRAC}" \\
       --br2-participation-max-pair-cost "${BR2_PARTICIPATION_MAX_PAIR_COST}" \\
@@ -660,6 +724,7 @@ for CLIP_FRAC in "\${CLIPS[@]}"; do
       --br2-tail-regime-boost-min-reversal-pressure "${BR2_TAIL_REGIME_BOOST_MIN_REVERSAL_PRESSURE}" \\
       --br2-tail-regime-boost-min-realized-vol-180s-bps "${BR2_TAIL_REGIME_BOOST_MIN_REALIZED_VOL_180S_BPS}" \\
       --br2-tail-regime-boost-max-path-efficiency "${BR2_TAIL_REGIME_BOOST_MAX_PATH_EFFICIENCY}" \\
+      "\${COMPETITOR_RECYCLER_ARGS[@]}" \\
       "\${MODEL_GATE_ARGS[@]}" \\
       --model-gate-min-confidence "${MODEL_GATE_MIN_CONFIDENCE}" \\
       --model-gate-max-risk "${MODEL_GATE_MAX_RISK}" \\
@@ -714,20 +779,26 @@ shutdown -h now
 EOF
 )
 
-INSTANCE_ID=$(aws ec2 run-instances \
-    --region "$REGION" \
-    --image-id "$AMI" \
-    --instance-type "$INSTANCE_TYPE" \
-    --key-name "$KEY_NAME" \
-    --subnet-id "$SUBNET_ID" \
-    --security-group-ids "$SECURITY_GROUP_ID" \
-    --iam-instance-profile "Name=$INSTANCE_PROFILE" \
-    --instance-initiated-shutdown-behavior terminate \
-    --block-device-mappings "DeviceName=/dev/xvda,Ebs={VolumeSize=${ROOT_VOLUME_GB},VolumeType=gp3,DeleteOnTermination=true}" \
-    "${INSTANCE_MARKET_OPTIONS_ARGS[@]}" \
-    --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=pm-backtest-${RUN_ID}},{Key=run_id,Value=${RUN_ID}}]" \
-    --user-data "$USER_DATA" \
-    --query 'Instances[0].InstanceId' --output text)
+RUN_INSTANCE_ARGS=(
+    --region "$REGION"
+    --image-id "$AMI"
+    --instance-type "$INSTANCE_TYPE"
+    --key-name "$KEY_NAME"
+    --subnet-id "$SUBNET_ID"
+    --security-group-ids "$SECURITY_GROUP_ID"
+    --iam-instance-profile "Name=$INSTANCE_PROFILE"
+    --instance-initiated-shutdown-behavior terminate
+    --block-device-mappings "DeviceName=/dev/xvda,Ebs={VolumeSize=${ROOT_VOLUME_GB},VolumeType=gp3,DeleteOnTermination=true}"
+    --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=pm-backtest-${RUN_ID}},{Key=run_id,Value=${RUN_ID}}]"
+    --user-data "$USER_DATA"
+    --query 'Instances[0].InstanceId'
+    --output text
+)
+if [ "$USE_SPOT" = "1" ]; then
+    RUN_INSTANCE_ARGS+=("${INSTANCE_MARKET_OPTIONS_ARGS[@]}")
+fi
+
+INSTANCE_ID=$(aws ec2 run-instances "${RUN_INSTANCE_ARGS[@]}")
 
 echo "Launched: $INSTANCE_ID"
 echo "Results: s3://${RESULTS_BUCKET}/results/${RUN_ID}/"

@@ -10,12 +10,12 @@ use pm_model::MetaTrainingConfig;
 use pm_risk::PortfolioLimits;
 use pm_strategy::{
     BonereaperLite, BonereaperV2, BuyYesAtOpen, DeltaNeutralMm, LateBigBet, LateConfirmation,
-    LateConvexTail, PairedMmDense, ReactiveDirectional, SpotMomentumFollower, Strategy,
-    bonereaper::BonereaperLiteConfig, bonereaper_v2::BonereaperV2Config,
-    delta_neutral_mm::DeltaNeutralMmConfig, late_big_bet::LateBigBetConfig,
-    late_confirmation::LateConfirmationConfig, late_convex_tail::LateConvexTailConfig,
-    paired_mm::PairedMmDenseConfig, reactive::ReactiveDirectionalConfig,
-    spot_follower::SpotMomentumFollowerConfig,
+    LateConvexTail, LowVolDecisionSurface, PairedMmDense, ReactiveDirectional,
+    SpotMomentumFollower, Strategy, bonereaper::BonereaperLiteConfig,
+    bonereaper_v2::BonereaperV2Config, delta_neutral_mm::DeltaNeutralMmConfig,
+    late_big_bet::LateBigBetConfig, late_confirmation::LateConfirmationConfig,
+    late_convex_tail::LateConvexTailConfig, paired_mm::PairedMmDenseConfig,
+    reactive::ReactiveDirectionalConfig, spot_follower::SpotMomentumFollowerConfig,
 };
 use pm_telonex_loader::{
     Channel, TelonexStore, TelonexStoreConfig, load_binance_agg_trades_async,
@@ -38,8 +38,8 @@ use runner::{RunnerConfig, pretty_print, run_backtest};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use walkforward::{
-    StratId, WalkForwardConfig, print_summary, run_walkforward, write_market_results_jsonl_atomic,
-    write_summary_json_atomic,
+    StratId, StrategyProfileFile, WalkForwardConfig, print_summary, run_walkforward,
+    write_market_results_jsonl_atomic, write_summary_json_atomic,
 };
 
 #[derive(Parser, Debug)]
@@ -312,9 +312,73 @@ enum Cmd {
         max_per_market_exposure_frac: Option<f64>,
         #[arg(long, default_value = "BTCUSDT")]
         spot_symbol: String,
-        /// Comma-separated strategy IDs: buy_yes_at_open, reactive_directional, paired_mm, unlawful_recycler
-        #[arg(long, default_value = "reactive_directional,paired_mm")]
+        /// Comma-separated active strategy IDs.
+        ///
+        /// Active set by default:
+        /// `back_to_explore,paired_mm,bonereaper_v2`.
+        /// Use `--allow-legacy-strategies` to enable legacy names.
+        #[arg(long, default_value = "back_to_explore,paired_mm,bonereaper_v2")]
         strategies: String,
+        /// Allow previously archived strategy identifiers (for historical experiments).
+        #[arg(long, default_value_t = false)]
+        allow_legacy_strategies: bool,
+        /// JSON decision surface from scripts/low_vol_decision_model.py --out-json.
+        #[arg(long)]
+        low_vol_specialist_model: Option<PathBuf>,
+        /// Minimum predicted win probability edge over entry price for low_vol_specialist.
+        #[arg(long, default_value = "0.0")]
+        low_vol_specialist_min_edge: f64,
+        /// Minimum legacy calibrated edge over entry price for low_vol_specialist.
+        #[arg(long, default_value = "-1000000000.0")]
+        low_vol_specialist_min_legacy_edge: f64,
+        /// Book depth the low_vol_specialist taker order may sweep.
+        #[arg(long, default_value = "1")]
+        low_vol_specialist_max_depth: usize,
+        /// CompetitorRecycler child order size in shares. Omitted derives from max clip.
+        #[arg(long)]
+        competitor_recycler_child_clip_shares: Option<f64>,
+        /// CompetitorRecycler aggregate cap per leg in shares. Omitted derives from max clip.
+        #[arg(long)]
+        competitor_recycler_max_leg_shares: Option<f64>,
+        /// CompetitorRecycler maximum shared YES+NO pair quote cost.
+        #[arg(long, default_value = "0.970")]
+        competitor_recycler_max_pair_cost: f64,
+        /// CompetitorRecycler residual repair threshold in shares. Omitted derives from child clip.
+        #[arg(long)]
+        competitor_recycler_repair_delta_shares: Option<f64>,
+        /// CompetitorRecycler spot-confirmed residual lean allowance in shares. Omitted derives from child clip.
+        #[arg(long)]
+        competitor_recycler_lean_delta_shares: Option<f64>,
+        /// CompetitorRecycler quote pull time before market close.
+        #[arg(long, default_value = "30.0")]
+        competitor_recycler_stop_secs_before_close: f32,
+        /// CompetitorRecycler minimum live 180s BTC realized vol in bps.
+        #[arg(long, default_value = "0.0")]
+        competitor_recycler_min_regime_realized_vol_180s_bps: f32,
+        /// CompetitorRecycler minimum live BTC sign-flip rate.
+        #[arg(long, default_value = "0.0")]
+        competitor_recycler_min_regime_sign_flip_rate: f32,
+        /// CompetitorRecycler maximum live BTC path efficiency.
+        #[arg(long, default_value = "1.0")]
+        competitor_recycler_max_regime_path_efficiency: f32,
+        /// CompetitorRecycler maximum absolute 30s Binance aggressor-flow imbalance.
+        #[arg(long, default_value = "inf")]
+        competitor_recycler_max_abs_spot_flow_30s: f64,
+        /// CompetitorRecycler events before persistent pair-stress gate activates.
+        #[arg(long, default_value = "20")]
+        competitor_recycler_stress_warmup_events: u64,
+        /// CompetitorRecycler max attractive pair fraction before depth-stress gate can pull.
+        #[arg(long, default_value = "inf")]
+        competitor_recycler_max_attractive_pair_frac_so_far: f64,
+        /// CompetitorRecycler minimum top bid/ask size ratio when attractive-pair stress is high.
+        #[arg(long, default_value = "0.0")]
+        competitor_recycler_min_top_bid_ask_size_ratio: f64,
+        /// CompetitorRecycler child-size multiplier under flow/book stress. 0 hard-pulls, 1 leaves size unchanged.
+        #[arg(long, default_value = "0.0")]
+        competitor_recycler_stress_clip_multiplier: f64,
+        /// CompetitorRecycler quote placement: passive_bid, shared_slack_even, or shared_slack_leader.
+        #[arg(long, default_value = "passive_bid")]
+        competitor_recycler_quote_mode: String,
         #[arg(long, default_value = "64")]
         max_concurrent_fetches: usize,
         /// Research-speed replay thinning in milliseconds. 0 keeps every raw event.
@@ -360,6 +424,22 @@ enum Cmd {
         /// Example: 0.10 keeps recovery-sized trading instead of freezing.
         #[arg(long, default_value = "0.0")]
         clip_drawdown_min_multiplier: f64,
+        /// Session/day drawdown fraction where clip sizing starts scaling down.
+        /// Resets when the market date changes. Disabled unless below
+        /// --clip-session-drawdown-hard-pct.
+        #[arg(long, default_value = "1.0")]
+        clip_session_drawdown_soft_pct: f64,
+        /// Session/day drawdown fraction where clip sizing reaches the floor.
+        #[arg(long, default_value = "1.0")]
+        clip_session_drawdown_hard_pct: f64,
+        /// Minimum clip multiplier after the session hard drawdown threshold.
+        #[arg(long, default_value = "0.0")]
+        clip_session_drawdown_min_multiplier: f64,
+        /// Cap daily losses (from the equity at the start of the calendar day / session date)
+        /// at this fraction of bankroll. E.g. 0.05 = stop/risk 0 for rest of day once down 5% from day's open equity.
+        /// 1.0 or higher disables. Simple hard daily loss limit on top of drawdown scaling.
+        #[arg(long, default_value = "1.0")]
+        daily_loss_cap_pct: f64,
         /// Disable Bonereaper v2's internal model gates for pure heuristic strategy tests.
         #[arg(long, default_value_t = false)]
         br2_disable_internal_model_gates: bool,
@@ -793,6 +873,13 @@ enum Cmd {
         /// Set to zero to disable.
         #[arg(long, default_value = "0")]
         portfolio_checkpoint_every_markets: usize,
+        /// Portfolio-mode per-decision attribution rows (JSONL). Useful for
+        /// offline model research; disabled for parallel non-portfolio runs.
+        #[arg(long)]
+        decision_log: Option<PathBuf>,
+        /// Only log every Nth decision event when writing `--decision-log`.
+        #[arg(long, default_value = "1")]
+        decision_log_every_n: usize,
         /// Per-market JSONL output.
         #[arg(long)]
         out_markets: Option<PathBuf>,
@@ -1153,6 +1240,26 @@ async fn main() -> Result<()> {
             max_per_market_exposure_frac,
             spot_symbol,
             strategies,
+            allow_legacy_strategies,
+            low_vol_specialist_model,
+            low_vol_specialist_min_edge,
+            low_vol_specialist_min_legacy_edge,
+            low_vol_specialist_max_depth,
+            competitor_recycler_child_clip_shares,
+            competitor_recycler_max_leg_shares,
+            competitor_recycler_max_pair_cost,
+            competitor_recycler_repair_delta_shares,
+            competitor_recycler_lean_delta_shares,
+            competitor_recycler_stop_secs_before_close,
+            competitor_recycler_min_regime_realized_vol_180s_bps,
+            competitor_recycler_min_regime_sign_flip_rate,
+            competitor_recycler_max_regime_path_efficiency,
+            competitor_recycler_max_abs_spot_flow_30s,
+            competitor_recycler_stress_warmup_events,
+            competitor_recycler_max_attractive_pair_frac_so_far,
+            competitor_recycler_min_top_bid_ask_size_ratio,
+            competitor_recycler_stress_clip_multiplier,
+            competitor_recycler_quote_mode,
             max_concurrent_fetches,
             replay_sample_ms,
             taker_latency_ms,
@@ -1165,6 +1272,10 @@ async fn main() -> Result<()> {
             clip_drawdown_soft_pct,
             clip_drawdown_hard_pct,
             clip_drawdown_min_multiplier,
+            clip_session_drawdown_soft_pct,
+            clip_session_drawdown_hard_pct,
+            clip_session_drawdown_min_multiplier,
+            daily_loss_cap_pct,
             br2_disable_internal_model_gates,
             br2_participation_clip_frac,
             br2_participation_max_pair_cost,
@@ -1305,6 +1416,8 @@ async fn main() -> Result<()> {
             forbid_meta_training,
             disable_meta_calibration,
             portfolio_checkpoint_every_markets,
+            decision_log,
+            decision_log_every_n,
             local_cache_dir,
             out_markets,
             out_summary,
@@ -1322,6 +1435,26 @@ async fn main() -> Result<()> {
                 max_per_market_exposure_frac,
                 spot_symbol,
                 strategies,
+                allow_legacy_strategies,
+                low_vol_specialist_model,
+                low_vol_specialist_min_edge,
+                low_vol_specialist_min_legacy_edge,
+                low_vol_specialist_max_depth,
+                competitor_recycler_child_clip_shares,
+                competitor_recycler_max_leg_shares,
+                competitor_recycler_max_pair_cost,
+                competitor_recycler_repair_delta_shares,
+                competitor_recycler_lean_delta_shares,
+                competitor_recycler_stop_secs_before_close,
+                competitor_recycler_min_regime_realized_vol_180s_bps,
+                competitor_recycler_min_regime_sign_flip_rate,
+                competitor_recycler_max_regime_path_efficiency,
+                competitor_recycler_max_abs_spot_flow_30s,
+                competitor_recycler_stress_warmup_events,
+                competitor_recycler_max_attractive_pair_frac_so_far,
+                competitor_recycler_min_top_bid_ask_size_ratio,
+                competitor_recycler_stress_clip_multiplier,
+                competitor_recycler_quote_mode,
                 max_concurrent_fetches,
                 replay_sample_ms,
                 taker_latency_ms,
@@ -1334,6 +1467,10 @@ async fn main() -> Result<()> {
                 clip_drawdown_soft_pct,
                 clip_drawdown_hard_pct,
                 clip_drawdown_min_multiplier,
+                clip_session_drawdown_soft_pct,
+                clip_session_drawdown_hard_pct,
+                clip_session_drawdown_min_multiplier,
+                daily_loss_cap_pct,
                 br2_disable_internal_model_gates,
                 br2_participation_clip_frac,
                 br2_participation_max_pair_cost,
@@ -1473,6 +1610,8 @@ async fn main() -> Result<()> {
                 forbid_meta_training,
                 disable_meta_calibration,
                 portfolio_checkpoint_every_markets,
+                decision_log,
+                decision_log_every_n,
                 local_cache_dir,
                 out_markets,
                 out_summary,
@@ -2033,6 +2172,26 @@ async fn walk_forward(
     max_per_market_exposure_frac: Option<f64>,
     spot_symbol: String,
     strategies_csv: String,
+    allow_legacy_strategies: bool,
+    low_vol_specialist_model: Option<PathBuf>,
+    low_vol_specialist_min_edge: f64,
+    low_vol_specialist_min_legacy_edge: f64,
+    low_vol_specialist_max_depth: usize,
+    competitor_recycler_child_clip_shares: Option<f64>,
+    competitor_recycler_max_leg_shares: Option<f64>,
+    competitor_recycler_max_pair_cost: f64,
+    competitor_recycler_repair_delta_shares: Option<f64>,
+    competitor_recycler_lean_delta_shares: Option<f64>,
+    competitor_recycler_stop_secs_before_close: f32,
+    competitor_recycler_min_regime_realized_vol_180s_bps: f32,
+    competitor_recycler_min_regime_sign_flip_rate: f32,
+    competitor_recycler_max_regime_path_efficiency: f32,
+    competitor_recycler_max_abs_spot_flow_30s: f64,
+    competitor_recycler_stress_warmup_events: u64,
+    competitor_recycler_max_attractive_pair_frac_so_far: f64,
+    competitor_recycler_min_top_bid_ask_size_ratio: f64,
+    competitor_recycler_stress_clip_multiplier: f64,
+    competitor_recycler_quote_mode: String,
     max_concurrent_fetches: usize,
     replay_sample_ms: u64,
     taker_latency_ms: u64,
@@ -2045,6 +2204,10 @@ async fn walk_forward(
     clip_drawdown_soft_pct: f64,
     clip_drawdown_hard_pct: f64,
     clip_drawdown_min_multiplier: f64,
+    clip_session_drawdown_soft_pct: f64,
+    clip_session_drawdown_hard_pct: f64,
+    clip_session_drawdown_min_multiplier: f64,
+    daily_loss_cap_pct: f64,
     br2_disable_internal_model_gates: bool,
     br2_participation_clip_frac: f32,
     br2_participation_max_pair_cost: f32,
@@ -2184,6 +2347,8 @@ async fn walk_forward(
     forbid_meta_training: bool,
     disable_meta_calibration: bool,
     portfolio_checkpoint_every_markets: usize,
+    decision_log: Option<PathBuf>,
+    decision_log_every_n: usize,
     local_cache_dir: Option<PathBuf>,
     out_markets: Option<PathBuf>,
     out_summary: Option<PathBuf>,
@@ -2200,6 +2365,18 @@ async fn walk_forward(
     }
     if markets.is_empty() {
         return Err(anyhow!("no markets in {}", markets_path.display()));
+    }
+    // Guard against accidentally using an output manifest from a prior run dir as input.
+    // Input manifests belong under data/manifests/; data/runs/*/ is for results (markets.jsonl, logs, summaries).
+    // (The check is here so it also catches after any early filtering, but we warn on the original path.)
+    if markets_path.to_string_lossy().contains("/runs/") {
+        tracing::warn!(
+            path = %markets_path.display(),
+            "input --markets path lives under a data/runs/ experiment dir. \
+             This often indicates a copy-paste error or stale path. \
+             Prefer manifests in data/manifests/ (or a dedicated data/manifests/<experiment>/) \
+             so runs for different strategies (e.g. lively vs back_to_explore) do not mix inputs."
+        );
     }
     if skip_markets > 0 || max_markets > 0 {
         markets.sort_by_key(|m| m.close_ts);
@@ -2234,18 +2411,70 @@ async fn walk_forward(
     if fold_size == Some(0) {
         return Err(anyhow!("--fold-size must be >= 1"));
     }
+    if decision_log.is_some() && !portfolio_mode {
+        return Err(anyhow!(
+            "--decision-log is currently supported only with --portfolio-mode"
+        ));
+    }
+    if use_outcome_label {
+        crate::walkforward::validate_outcome_labels(&markets)?;
+    }
 
-    let strategies = parse_strategies(&strategies_csv)?;
+    let strategies = parse_strategies(&strategies_csv, allow_legacy_strategies)?;
+    let low_vol_specialist_surface = if let Some(path) = &low_vol_specialist_model {
+        let file =
+            File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+        let surface: LowVolDecisionSurface = serde_json::from_reader(file)
+            .with_context(|| format!("failed to parse {}", path.display()))?;
+        if !surface.is_valid() {
+            return Err(anyhow!(
+                "invalid low-vol specialist surface: feature, weight, mean, and std lengths must align"
+            ));
+        }
+        tracing::info!(
+            path = %path.display(),
+            features = surface.features.len(),
+            "loaded low-vol specialist surface"
+        );
+        Some(surface)
+    } else {
+        None
+    };
 
-    // Load optional BonereaperV2 profile (makes --profile the main way to run variants)
-    let bonereaper_profile = if let Some(p) = &profile {
-        match crate::walkforward::BonereaperV2Profile::load(p) {
-            Ok(prof) => {
-                tracing::info!(path = %p.display(), "loaded BonereaperV2 profile");
-                Some(prof)
+    // Load optional strategy profile (currently supports bonereaper_v2 and back_to_explore).
+    let selected_profile = if let Some(p) = &profile {
+        match StrategyProfileFile::load(p) {
+            Ok(profile_file) => {
+                if profile_file.warn_if_inactive(&strategies) {
+                    tracing::warn!(
+                        path = %p.display(),
+                        available_strategies = ?strategies.iter().map(|s| s.name()).collect::<Vec<_>>(),
+                        selected_profile = %profile_file
+                            .strategy_name()
+                            .unwrap_or(""),
+                        "profile strategy is not part of --strategies and will be ignored"
+                    );
+                    None
+                } else {
+                    match profile_file.selected_strategy_profile(&strategies) {
+                        Ok(Some(profile)) => {
+                            let strategy_name = profile_file.strategy_name().unwrap_or("unknown");
+                            tracing::info!(path = %p.display(), strategy = strategy_name, "loaded strategy profile");
+                            Some((strategy_name.to_string(), profile))
+                        }
+                        Ok(None) => {
+                            tracing::warn!(path = %p.display(), "profile strategy not active in selected strategy set");
+                            None
+                        }
+                        Err(e) => {
+                            tracing::warn!(path = %p.display(), error = %e, "failed to resolve strategy profile, continuing without it");
+                            None
+                        }
+                    }
+                }
             }
             Err(e) => {
-                tracing::warn!(error = %e, "failed to load profile, continuing without it");
+                tracing::warn!(path = %p.display(), error = %e, "failed to load profile, continuing without it");
                 None
             }
         }
@@ -2270,6 +2499,25 @@ async fn walk_forward(
         max_per_market_exposure_frac,
         spot_symbol,
         strategies,
+        low_vol_specialist_surface,
+        low_vol_specialist_min_edge,
+        low_vol_specialist_min_legacy_edge,
+        low_vol_specialist_max_depth,
+        competitor_recycler_child_clip_shares,
+        competitor_recycler_max_leg_shares,
+        competitor_recycler_max_pair_cost,
+        competitor_recycler_repair_delta_shares,
+        competitor_recycler_lean_delta_shares,
+        competitor_recycler_stop_secs_before_close,
+        competitor_recycler_min_regime_realized_vol_180s_bps,
+        competitor_recycler_min_regime_sign_flip_rate,
+        competitor_recycler_max_regime_path_efficiency,
+        competitor_recycler_max_abs_spot_flow_30s,
+        competitor_recycler_stress_warmup_events,
+        competitor_recycler_max_attractive_pair_frac_so_far,
+        competitor_recycler_min_top_bid_ask_size_ratio,
+        competitor_recycler_stress_clip_multiplier,
+        competitor_recycler_quote_mode,
         max_concurrent_fetches,
         replay_sample_ms,
         taker_latency_ms,
@@ -2283,6 +2531,10 @@ async fn walk_forward(
         clip_drawdown_soft_pct,
         clip_drawdown_hard_pct,
         clip_drawdown_min_multiplier,
+        clip_session_drawdown_soft_pct,
+        clip_session_drawdown_hard_pct,
+        clip_session_drawdown_min_multiplier,
+        daily_loss_cap_pct,
         br2_disable_internal_model_gates,
         br2_participation_clip_frac,
         br2_participation_max_pair_cost,
@@ -2426,96 +2678,54 @@ async fn walk_forward(
         forbid_meta_training,
         enable_meta_calibration: !disable_meta_calibration,
         portfolio_checkpoint_every_markets,
+        decision_log_jsonl: decision_log,
+        decision_log_every_n,
         checkpoint_markets_out: out_markets.clone(),
         checkpoint_summary_out: out_summary.clone(),
+        ..WalkForwardConfig::default()
     };
 
     // Apply profile values last. Profile files are the canonical way to run
     // named variants; keep ad hoc CLI sweeps profile-free or create a profile.
-    if let Some(ref prof) = bonereaper_profile {
-        prof.apply_to_walkforward_config(&mut wf_cfg);
-    }
+    let active_strats: Vec<&str> = wf_cfg.strategies.iter().map(|s| s.name()).collect();
+    let profile_log = selected_profile.as_ref().map(|(strategy, profile)| {
+        profile.apply_to_walkforward_config(&mut wf_cfg);
+        serde_json::json!({
+            "strategy": strategy,
+            "strategy_profile": profile.strategy_name(),
+        })
+    });
+
+    let profile_log = profile_log.or_else(|| {
+        profile.as_ref().map(|path| {
+            serde_json::json!({
+                "path": path
+            })
+        })
+    });
 
     let effective_config = serde_json::json!({
+        "profile": profile_log,
+        "strategies": active_strats,
+        "starting_cash_usdc": wf_cfg.starting_cash_usdc,
         "replay_sample_ms": wf_cfg.replay_sample_ms,
         "taker_latency_ms": wf_cfg.taker_latency_ms,
-        "starting_cash_usdc": wf_cfg.starting_cash_usdc,
         "clip_fraction_of_equity": wf_cfg.clip_fraction_of_equity,
         "max_clip_usdc": wf_cfg.max_clip_usdc,
         "max_order_clip_multiplier": wf_cfg.max_order_clip_multiplier,
         "max_per_market_exposure_usdc": wf_cfg.max_per_market_exposure_usdc,
-        "br2_participation_clip_frac": wf_cfg.br2_participation_clip_frac,
-        "br2_participation_max_pair_cost": wf_cfg.br2_participation_max_pair_cost,
-        "br2_participation_max_orders_per_leg": wf_cfg.br2_participation_max_orders_per_leg,
-        "br2_participation_max_inventory_delta_shares": wf_cfg.br2_participation_max_inventory_delta_shares,
-        "br2_participation_repair_inventory_delta_shares": wf_cfg.br2_participation_repair_inventory_delta_shares,
-        "br2_participation_refresh_secs": wf_cfg.br2_participation_refresh_secs,
-        "br2_participation_stop_secs_before_close": wf_cfg.br2_participation_stop_secs_before_close,
-        "br2_hedged_base_enabled": wf_cfg.br2_hedged_base_enabled,
-        "br2_hedged_base_max_secs_in": wf_cfg.br2_hedged_base_max_secs_in,
-        "br2_hedged_base_max_pair_cost": wf_cfg.br2_hedged_base_max_pair_cost,
-        "br2_hedged_base_min_minority_leg_frac": wf_cfg.br2_hedged_base_min_minority_leg_frac,
-        "br2_hedged_base_clip_usdc": wf_cfg.br2_hedged_base_clip_usdc,
-        "br2_hedged_base_max_notional_usdc": wf_cfg.br2_hedged_base_max_notional_usdc,
-        "br2_late_directional_overlay_frac": wf_cfg.br2_late_directional_overlay_frac,
-        "br2_late_confirm_min_model_edge": wf_cfg.br2_late_confirm_min_model_edge,
-        "br2_late_confirm_min_model_confidence": wf_cfg.br2_late_confirm_min_model_confidence,
-        "br2_late_confirm_max_model_risk": wf_cfg.br2_late_confirm_max_model_risk,
-        "br2_late_favourite_min_model_edge": wf_cfg.br2_late_favourite_min_model_edge,
-        "br2_late_favourite_high_cert_min_model_edge": wf_cfg.br2_late_favourite_high_cert_min_model_edge,
-        "br2_late_favourite_high_cert_full_clip_edge": wf_cfg.br2_late_favourite_high_cert_full_clip_edge,
-        "br2_late_favourite_min_model_confidence": wf_cfg.br2_late_favourite_min_model_confidence,
-        "br2_late_favourite_max_model_risk": wf_cfg.br2_late_favourite_max_model_risk,
-        "br2_late_favourite_min_model_side_p": wf_cfg.br2_late_favourite_min_model_side_p,
-        "br2_late_favourite_sweep_depth": wf_cfg.br2_late_favourite_sweep_depth,
-        "br2_late_favourite_max_clips": wf_cfg.br2_late_favourite_max_clips,
-        "br2_late_favourite_max_whipsaw_score": wf_cfg.br2_late_favourite_max_whipsaw_score,
-        "br2_late_favourite_max_reversal_pressure": wf_cfg.br2_late_favourite_max_reversal_pressure,
-        "br2_late_favourite_min_path_efficiency": wf_cfg.br2_late_favourite_min_path_efficiency,
-        "br2_late_confirm_min_realized_vol_180s_bps": wf_cfg.br2_late_confirm_min_realized_vol_180s_bps,
-        "br2_late_confirm_max_observed_range": wf_cfg.br2_late_confirm_max_observed_range,
-        "br2_high_skew_min_realized_vol_180s_bps": wf_cfg.br2_high_skew_min_realized_vol_180s_bps,
-        "br2_late_favourite_min_realized_vol_180s_bps": wf_cfg.br2_late_favourite_min_realized_vol_180s_bps,
-        "br2_late_favourite_max_observed_range": wf_cfg.br2_late_favourite_max_observed_range,
-        "br2_late_favourite_range_soft_throttle": wf_cfg.br2_late_favourite_range_soft_throttle,
-        "br2_late_favourite_range_hard_throttle": wf_cfg.br2_late_favourite_range_hard_throttle,
-        "br2_late_favourite_range_extra_edge": wf_cfg.br2_late_favourite_range_extra_edge,
-        "br2_late_favourite_range_extra_confidence": wf_cfg.br2_late_favourite_range_extra_confidence,
-        "br2_tail_clip_frac": wf_cfg.br2_tail_clip_frac,
-        "br2_tail_max_clips": wf_cfg.br2_tail_max_clips,
-        "br2_tail_sweep_depth": wf_cfg.br2_tail_sweep_depth,
-        "br2_tail_min_ask": wf_cfg.br2_tail_min_ask,
-        "br2_tail_max_ask": wf_cfg.br2_tail_max_ask,
-        "br2_tail_min_favourite_unrealized_edge": wf_cfg.br2_tail_min_favourite_unrealized_edge,
-        "br2_tail_min_observed_range": wf_cfg.br2_tail_min_observed_range,
-        "br2_tail_budget_favourite_spend_frac": wf_cfg.br2_tail_budget_favourite_spend_frac,
-        "br2_tail_budget_favourite_upside_frac": wf_cfg.br2_tail_budget_favourite_upside_frac,
-        "br2_tail_regime_boost_coverage_frac": wf_cfg.br2_tail_regime_boost_coverage_frac,
-        "br2_tail_regime_boost_budget_spend_frac": wf_cfg.br2_tail_regime_boost_budget_spend_frac,
-        "br2_tail_regime_boost_budget_upside_frac": wf_cfg.br2_tail_regime_boost_budget_upside_frac,
-        "br2_tail_regime_boost_min_whipsaw_score": wf_cfg.br2_tail_regime_boost_min_whipsaw_score,
-        "br2_tail_regime_boost_min_reversal_pressure": wf_cfg.br2_tail_regime_boost_min_reversal_pressure,
-        "br2_tail_regime_boost_min_realized_vol_180s_bps": wf_cfg.br2_tail_regime_boost_min_realized_vol_180s_bps,
-        "br2_tail_regime_boost_max_path_efficiency": wf_cfg.br2_tail_regime_boost_max_path_efficiency,
-        "br2_tail_target_favourite_loss_coverage_frac": wf_cfg.br2_tail_target_favourite_loss_coverage_frac,
-        "model_gate_min_edge": wf_cfg.model_gate_min_edge,
-        "model_btc_whipsaw_risk_weight": wf_cfg.model_btc_whipsaw_risk_weight,
-        "model_btc_path_inefficiency_risk_weight": wf_cfg.model_btc_path_inefficiency_risk_weight,
-        "model_btc_reversal_pressure_risk_weight": wf_cfg.model_btc_reversal_pressure_risk_weight,
-        "enable_market_context_features": wf_cfg.enable_market_context_features,
+        "max_per_market_exposure_frac": wf_cfg.max_per_market_exposure_frac,
+        "clip_drawdown_soft_pct": wf_cfg.clip_drawdown_soft_pct,
+        "clip_drawdown_hard_pct": wf_cfg.clip_drawdown_hard_pct,
+        "daily_loss_cap_pct": wf_cfg.daily_loss_cap_pct,
         "forbid_meta_training": wf_cfg.forbid_meta_training,
-        "meta_calibrator_snapshot_in": wf_cfg.meta_calibrator_snapshot_in.as_ref().map(|p| p.to_string_lossy()),
-        "meta_calibrator_snapshot_out": wf_cfg.meta_calibrator_snapshot_out.as_ref().map(|p| p.to_string_lossy()),
     });
     tracing::info!(
-        br2_late_confirm_min_model_edge = wf_cfg.br2_late_confirm_min_model_edge,
-        br2_late_favourite_min_model_edge = wf_cfg.br2_late_favourite_min_model_edge,
-        br2_late_favourite_high_cert_min_model_edge =
-            wf_cfg.br2_late_favourite_high_cert_min_model_edge,
-        br2_late_favourite_high_cert_full_clip_edge =
-            wf_cfg.br2_late_favourite_high_cert_full_clip_edge,
-        br2_late_confirm_max_observed_range = wf_cfg.br2_late_confirm_max_observed_range,
-        br2_tail_budget_favourite_spend_frac = wf_cfg.br2_tail_budget_favourite_spend_frac,
+        strategies = ?active_strats,
+        portfolio_mode = wf_cfg.portfolio_mode,
+        clip_fraction_of_equity = ?wf_cfg.clip_fraction_of_equity,
+        daily_loss_cap_pct = wf_cfg.daily_loss_cap_pct,
+        clip_drawdown_hard_pct = wf_cfg.clip_drawdown_hard_pct,
         replay_sample_ms = wf_cfg.replay_sample_ms,
         "effective walk-forward profile"
     );
@@ -2567,28 +2777,43 @@ async fn walk_forward(
     Ok(())
 }
 
-fn parse_strategies(csv: &str) -> Result<Vec<StratId>> {
+fn parse_strategies(csv: &str, allow_legacy: bool) -> Result<Vec<StratId>> {
     let mut out = Vec::new();
+    let mut legacy: Vec<&str> = Vec::new();
     for token in csv.split(',').map(str::trim) {
-        let id = match token {
-            "buy_yes_at_open" => StratId::BuyYesAtOpen,
-            "reactive_directional" => StratId::ReactiveDirectional,
-            "paired_mm" => StratId::PairedMm,
-            "spot_momentum_follower" => StratId::SpotMomentumFollower,
-            "late_big_bet" => StratId::LateBigBet,
-            "bonereaper_lite" => StratId::BonereaperLite,
-            "bonereaper_v2" => StratId::BonereaperV2,
-            "delta_neutral_mm" => StratId::DeltaNeutralMm,
-            "late_confirmation" => StratId::LateConfirmation,
-            "late_convex_tail" => StratId::LateConvexTail,
-            "unlawful_recycler" => StratId::UnlawfulRecycler,
-            other => return Err(anyhow!("unknown strategy: {other}")),
-        };
+        let id = StratId::from_name(token).ok_or_else(|| {
+            anyhow!(
+                "unknown strategy: {token}. supported strategies: {}",
+                StratId::all_names().join(", ")
+            )
+        })?;
+        if !allow_legacy && !id.is_active() {
+            legacy.push(token);
+            continue;
+        }
         out.push(id);
     }
-    if out.is_empty() {
-        return Err(anyhow!("no strategies specified"));
+
+    if !allow_legacy && !legacy.is_empty() {
+        let mut active = StratId::active_names();
+        let mut archived = StratId::archived_names();
+        active.sort_unstable();
+        legacy.sort_unstable();
+        archived.sort_unstable();
+        return Err(anyhow!(
+            "legacy strategies disabled in this run: {}. Set --allow-legacy-strategies and rerun, or pass only active strategies: {}. Archived strategies: {}",
+            legacy.join(", "),
+            active.join(", "),
+            archived.join(", ")
+        ));
     }
+
+    if out.is_empty() {
+        return Err(anyhow!(
+            "no strategies specified; either use active strategy IDs or pass --allow-legacy-strategies for archived ones"
+        ));
+    }
+
     Ok(out)
 }
 
@@ -2824,6 +3049,8 @@ async fn run_market_backtest(
     let market_run_mode = mode.as_str();
     let max_clip_usdc = limits.max_clip_usdc;
     let cfg = RunnerConfig {
+        current_btc_net_shares: 0.0,
+        current_eth_net_shares: 0.0,
         starting_cash_usdc: starting_cash,
         market_open_ns: market_close_ns.saturating_sub(300_000_000_000),
         market_close_ns,
@@ -2854,6 +3081,9 @@ async fn run_market_backtest(
         model_gate_min_confidence: 0.68,
         model_gate_max_risk: 0.72,
         model_gate_min_edge: 0.00,
+        daily_start_cash_usdc: starting_cash,
+        daily_loss_cap_pct: 1.0,
+        current_daily_loss_pct: 0.0,
     };
     let trade_history = match resolve_pm_trades_day(&store, &date, &asset_id).await {
         Ok(path) => match load_pm_trades_async(store.store(), path).await {
@@ -3116,5 +3346,22 @@ mod tests {
         assert!(slug_matches_prefixes("eth-updown-5m-1778370900", prefixes));
         assert!(slug_matches_prefixes("btc-updown-15m-1778370300", prefixes));
         assert!(!slug_matches_prefixes("sol-updown-5m-1778370900", prefixes));
+    }
+
+    #[test]
+    fn parse_strategies_defaults_to_active_set_only() {
+        let parsed = parse_strategies("back_to_explore,paired_mm", false).unwrap();
+        assert_eq!(parsed, vec![StratId::BackToExplore, StratId::PairedMm]);
+    }
+
+    #[test]
+    fn parse_strategies_blocks_archived_names_without_flag() {
+        assert!(parse_strategies("reactive_directional", false).is_err());
+    }
+
+    #[test]
+    fn parse_strategies_allows_archived_names_with_flag() {
+        let parsed = parse_strategies("reactive_directional", true).unwrap();
+        assert_eq!(parsed, vec![StratId::ReactiveDirectional]);
     }
 }

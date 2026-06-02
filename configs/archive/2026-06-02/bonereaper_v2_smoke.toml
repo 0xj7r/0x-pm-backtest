@@ -1,0 +1,35 @@
+# Lightweight smoke profile for quick local validation (100-500 markets)
+[strategy]
+name = "bonereaper_v2"
+
+[bonereaper_v2]
+disable_internal_model_gates = false
+late_confirm_min_model_edge = 0.02
+
+# Use current best-known settings but lighter for speed
+late_favourite_max_clips = 8
+late_favourite_sweep_depth = 5
+tail_max_clips = 2
+tail_sweep_depth = 3
+late_favourite_high_cert_full_clip_edge = 0.04
+late_favourite_min_model_edge = 0.03
+late_favourite_high_cert_min_model_edge = 0.02
+
+# Keep the important new features
+late_favourite_fragile_high_cert_ask = 0.923
+late_favourite_fragile_high_cert_max_edge = 0.005
+late_favourite_fragile_high_cert_max_path_efficiency = 0.50
+late_favourite_range_soft_throttle = 0.78
+
+# Current BTC regime risk defaults
+model_btc_whipsaw_risk_weight = 0.16
+model_btc_path_inefficiency_risk_weight = 0.10
+model_btc_reversal_pressure_risk_weight = 0.12
+late_confirm_min_realized_vol_180s_bps = 0.0
+high_skew_min_realized_vol_180s_bps = 0.0
+late_favourite_min_realized_vol_180s_bps = 0.0
+
+# Conservative tail for smoke
+tail_min_favourite_unrealized_edge = 0.0
+tail_target_favourite_loss_coverage_frac = 0.30
+tail_budget_favourite_spend_frac = 0.15

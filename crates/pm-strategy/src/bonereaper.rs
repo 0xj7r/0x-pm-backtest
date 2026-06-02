@@ -312,7 +312,13 @@ mod tests {
             prior_market_range_3d: 0.0,
             prior_market_range_7d: 0.0,
             model_output: None,
+            model_attribution: None,
             market_close_ns: close_ns,
+            btc_net_exposure_shares: 0.0,
+            eth_net_exposure_shares: 0.0,
+            daily_start_cash_usdc: 0.0,
+            daily_loss_cap_pct: 1.0,
+            current_daily_loss_pct: 0.0,
         };
         let mut s = BonereaperLite::new(BonereaperLiteConfig::default());
         // 10s into the window
@@ -339,7 +345,13 @@ mod tests {
             prior_market_range_3d: 0.0,
             prior_market_range_7d: 0.0,
             model_output: None,
+            model_attribution: None,
             market_close_ns: close_ns,
+            btc_net_exposure_shares: 0.0,
+            eth_net_exposure_shares: 0.0,
+            daily_start_cash_usdc: 0.0,
+            daily_loss_cap_pct: 1.0,
+            current_daily_loss_pct: 0.0,
         };
         let mut s = BonereaperLite::new(BonereaperLiteConfig::default());
         // mid = 0.92, very high YES; should fire convex_no

@@ -36,12 +36,16 @@ pub struct PortfolioLimits {
     /// Halt new buys when equity drops this fraction below peak (e.g. 0.20).
     pub max_drawdown_pct: f64,
     /// Cap aggregate net dollars at risk in any rolling 24h window.
+    /// Repair buys that reduce inventory imbalance are exempt (see can_open..._ex).
     pub max_daily_exposure_usdc: f64,
     /// Maximum gross outlay per individual order.
     pub max_clip_usdc: f64,
     /// Maximum cumulative outlay (long-side gross dollars) on a single
     /// market over its lifetime. Critical to prevent a single wrong-side
     /// signal from reloading repeatedly into a losing position.
+    ///
+    /// Note: repair/pair buys (those that reduce |yes_shares - no_shares|)
+    /// are exempt from this and the daily cap (see can_open_position_ex).
     pub max_per_market_exposure_usdc: f64,
 }
 
@@ -131,19 +135,44 @@ impl PortfolioState {
     /// True when a fresh order should be allowed through. The runner is the
     /// authority on this; strategies don't see the gate directly.
     pub fn can_open_position(&self, market_id: u32, prospective_outlay_usdc: f64) -> bool {
+        self.can_open_position_ex(market_id, prospective_outlay_usdc, false)
+    }
+
+    /// Like can_open_position, but if `is_repair` is true (the buy reduces
+    /// current |yes - no| imbalance), we exempt it from the gross daily and
+    /// per-market exposure caps. This allows repair/pair legs to complete
+    /// even after a tight exposure gate has been hit on initial deployment.
+    /// Still respects max_clip, drawdown halt, and cash.
+    ///
+    /// This fixes the case where "gating exposure" (tight max_daily or
+    /// max_per_market) unintentionally blocked the repair side, leaving the
+    /// book stranded.
+    pub fn can_open_position_ex(&self, market_id: u32, prospective_outlay_usdc: f64, is_repair: bool) -> bool {
         if self.halt_reason.is_some() {
-            return false;
+            // Drawdown halt is hard. Exposure halts (daily cap) can be bypassed
+            // for repair trades so we can still pair up and avoid stranding when
+            // the user has gated gross exposure for capital/risk reasons.
+            if let Some(reason) = self.halt_reason {
+                if reason != "max_daily_exposure" {
+                    return false;
+                }
+                if !is_repair {
+                    return false;
+                }
+            }
         }
         if prospective_outlay_usdc > self.limits.max_clip_usdc {
             return false;
         }
-        let new_daily = self.daily_exposure() + prospective_outlay_usdc;
-        if new_daily > self.limits.max_daily_exposure_usdc {
-            return false;
-        }
-        let new_market = self.market_exposure(market_id) + prospective_outlay_usdc;
-        if new_market > self.limits.max_per_market_exposure_usdc {
-            return false;
+        if !is_repair {
+            let new_daily = self.daily_exposure() + prospective_outlay_usdc;
+            if new_daily > self.limits.max_daily_exposure_usdc {
+                return false;
+            }
+            let new_market = self.market_exposure(market_id) + prospective_outlay_usdc;
+            if new_market > self.limits.max_per_market_exposure_usdc {
+                return false;
+            }
         }
         true
     }
@@ -260,5 +289,29 @@ mod tests {
         assert!(!p.can_open_position(7, 2.5));
         // But a different market is still OK.
         assert!(p.can_open_position(99, 2.5));
+    }
+
+    #[test]
+    fn repair_buys_bypass_exposure_caps() {
+        // Simulate being stranded long YES (yes=10, no=0), daily already at cap.
+        let mut p = PortfolioState::new(
+            100.0,
+            PortfolioLimits {
+                max_daily_exposure_usdc: 10.0,
+                max_per_market_exposure_usdc: 20.0,
+                max_clip_usdc: 100.0,
+                ..Default::default()
+            },
+        );
+        p.mark(100.0);
+        p.record_outlay(1, 0, 10.0); // at daily cap
+        // Non-repair buy (would increase imbalance) should be blocked.
+        assert!(!p.can_open_position(1, 1.0));
+        // But a repair buy (BuyNo, reduces |10-0|) should be allowed via ex.
+        assert!(p.can_open_position_ex(1, 1.0, true /* is_repair */));
+        // Even if it would push per-market over (if we had high current).
+        p.record_outlay(1, 1, 9.0); // market at 19
+        assert!(!p.can_open_position(1, 2.0));
+        assert!(p.can_open_position_ex(1, 2.0, true));
     }
 }

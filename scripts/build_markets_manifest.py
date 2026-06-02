@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Build a markets.jsonl manifest from local telonex book_snapshot_25 parquet cache.
+"""Build an unlabeled markets.jsonl manifest from local book_snapshot_25 parquet.
 
 One JSON object per (deduped) asset_id with fields: asset_id, slug, close_ts, outcome, date.
-slug is read from the parquet; close_ts is the integer suffix of the slug
-(btc-updown-5m-<close_ts>). date comes from the partition path. outcome is set to
-"Unknown" so the engine derives the up/down label from Binance spot via --use-outcome-label.
+slug is read from the parquet; the integer suffix of the slug (btc-updown-5m-<open_ts>)
+is the market OPEN epoch, so close_ts = open_ts + MARKET_DURATION_SECS (a 5-minute
+market closes 300s after it opens). date comes from the partition path.
+
+The local book cache does not contain settlement labels, so outcome is set to
+"Unknown". Do not run these manifests with walk-forward --use-outcome-label;
+use discover-markets-parquet against the labeled S3 markets parquet instead.
 """
 import glob
 import json
@@ -20,6 +24,7 @@ CACHE_ROOT = os.path.join(
     "data/cache/raw/telonex/exchange=polymarket/channel=book_snapshot_25",
 )
 SLUG_RE = re.compile(r"btc-updown-5m-(\d+)")
+MARKET_DURATION_SECS = 300
 
 
 def main(out_path: str) -> None:
@@ -60,7 +65,7 @@ def main(out_path: str) -> None:
             if not m:
                 n_skipped += 1
                 continue
-            close_ts = int(m.group(1))
+            close_ts = int(m.group(1)) + MARKET_DURATION_SECS
             seen[asset_id] = {
                 "asset_id": asset_id,
                 "slug": slug,
@@ -81,5 +86,9 @@ def main(out_path: str) -> None:
 
 
 if __name__ == "__main__":
-    out = sys.argv[1] if len(sys.argv) > 1 else "data/runs/volgate/markets-may.jsonl"
+    out = (
+        sys.argv[1]
+        if len(sys.argv) > 1
+        else "data/runs/volgate/markets-local-unlabeled.jsonl"
+    )
     main(out)

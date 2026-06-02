@@ -16,12 +16,17 @@ mkdir -p "$CACHE"
 sync_one() {
     local src="$1"
     local dst="$2"
-    AWS_REGION="$REGION" aws s3 sync "$src" "$dst" --quiet \
+    local profile_args=()
+    if [ -n "${AWS_PROFILE:-}" ]; then
+        profile_args=(--profile "$AWS_PROFILE")
+    fi
+    AWS_REGION="$REGION" aws s3 sync "$src" "$dst" "${profile_args[@]}" --quiet \
         --no-progress --cli-read-timeout 30 --cli-connect-timeout 10 \
         && echo "OK   $src" || echo "FAIL $src"
 }
 export -f sync_one
 export REGION
+export AWS_PROFILE
 
 JOBS=()
 for d in "${DAYS[@]}"; do

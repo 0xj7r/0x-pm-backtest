@@ -9,6 +9,11 @@ grids, and long walk-forward runs belong on AWS against S3 data.
 caffeinate -dimsu
 ```
 
+Only active in-flight strategy profiles are kept at repo root in `configs/`.
+Historical Bonreaper V2 profiles are intentionally archived under
+`configs/archive/2026-06-02` and should be referenced explicitly when replaying
+legacy experiments.
+
 The current long-running local keep-awake process can be checked with:
 
 ```bash
@@ -23,7 +28,7 @@ control.
 
 ## Fast local research vs fidelity runs
 
-Use `configs/bonereaper_v2_fast_research.toml` for local iteration and broad
+Use `configs/archive/2026-06-02/bonereaper_v2_fast_research.toml` for local iteration and broad
 AWS grids where the goal is ranking variants quickly. It sets
 `replay_sample_ms = 1000`, preserving the first/last event and one latest book
 event per second. On the local 2026-05-14 BTC 5m day, raw replay took 581s and
@@ -31,7 +36,7 @@ ran 15.3M BonereaperV2 gate checks. The sampled profile reduced the same day
 to tens of thousands of gate checks; wall-clock time varies heavily with local
 machine load, so use AWS for reliable grid timing.
 
-Use `configs/bonereaper_v2_leader.toml` or `--replay-sample-ms 0` for final
+Use `configs/archive/2026-06-02/bonereaper_v2_leader.toml` or `--replay-sample-ms 0` for final
 high-fidelity validation. Do not compare raw PnL and sampled PnL as identical
 execution evidence; use sampled runs to rank candidates, then promote only
 after raw replay confirms the lane attribution and drawdown profile.
@@ -42,7 +47,7 @@ Example local one-day fast research run:
 target/fast/pm-app walk-forward \
   --markets /private/tmp/markets-2026-05-14-fixed-input.jsonl \
   --local-cache-dir data/cache \
-  --profile configs/bonereaper_v2_fast_research.toml \
+  --profile configs/archive/2026-06-02/bonereaper_v2_fast_research.toml \
   --strategies bonereaper_v2 \
   --portfolio-mode \
   --use-outcome-label \

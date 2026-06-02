@@ -6,22 +6,40 @@
 
 #![forbid(unsafe_code)]
 
+pub mod back_to_explore;
 pub mod bonereaper;
 pub mod bonereaper_v2;
+#[path = "archive/competitor_recycler.rs"]
+pub mod competitor_recycler;
+#[path = "archive/delta_neutral_mm.rs"]
 pub mod delta_neutral_mm;
+#[path = "archive/last_second_snipe.rs"]
+pub mod last_second_snipe;
+#[path = "archive/late_big_bet.rs"]
 pub mod late_big_bet;
+#[path = "archive/late_confirmation.rs"]
 pub mod late_confirmation;
+#[path = "archive/late_convex_tail.rs"]
 pub mod late_convex_tail;
+#[path = "archive/lively_momentum_taker.rs"]
+pub mod lively_momentum_taker;
+#[path = "archive/low_vol_specialist.rs"]
+pub mod low_vol_specialist;
 pub mod paired_mm;
+#[path = "archive/reactive.rs"]
 pub mod reactive;
 pub mod regime;
 pub mod signals;
+#[path = "archive/spot_follower.rs"]
 pub mod spot_follower;
+#[path = "archive/spot_momentum.rs"]
 pub mod spot_momentum;
+#[path = "archive/trivial.rs"]
 pub mod trivial;
+#[path = "archive/unlawful_recycler.rs"]
 pub mod unlawful_recycler;
 
-use pm_model::ModelOutput;
+use pm_model::{ModelAttribution, ModelOutput};
 use pm_types::{ReplayEvent, SpotHistory, TradeHistory};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,7 +63,7 @@ pub struct OrderRequest {
     pub tag: &'static str,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Ctx {
     pub events_seen: u64,
     pub yes_shares: f64,
@@ -64,9 +82,31 @@ pub struct Ctx {
     /// model state before the strategy hook. Strategies can use this for
     /// ML-gated lanes while the runner still owns attribution and parity.
     pub model_output: Option<ModelOutput>,
+    /// Replay-safe feature attribution from the same canonical model evaluation.
+    /// Specialist strategies consume this to match offline decision-log training
+    /// without recomputing a parallel feature stack.
+    pub model_attribution: Option<ModelAttribution>,
     /// Market resolution time in ns since epoch (UTC). Strategies use this
     /// to compute time-to-close and gate early/mid/late behaviour.
     pub market_close_ns: i64,
+
+    // === Cross-market ladder exposure (for BackToExplore and similar ladder strategies) ===
+    // These are populated in portfolio replay so strategies can see net exposure
+    // across all currently open windows for the same asset.
+    pub btc_net_exposure_shares: f64,
+    pub eth_net_exposure_shares: f64,
+
+    /// Daily loss cap info (populated in portfolio mode for strategies that
+    /// want to avoid adding risk on bad days, while still allowing repair/pair
+    /// hedges -- better than blunt runner stop for two-sided strats).
+    pub daily_start_cash_usdc: f64,
+    pub daily_loss_cap_pct: f64,
+
+    /// Current realized daily loss (0.0 at open or non-portfolio). 0.05 means 5% down from
+    /// that day's starting equity. BackToExplore etc use this to adapt: boost pair/repair
+    /// (two-sided), cut size_mult, lower target_net on bad days. This is the "better than
+    /// hard clip=0" approach: signal-driven risk response inside the strat.
+    pub current_daily_loss_pct: f64,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -111,12 +151,21 @@ pub trait Strategy {
     fn on_market_resolved(&mut self, _market_mid: f32, _resolved_yes: bool) {}
 }
 
+pub use back_to_explore::{BackToExploreConfig, BackToExploreTaker};
 pub use bonereaper::{BonereaperLite, BonereaperLiteConfig};
 pub use bonereaper_v2::{BonereaperV2, BonereaperV2Config};
+// Archived strategy: kept for historical analysis and quick reactivation.
+pub use competitor_recycler::{CompetitorRecycler, CompetitorRecyclerConfig, PairQuoteMode};
 pub use delta_neutral_mm::{DeltaNeutralMm, DeltaNeutralMmConfig};
+// Archived strategy: kept for historical analysis and quick reactivation.
+pub use last_second_snipe::{LastSecondSnipe, LastSecondSnipeConfig};
 pub use late_big_bet::{LateBigBet, LateBigBetConfig};
 pub use late_confirmation::{LateConfirmation, LateConfirmationConfig};
 pub use late_convex_tail::{LateConvexTail, LateConvexTailConfig};
+// Archived strategy: kept for historical analysis and quick reactivation.
+pub use lively_momentum_taker::{LivelyMomentumTaker, LivelyMomentumTakerConfig};
+// Archived strategy: kept for historical analysis and quick reactivation.
+pub use low_vol_specialist::{LowVolDecisionSurface, LowVolSpecialist, LowVolSpecialistConfig};
 pub use paired_mm::{PairedMmDense, PairedMmDenseConfig};
 pub use reactive::ReactiveDirectional;
 pub use spot_follower::{SpotMomentumFollower, SpotMomentumFollowerConfig};

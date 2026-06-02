@@ -139,3 +139,43 @@ distinct orders: posts=4359 with-ticks=4359 with-fills=70 cancels=3864
      alpha: median=0.0589  geomean=0.0597  (n=65)  [proxy through-flow, OOM only]
    front-of-queue: 12/70 fills landed within 1.5s of post
 ```
+
+## Review of stranded inventory handling (focused on paired_mm, the only strat run yesterday)
+
+Current in paired_mm (the active one):
+- Passive repair via max_leg_imbalance_shares: when |yes - no| exceeds it, skip the heavy leg and only quote the light leg to repair. (In wf grids: hardcoded 0.6 for tight pairing; sims use ~2; old default was loose 30.)
+- No spot awareness originally: _spot ignored; relied on flow hitting the repair quote. Runner global imbalance cancel helps a bit.
+- Exact problem seen: quoting/fills/rebate worked great (matched the queue log 1.6% fill rate), but could get stranded one-sided on adverse move with insufficient repair fills before resolution. Residual marks directionally.
+
+Top wallets (forensics, 0xb27b, competitor re, queue log):
+- Very tight residual (repair band ~clip size or 5%).
+- Spot-leading pulls on the *exposed* side (accel, large taker, late) to avoid adding to stranding.
+- Conditional lean: allow more imbalance (or skip repair) only if spot/delta confirms the heavy side is "right"; otherwise strict repair.
+- Result: ~95% matched + rebate on volume; residual is minimized and the only risk.
+
+Changes (only to paired_mm.rs, the one that was live as "pairedmm-paper"):
+- Default max_leg_imbalance_shares tightened to 5.0.
+- New config: late_pull_secs (45s), spot_accel_pull_thresh (0.0008), min_abs_spot_ret_30s_for_lean (0.0005), lean_extra_imbalance_shares (8.0).
+- Logic added: late gate; compute 30s spot ret; accel pulls force-skip the would-be bad leg; lean widens the imbalance tolerance *only* on the favored heavy side (so you can profit from directionality if stranded "right") vs. strict repair quoting when wrong-sided.
+- Test: spot_lean_and_accel_pull_affect_skips (uses proper SpotHistory spans).
+- In wf paired grids: the explicit ..default() now pulls in the new lean/accel values automatically (on top of the 0.6 tight band).
+- Verified: cargo test -p pm-strategy paired_mm (4/4 pass); full strat tests clean (97 pass after cleaning unrelated archive).
+
+This directly incorporates the "directional signals" + "more robust repair" (via spot-gated lean vs force-repair) you asked for, modeled on what the top paired makers do. When running paired_mm (via main --strategy or walkforward), you now get the behavior.
+
+(The delta archive copy and other strats were cleaned out of this change set per the clarification that only paired_mm was under test.)
+
+### On other signals (RSI, EMA, etc) for paired_mm / this market
+The codebase already has (and validates heavily in low_vol models, regime, br2, postfill etc):
+- Custom equivalents that are more powerful than off-the-shelf TA for 5m BTC PM binaries + leading Binance spot:
+  - WhipsawRiskSnapshot (reversal_pressure, path_efficiency, sign_flip_rate, realized_vol_180s) — reversal detects exhaustion/conflicting moves (RSI-like), path_efficiency + flips = chop vs trend (like ADX/choppiness, not pure EMA trend).
+  - BtcRegime (Flat/Whipsaw good for neutral MM per comments).
+  - spot_returns_and_accel + multiple return windows (5/15/30/60/120/180s) + flow imbalance from trades.
+  - Book micro (ofi, microprice_dev) from signals.rs.
+  - YES range_so_far + vol regime + dir std/flip_rate from features.
+- Research (low_vol_decision_model, calm mm synthesis) shows these + spot leading are what matter; vanilla momentum was often noise or negative for calm/taker.
+- Plain RSI(14) or EMA on spot/YES would be highly correlated with the return windows + reversal we already compute, but noisier on short event-driven windows and less calibrated to the exact adverse selection / stranding problem.
+
+In this latest pass we wired WhipsawRiskSnapshot directly into paired_mm's lean scaling + dynamic repair tick (more aggressive fill on repair leg when rev_p high). This gives "RSI-like" mean-reversion awareness + "EMA-smoothed" chop awareness for deciding "repair stranded if wrong-sided" vs "tolerate/profit if favored", without new state or external deps.
+
+If you want an explicit EMA of 30s spot returns as the lean signal (smoother than raw ret), or a full RSI helper in signals.rs for experimentation, or to gate the whole quote on BtcRegime::Whipsaw/Flat, say the word and we'll add (only touching paired_mm + signals as needed). The current custom ones are likely higher value for your stranded/rebate goal.

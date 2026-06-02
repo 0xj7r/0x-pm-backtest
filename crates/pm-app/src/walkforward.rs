@@ -452,6 +452,14 @@ pub struct BackToExploreProfile {
     pub directional_strength_mult: Option<f64>,
     pub residual_taper_start_frac: Option<f64>,
     pub residual_min_clip_multiplier: Option<f64>,
+    pub range_soft_throttle: Option<f32>,
+    pub range_hard_throttle: Option<f32>,
+    pub range_min_clip_multiplier: Option<f64>,
+    pub range_repair_min_clip_multiplier: Option<f64>,
+    pub range_chop_min_range: Option<f32>,
+    pub range_clean_path_efficiency: Option<f32>,
+    pub range_chop_sign_flip_rate: Option<f32>,
+    pub range_reversal_pressure: Option<f32>,
     pub max_residual_shares: Option<f64>,
     pub min_clip_multiplier_to_emit: Option<f64>,
     pub refresh_secs: Option<f64>,
@@ -465,6 +473,7 @@ pub struct BackToExploreProfile {
     pub target_risk_per_clip_frac: Option<f64>,
     pub base_target_net_shares: Option<f64>,
     pub good_hour_target_net_mult: Option<f64>,
+    pub debug_signals: Option<bool>,
 }
 
 impl BackToExploreProfile {
@@ -495,6 +504,29 @@ impl BackToExploreProfile {
         apply!(
             residual_min_clip_multiplier,
             back_to_explore_residual_min_clip_multiplier
+        );
+        apply!(range_soft_throttle, back_to_explore_range_soft_throttle);
+        apply!(range_hard_throttle, back_to_explore_range_hard_throttle);
+        apply!(
+            range_min_clip_multiplier,
+            back_to_explore_range_min_clip_multiplier
+        );
+        apply!(
+            range_repair_min_clip_multiplier,
+            back_to_explore_range_repair_min_clip_multiplier
+        );
+        apply!(range_chop_min_range, back_to_explore_range_chop_min_range);
+        apply!(
+            range_clean_path_efficiency,
+            back_to_explore_range_clean_path_efficiency
+        );
+        apply!(
+            range_chop_sign_flip_rate,
+            back_to_explore_range_chop_sign_flip_rate
+        );
+        apply!(
+            range_reversal_pressure,
+            back_to_explore_range_reversal_pressure
         );
         apply!(max_residual_shares, back_to_explore_max_residual_shares);
         apply!(
@@ -529,6 +561,7 @@ impl BackToExploreProfile {
             good_hour_target_net_mult,
             back_to_explore_good_hour_target_net_mult
         );
+        apply!(debug_signals, back_to_explore_debug_signals);
     }
 }
 
@@ -719,8 +752,8 @@ pub enum VolatilityBand {
 impl VolatilityBand {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Low => "low_vol",
-            Self::High => "high_vol",
+            Self::Low => "range_le_threshold",
+            Self::High => "range_gt_threshold",
         }
     }
 }
@@ -867,6 +900,14 @@ pub struct WalkForwardConfig {
     /// E.g. 0.05 caps losses at 5% of the equity at the start of the day. 1.0 disables.
     /// Simple hard stop for the rest of the day once breached.
     pub daily_loss_cap_pct: f64,
+    /// Replay-safe portfolio risk control: after this many consecutive losing
+    /// traded markets, set clip size to zero for the next configured markets.
+    /// Disabled when `0`.
+    pub loss_streak_cooldown_after: usize,
+    /// Number of subsequent markets to skip after the loss streak trips.
+    pub loss_streak_cooldown_markets: usize,
+    /// PnL threshold used to classify a traded market as losing.
+    pub loss_streak_loss_threshold_usdc: f64,
     pub br2_disable_internal_model_gates: bool,
     pub br2_participation_clip_frac: f32,
     pub br2_participation_max_pair_cost: f32,
@@ -978,6 +1019,14 @@ pub struct WalkForwardConfig {
     pub back_to_explore_directional_strength_mult: f64,
     pub back_to_explore_residual_taper_start_frac: f64,
     pub back_to_explore_residual_min_clip_multiplier: f64,
+    pub back_to_explore_range_soft_throttle: f32,
+    pub back_to_explore_range_hard_throttle: f32,
+    pub back_to_explore_range_min_clip_multiplier: f64,
+    pub back_to_explore_range_repair_min_clip_multiplier: f64,
+    pub back_to_explore_range_chop_min_range: f32,
+    pub back_to_explore_range_clean_path_efficiency: f32,
+    pub back_to_explore_range_chop_sign_flip_rate: f32,
+    pub back_to_explore_range_reversal_pressure: f32,
     pub back_to_explore_max_residual_shares: f64,
     pub back_to_explore_min_clip_multiplier_to_emit: f64,
     pub back_to_explore_refresh_secs: f64,
@@ -991,6 +1040,7 @@ pub struct WalkForwardConfig {
     pub back_to_explore_target_risk_per_clip_frac: f64,
     pub back_to_explore_base_target_net_shares: f64,
     pub back_to_explore_good_hour_target_net_mult: f64,
+    pub back_to_explore_debug_signals: bool,
     /// Phase-3 reversal-risk score modulators. OFF by default; inert defaults
     /// keep orders byte-identical to baseline.
     pub br2_reversal_score_enabled: bool,
@@ -1097,7 +1147,7 @@ impl Default for WalkForwardConfig {
             max_order_clip_multiplier: 2.0,
             max_per_market_exposure_usdc: 50.0,
             max_per_market_exposure_frac: None,
-            spot_symbol: "BTCUSDT".to_string(),
+            spot_symbol: "auto".to_string(),
             strategies: StratId::ACTIVE.to_vec(),
             low_vol_specialist_surface: None,
             low_vol_specialist_min_edge: 0.0,
@@ -1120,6 +1170,9 @@ impl Default for WalkForwardConfig {
             clip_session_drawdown_hard_pct: 1.0,
             clip_session_drawdown_min_multiplier: 0.0,
             daily_loss_cap_pct: 1.0,
+            loss_streak_cooldown_after: 0,
+            loss_streak_cooldown_markets: 0,
+            loss_streak_loss_threshold_usdc: 0.0,
             br2_disable_internal_model_gates: false,
             br2_participation_clip_frac: 0.0,
             br2_participation_max_pair_cost: 0.99,
@@ -1231,6 +1284,14 @@ impl Default for WalkForwardConfig {
             back_to_explore_directional_strength_mult: 1.6,
             back_to_explore_residual_taper_start_frac: 0.55,
             back_to_explore_residual_min_clip_multiplier: 0.35,
+            back_to_explore_range_soft_throttle: 1.0,
+            back_to_explore_range_hard_throttle: 1.0,
+            back_to_explore_range_min_clip_multiplier: 1.0,
+            back_to_explore_range_repair_min_clip_multiplier: 1.0,
+            back_to_explore_range_chop_min_range: 1.0,
+            back_to_explore_range_clean_path_efficiency: 1.0,
+            back_to_explore_range_chop_sign_flip_rate: 1.0,
+            back_to_explore_range_reversal_pressure: 1.0,
             back_to_explore_max_residual_shares: 120.0,
             back_to_explore_min_clip_multiplier_to_emit: 0.18,
             back_to_explore_refresh_secs: 2.8,
@@ -1244,6 +1305,7 @@ impl Default for WalkForwardConfig {
             back_to_explore_target_risk_per_clip_frac: 0.0025,
             back_to_explore_base_target_net_shares: 6.0,
             back_to_explore_good_hour_target_net_mult: 3.0,
+            back_to_explore_debug_signals: false,
             br2_reversal_score_enabled: false,
             br2_reversal_score_coeffs_path: None,
             br2_reversal_score_cov_min: f32::NAN,
@@ -1316,6 +1378,14 @@ impl WalkForwardConfig {
             directional_strength_mult: self.back_to_explore_directional_strength_mult,
             residual_taper_start_frac: self.back_to_explore_residual_taper_start_frac,
             residual_min_clip_multiplier: self.back_to_explore_residual_min_clip_multiplier,
+            range_soft_throttle: self.back_to_explore_range_soft_throttle,
+            range_hard_throttle: self.back_to_explore_range_hard_throttle,
+            range_min_clip_multiplier: self.back_to_explore_range_min_clip_multiplier,
+            range_repair_min_clip_multiplier: self.back_to_explore_range_repair_min_clip_multiplier,
+            range_chop_min_range: self.back_to_explore_range_chop_min_range,
+            range_clean_path_efficiency: self.back_to_explore_range_clean_path_efficiency,
+            range_chop_sign_flip_rate: self.back_to_explore_range_chop_sign_flip_rate,
+            range_reversal_pressure: self.back_to_explore_range_reversal_pressure,
             max_residual_shares: self.back_to_explore_max_residual_shares,
             min_clip_multiplier_to_emit: self.back_to_explore_min_clip_multiplier_to_emit,
             refresh_secs: self.back_to_explore_refresh_secs,
@@ -1330,6 +1400,7 @@ impl WalkForwardConfig {
             target_risk_per_clip_frac: self.back_to_explore_target_risk_per_clip_frac,
             base_target_net_shares: self.back_to_explore_base_target_net_shares,
             good_hour_target_net_mult: self.back_to_explore_good_hour_target_net_mult,
+            debug_signals: self.back_to_explore_debug_signals,
         }
     }
 }
@@ -1491,7 +1562,9 @@ pub struct SharedRunConfig {
     pub max_order_clip_multiplier: f64,
     pub max_per_market_exposure_usdc: f64,
     pub max_per_market_exposure_frac: Option<f64>,
-    pub spot_symbol: String,
+    pub spot_symbol_mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spot_symbol_override: Option<String>,
     pub portfolio_mode: bool,
     pub max_concurrent_fetches: usize,
     pub replay_sample_ms: u64,
@@ -1506,31 +1579,18 @@ pub struct SharedRunConfig {
     pub clip_session_drawdown_hard_pct: f64,
     pub clip_session_drawdown_min_multiplier: f64,
     pub daily_loss_cap_pct: f64,
-    pub low_vol_specialist_surface_loaded: bool,
-    pub low_vol_specialist_min_edge: f64,
-    pub low_vol_specialist_min_legacy_edge: f64,
-    pub low_vol_specialist_max_depth: usize,
-    pub competitor_recycler_child_clip_shares: Option<f64>,
-    pub competitor_recycler_max_leg_shares: Option<f64>,
-    pub competitor_recycler_max_pair_cost: f64,
-    pub competitor_recycler_repair_delta_shares: Option<f64>,
-    pub competitor_recycler_lean_delta_shares: Option<f64>,
-    pub competitor_recycler_stop_secs_before_close: f32,
-    pub competitor_recycler_min_regime_realized_vol_180s_bps: f32,
-    pub competitor_recycler_min_regime_sign_flip_rate: f32,
-    pub competitor_recycler_max_regime_path_efficiency: f32,
-    pub competitor_recycler_max_abs_spot_flow_30s: f64,
-    pub competitor_recycler_stress_warmup_events: u64,
-    pub competitor_recycler_max_attractive_pair_frac_so_far: f64,
-    pub competitor_recycler_min_top_bid_ask_size_ratio: f64,
-    pub competitor_recycler_stress_clip_multiplier: f64,
-    pub competitor_recycler_quote_mode: String,
+    pub loss_streak_cooldown_after: usize,
+    pub loss_streak_cooldown_markets: usize,
+    pub loss_streak_loss_threshold_usdc: f64,
     pub enforce_model_gate: bool,
     pub model_gate_min_confidence: f32,
     pub model_gate_max_risk: f32,
     pub model_gate_min_edge: f32,
+    #[serde(rename = "model_spot_whipsaw_risk_weight")]
     pub model_btc_whipsaw_risk_weight: f32,
+    #[serde(rename = "model_spot_path_inefficiency_risk_weight")]
     pub model_btc_path_inefficiency_risk_weight: f32,
+    #[serde(rename = "model_spot_reversal_pressure_risk_weight")]
     pub model_btc_reversal_pressure_risk_weight: f32,
     pub enable_market_context_features: bool,
     pub volatility_regime_threshold: f64,
@@ -1571,7 +1631,8 @@ impl From<&WalkForwardConfig> for SharedRunConfig {
             max_order_clip_multiplier: cfg.max_order_clip_multiplier,
             max_per_market_exposure_usdc: cfg.max_per_market_exposure_usdc,
             max_per_market_exposure_frac: cfg.max_per_market_exposure_frac,
-            spot_symbol: cfg.spot_symbol.clone(),
+            spot_symbol_mode: spot_symbol_mode(&cfg.spot_symbol).to_string(),
+            spot_symbol_override: spot_symbol_override(&cfg.spot_symbol),
             portfolio_mode: cfg.portfolio_mode,
             max_concurrent_fetches: cfg.max_concurrent_fetches,
             replay_sample_ms: cfg.replay_sample_ms,
@@ -1589,33 +1650,9 @@ impl From<&WalkForwardConfig> for SharedRunConfig {
             clip_session_drawdown_hard_pct: cfg.clip_session_drawdown_hard_pct,
             clip_session_drawdown_min_multiplier: cfg.clip_session_drawdown_min_multiplier,
             daily_loss_cap_pct: cfg.daily_loss_cap_pct,
-            low_vol_specialist_surface_loaded: cfg.low_vol_specialist_surface.is_some(),
-            low_vol_specialist_min_edge: cfg.low_vol_specialist_min_edge,
-            low_vol_specialist_min_legacy_edge: cfg.low_vol_specialist_min_legacy_edge,
-            low_vol_specialist_max_depth: cfg.low_vol_specialist_max_depth,
-            competitor_recycler_child_clip_shares: cfg.competitor_recycler_child_clip_shares,
-            competitor_recycler_max_leg_shares: cfg.competitor_recycler_max_leg_shares,
-            competitor_recycler_max_pair_cost: cfg.competitor_recycler_max_pair_cost,
-            competitor_recycler_repair_delta_shares: cfg.competitor_recycler_repair_delta_shares,
-            competitor_recycler_lean_delta_shares: cfg.competitor_recycler_lean_delta_shares,
-            competitor_recycler_stop_secs_before_close: cfg
-                .competitor_recycler_stop_secs_before_close,
-            competitor_recycler_min_regime_realized_vol_180s_bps: cfg
-                .competitor_recycler_min_regime_realized_vol_180s_bps,
-            competitor_recycler_min_regime_sign_flip_rate: cfg
-                .competitor_recycler_min_regime_sign_flip_rate,
-            competitor_recycler_max_regime_path_efficiency: cfg
-                .competitor_recycler_max_regime_path_efficiency,
-            competitor_recycler_max_abs_spot_flow_30s: cfg
-                .competitor_recycler_max_abs_spot_flow_30s,
-            competitor_recycler_stress_warmup_events: cfg.competitor_recycler_stress_warmup_events,
-            competitor_recycler_max_attractive_pair_frac_so_far: cfg
-                .competitor_recycler_max_attractive_pair_frac_so_far,
-            competitor_recycler_min_top_bid_ask_size_ratio: cfg
-                .competitor_recycler_min_top_bid_ask_size_ratio,
-            competitor_recycler_stress_clip_multiplier: cfg
-                .competitor_recycler_stress_clip_multiplier,
-            competitor_recycler_quote_mode: cfg.competitor_recycler_quote_mode.clone(),
+            loss_streak_cooldown_after: cfg.loss_streak_cooldown_after,
+            loss_streak_cooldown_markets: cfg.loss_streak_cooldown_markets,
+            loss_streak_loss_threshold_usdc: cfg.loss_streak_loss_threshold_usdc,
             enforce_model_gate: cfg.enforce_model_gate,
             model_gate_min_confidence: cfg.model_gate_min_confidence,
             model_gate_max_risk: cfg.model_gate_max_risk,
@@ -1921,6 +1958,24 @@ impl From<&WalkForwardConfig> for BonereaperV2SummaryConfig {
     }
 }
 
+fn spot_symbol_mode(configured: &str) -> &'static str {
+    if configured.is_empty() {
+        "disabled"
+    } else if configured.eq_ignore_ascii_case("auto") {
+        "auto"
+    } else {
+        "override"
+    }
+}
+
+fn spot_symbol_override(configured: &str) -> Option<String> {
+    if spot_symbol_mode(configured) == "override" {
+        Some(configured.to_string())
+    } else {
+        None
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct StrategyRunConfig {
     pub strategy: &'static str,
@@ -1937,6 +1992,14 @@ pub struct BackToExploreSummaryConfig {
     pub directional_strength_mult: f64,
     pub residual_taper_start_frac: f64,
     pub residual_min_clip_multiplier: f64,
+    pub range_soft_throttle: f32,
+    pub range_hard_throttle: f32,
+    pub range_min_clip_multiplier: f64,
+    pub range_repair_min_clip_multiplier: f64,
+    pub range_chop_min_range: f32,
+    pub range_clean_path_efficiency: f32,
+    pub range_chop_sign_flip_rate: f32,
+    pub range_reversal_pressure: f32,
     pub max_residual_shares: f64,
     pub min_clip_multiplier_to_emit: f64,
     pub refresh_secs: f64,
@@ -1950,6 +2013,7 @@ pub struct BackToExploreSummaryConfig {
     pub target_risk_per_clip_frac: f64,
     pub base_target_net_shares: f64,
     pub good_hour_target_net_mult: f64,
+    pub debug_signals: bool,
 }
 
 impl From<&WalkForwardConfig> for BackToExploreSummaryConfig {
@@ -1962,6 +2026,14 @@ impl From<&WalkForwardConfig> for BackToExploreSummaryConfig {
             directional_strength_mult: cfg.back_to_explore_directional_strength_mult,
             residual_taper_start_frac: cfg.back_to_explore_residual_taper_start_frac,
             residual_min_clip_multiplier: cfg.back_to_explore_residual_min_clip_multiplier,
+            range_soft_throttle: cfg.back_to_explore_range_soft_throttle,
+            range_hard_throttle: cfg.back_to_explore_range_hard_throttle,
+            range_min_clip_multiplier: cfg.back_to_explore_range_min_clip_multiplier,
+            range_repair_min_clip_multiplier: cfg.back_to_explore_range_repair_min_clip_multiplier,
+            range_chop_min_range: cfg.back_to_explore_range_chop_min_range,
+            range_clean_path_efficiency: cfg.back_to_explore_range_clean_path_efficiency,
+            range_chop_sign_flip_rate: cfg.back_to_explore_range_chop_sign_flip_rate,
+            range_reversal_pressure: cfg.back_to_explore_range_reversal_pressure,
             max_residual_shares: cfg.back_to_explore_max_residual_shares,
             min_clip_multiplier_to_emit: cfg.back_to_explore_min_clip_multiplier_to_emit,
             refresh_secs: cfg.back_to_explore_refresh_secs,
@@ -1975,6 +2047,7 @@ impl From<&WalkForwardConfig> for BackToExploreSummaryConfig {
             target_risk_per_clip_frac: cfg.back_to_explore_target_risk_per_clip_frac,
             base_target_net_shares: cfg.back_to_explore_base_target_net_shares,
             good_hour_target_net_mult: cfg.back_to_explore_good_hour_target_net_mult,
+            debug_signals: cfg.back_to_explore_debug_signals,
         }
     }
 }
@@ -2311,6 +2384,57 @@ fn drawdown_clip_multiplier(
     } else {
         let progress = (drawdown_pct - soft_pct) / (hard_pct - soft_pct);
         1.0 - progress * (1.0 - floor)
+    }
+}
+
+fn daily_remaining_loss_budget_usdc(
+    daily_start_equity: f64,
+    current_equity: f64,
+    daily_loss_cap_pct: f64,
+) -> Option<f64> {
+    if daily_loss_cap_pct >= 1.0 || daily_start_equity <= 0.0 {
+        return None;
+    }
+    let max_loss = daily_start_equity * daily_loss_cap_pct.max(0.0);
+    let realized_loss = (daily_start_equity - current_equity).max(0.0);
+    Some((max_loss - realized_loss).max(0.0))
+}
+
+#[derive(Debug, Clone, Default)]
+struct LossStreakCooldownState {
+    consecutive_losses: usize,
+    cooldown_remaining_markets: usize,
+}
+
+impl LossStreakCooldownState {
+    fn is_active(&self) -> bool {
+        self.cooldown_remaining_markets > 0
+    }
+
+    fn consume_cooldown_market(&mut self) {
+        self.cooldown_remaining_markets = self.cooldown_remaining_markets.saturating_sub(1);
+    }
+
+    fn record_completed_market(
+        &mut self,
+        traded: bool,
+        pnl_usdc: f64,
+        loss_threshold_usdc: f64,
+        cooldown_after: usize,
+        cooldown_markets: usize,
+    ) {
+        if cooldown_after == 0 || cooldown_markets == 0 || !traded {
+            return;
+        }
+        if pnl_usdc <= loss_threshold_usdc {
+            self.consecutive_losses += 1;
+            if self.consecutive_losses >= cooldown_after {
+                self.consecutive_losses = 0;
+                self.cooldown_remaining_markets = cooldown_markets;
+            }
+        } else {
+            self.consecutive_losses = 0;
+        }
     }
 }
 
@@ -4707,6 +4831,11 @@ async fn run_portfolio(
         .map(|s| (s.name(), String::new()))
         .collect();
     let mut daily_start_equity_by_strategy = equity_by_strategy.clone();
+    let mut loss_streak_cooldown_by_strategy: HashMap<&'static str, LossStreakCooldownState> = cfg
+        .strategies
+        .iter()
+        .map(|s| (s.name(), LossStreakCooldownState::default()))
+        .collect();
     let mut shared_skew_tables: HashMap<&'static str, Arc<Mutex<SkewWinRateTable>>> =
         HashMap::new();
     let mut shared_model_states: HashMap<&'static str, Arc<Mutex<ModelState>>> = HashMap::new();
@@ -4828,15 +4957,33 @@ async fn run_portfolio(
             } else {
                 0.0
             };
-            let daily_clip_multiplier =
-                if cfg.daily_loss_cap_pct < 1.0 && daily_loss_pct >= cfg.daily_loss_cap_pct {
-                    0.0
-                } else {
-                    1.0
-                };
+            let remaining_daily_loss_budget = daily_remaining_loss_budget_usdc(
+                daily_start_equity,
+                bankroll,
+                cfg.daily_loss_cap_pct,
+            );
+            let daily_clip_multiplier = if remaining_daily_loss_budget == Some(0.0)
+                || (cfg.daily_loss_cap_pct < 1.0 && daily_loss_pct >= cfg.daily_loss_cap_pct)
+            {
+                0.0
+            } else {
+                1.0
+            };
+            let loss_streak_cooldown_active = loss_streak_cooldown_by_strategy
+                .get(strat.name())
+                .is_some_and(LossStreakCooldownState::is_active);
+            let loss_streak_clip_multiplier = if loss_streak_cooldown_active {
+                0.0
+            } else {
+                1.0
+            };
+            let max_per_market_exposure_usdc = remaining_daily_loss_budget
+                .map(|remaining| per_market_exposure_cap(cfg, bankroll).min(remaining))
+                .unwrap_or_else(|| per_market_exposure_cap(cfg, bankroll));
             let clip_multiplier = global_clip_multiplier
                 .min(session_clip_multiplier)
-                .min(daily_clip_multiplier);
+                .min(daily_clip_multiplier)
+                .min(loss_streak_clip_multiplier);
             // Per-market clip: a fraction of current equity (compounds), else
             // static fallback. Hard floor + ceiling for sanity.
             let clip = match cfg.clip_fraction_of_equity {
@@ -4850,7 +4997,7 @@ async fn run_portfolio(
                 resolved_yes,
                 portfolio_limits: PortfolioLimits {
                     max_clip_usdc: clip * cfg.max_order_clip_multiplier,
-                    max_per_market_exposure_usdc: per_market_exposure_cap(cfg, bankroll),
+                    max_per_market_exposure_usdc,
                     max_daily_exposure_usdc: bankroll * 5.0,
                     ..PortfolioLimits::default()
                 },
@@ -4920,6 +5067,19 @@ async fn run_portfolio(
                         .entry(strat.name())
                         .and_modify(|peak| *peak = peak.max(r.end_equity_usdc))
                         .or_insert(r.end_equity_usdc);
+                    if let Some(state) = loss_streak_cooldown_by_strategy.get_mut(strat.name()) {
+                        if loss_streak_cooldown_active {
+                            state.consume_cooldown_market();
+                        } else {
+                            state.record_completed_market(
+                                r.orders_filled > 0,
+                                r.pnl_usdc,
+                                cfg.loss_streak_loss_threshold_usdc,
+                                cfg.loss_streak_cooldown_after,
+                                cfg.loss_streak_cooldown_markets,
+                            );
+                        }
+                    }
                     per_strategy.insert(strat.name(), r);
                 }
                 Err(e) => {
@@ -5098,7 +5258,11 @@ fn temp_sibling_path(path: &std::path::Path) -> PathBuf {
         .file_name()
         .map(|name| name.to_string_lossy())
         .unwrap_or_else(|| "checkpoint".into());
-    path.with_file_name(format!("{file_name}.tmp"))
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    path.with_file_name(format!("{file_name}.{}.{}.tmp", std::process::id(), nanos))
 }
 
 fn aggregate_for_strategy(records: &[&StrategyMarketResult]) -> StrategyAggregate {
@@ -5429,7 +5593,15 @@ pub fn print_summary(summary: &WalkForwardSummary) {
 
     print_table("overall", &summary.per_strategy);
 
-    println!("volatility bands:");
+    let threshold = summary
+        .run_config
+        .as_ref()
+        .map(|cfg| cfg.shared.volatility_regime_threshold)
+        .unwrap_or_default();
+    println!(
+        "market YES-range buckets (threshold=max(yes_mid)-min(yes_mid) > {:.3}):",
+        threshold
+    );
     print_table(
         VolatilityBand::Low.as_str(),
         summary
@@ -5612,6 +5784,13 @@ base_clip_usdc = 9.0
 max_clip_usdc = 88.0
 refresh_secs = 1.5
 high_activity_hours = [10, 11]
+range_soft_throttle = 0.65
+range_hard_throttle = 0.95
+range_min_clip_multiplier = 0.20
+range_repair_min_clip_multiplier = 0.70
+range_chop_min_range = 0.20
+range_clean_path_efficiency = 0.78
+debug_signals = true
 "#,
         )
         .expect("write profile");
@@ -5635,6 +5814,13 @@ high_activity_hours = [10, 11]
         assert!((cfg.back_to_explore_max_clip_usdc - 88.0).abs() < f64::EPSILON);
         assert!((cfg.back_to_explore_refresh_secs - 1.5).abs() < f64::EPSILON);
         assert_eq!(cfg.back_to_explore_high_activity_hours, vec![10, 11]);
+        assert!((cfg.back_to_explore_range_soft_throttle - 0.65).abs() < f32::EPSILON);
+        assert!((cfg.back_to_explore_range_hard_throttle - 0.95).abs() < f32::EPSILON);
+        assert!((cfg.back_to_explore_range_min_clip_multiplier - 0.20).abs() < f64::EPSILON);
+        assert!((cfg.back_to_explore_range_repair_min_clip_multiplier - 0.70).abs() < f64::EPSILON);
+        assert!((cfg.back_to_explore_range_chop_min_range - 0.20).abs() < f32::EPSILON);
+        assert!((cfg.back_to_explore_range_clean_path_efficiency - 0.78).abs() < f32::EPSILON);
+        assert!(cfg.back_to_explore_debug_signals);
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -5645,12 +5831,63 @@ high_activity_hours = [10, 11]
         cfg.back_to_explore_base_clip_usdc = 15.0;
         cfg.back_to_explore_max_clip_usdc = 20.0;
         cfg.back_to_explore_base_participation_rate = 0.77;
+        cfg.back_to_explore_range_soft_throttle = 0.64;
+        cfg.back_to_explore_range_min_clip_multiplier = 0.25;
+        cfg.back_to_explore_range_repair_min_clip_multiplier = 0.75;
+        cfg.back_to_explore_range_chop_min_range = 0.22;
 
         let bte_cfg = cfg.build_back_to_explore_config(6.0, 123_456_789);
 
         assert!((bte_cfg.base_clip_usdc - 15.0).abs() < f64::EPSILON);
         assert!((bte_cfg.market_window_ns - 123_456_789) == 0);
         assert!((bte_cfg.base_participation_rate - 0.77).abs() < f64::EPSILON);
+        assert!((bte_cfg.range_soft_throttle - 0.64).abs() < f32::EPSILON);
+        assert!((bte_cfg.range_min_clip_multiplier - 0.25).abs() < f64::EPSILON);
+        assert!((bte_cfg.range_repair_min_clip_multiplier - 0.75).abs() < f64::EPSILON);
+        assert!((bte_cfg.range_chop_min_range - 0.22).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn summary_run_config_keeps_archived_knobs_out_of_shared_config() {
+        let mut cfg = WalkForwardConfig::default();
+        cfg.strategies = vec![StratId::BackToExplore];
+
+        let value = serde_json::to_value(summary_run_config(&cfg)).unwrap();
+        let shared = value.get("shared").expect("shared config missing");
+        let strategies = value
+            .get("strategies")
+            .and_then(|v| v.as_array())
+            .expect("strategy config missing");
+
+        assert!(shared.get("competitor_recycler_max_pair_cost").is_none());
+        assert!(shared.get("low_vol_specialist_min_edge").is_none());
+        assert!(shared.get("spot_symbol").is_none());
+        assert!(shared.get("model_btc_whipsaw_risk_weight").is_none());
+        assert!(
+            shared
+                .get("model_btc_path_inefficiency_risk_weight")
+                .is_none()
+        );
+        assert!(
+            shared
+                .get("model_btc_reversal_pressure_risk_weight")
+                .is_none()
+        );
+        assert_eq!(shared.get("spot_symbol_mode").unwrap(), "auto");
+        assert!(shared.get("spot_symbol_override").is_none());
+        assert!(shared.get("model_spot_whipsaw_risk_weight").is_some());
+        assert!(
+            shared
+                .get("model_spot_path_inefficiency_risk_weight")
+                .is_some()
+        );
+        assert!(
+            shared
+                .get("model_spot_reversal_pressure_risk_weight")
+                .is_some()
+        );
+        assert_eq!(strategies[0].get("strategy").unwrap(), "back_to_explore");
+        assert!(strategies[0].get("config").is_some());
     }
 
     #[test]
@@ -6026,6 +6263,40 @@ high_activity_hours = [10, 11]
     #[test]
     fn drawdown_clip_multiplier_preserves_zero_hard_stop_by_default() {
         assert!((drawdown_clip_multiplier(0.50, 0.20, 0.40, 0.0) - 0.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn daily_remaining_loss_budget_caps_next_market_exposure() {
+        assert_eq!(daily_remaining_loss_budget_usdc(2700.0, 2700.0, 1.0), None);
+        assert_eq!(
+            daily_remaining_loss_budget_usdc(2700.0, 2700.0, 0.05),
+            Some(135.0)
+        );
+        assert!(
+            (daily_remaining_loss_budget_usdc(2700.0, 2573.0, 0.05).unwrap() - 8.0).abs() < 1e-12
+        );
+        assert_eq!(
+            daily_remaining_loss_budget_usdc(2700.0, 2542.0, 0.05),
+            Some(0.0)
+        );
+    }
+
+    #[test]
+    fn loss_streak_cooldown_uses_only_completed_traded_markets() {
+        let mut state = LossStreakCooldownState::default();
+        state.record_completed_market(true, -1.0, 0.0, 2, 2);
+        assert!(!state.is_active());
+        state.record_completed_market(false, -10.0, 0.0, 2, 2);
+        assert!(!state.is_active());
+        state.record_completed_market(true, -0.01, 0.0, 2, 2);
+        assert!(state.is_active());
+
+        state.consume_cooldown_market();
+        assert!(state.is_active());
+        state.consume_cooldown_market();
+        assert!(!state.is_active());
+        state.record_completed_market(true, 0.01, 0.0, 2, 2);
+        assert_eq!(state.consecutive_losses, 0);
     }
 
     #[test]

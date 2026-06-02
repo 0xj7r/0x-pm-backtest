@@ -307,6 +307,10 @@ mod tests {
             no_shares: 0.0,
             cash_usdc: 100.0,
             market_yes_range_so_far: 0.0,
+            regime_whipsaw_score: 0.0,
+            regime_path_efficiency: 0.0,
+            regime_reversal_pressure: 0.0,
+            regime_sign_flip_rate: 0.0,
             prior_market_range_1d: 0.0,
             prior_market_range_3d: 0.0,
             prior_market_range_7d: 0.0,
@@ -378,6 +382,10 @@ mod tests {
             no_shares: 0.0,
             cash_usdc: 100.0,
             market_yes_range_so_far: 0.0,
+            regime_whipsaw_score: 0.0,
+            regime_path_efficiency: 0.0,
+            regime_reversal_pressure: 0.0,
+            regime_sign_flip_rate: 0.0,
             prior_market_range_1d: 0.0,
             prior_market_range_3d: 0.0,
             prior_market_range_7d: 0.0,
@@ -414,6 +422,10 @@ mod tests {
             no_shares: 0.0,
             cash_usdc: 100.0,
             market_yes_range_so_far: 0.0,
+            regime_whipsaw_score: 0.0,
+            regime_path_efficiency: 0.0,
+            regime_reversal_pressure: 0.0,
+            regime_sign_flip_rate: 0.0,
             prior_market_range_1d: 0.0,
             prior_market_range_3d: 0.0,
             prior_market_range_7d: 0.0,
@@ -471,6 +483,10 @@ mod tests {
             no_shares: 0.0,
             cash_usdc: 100.0,
             market_yes_range_so_far: 0.0,
+            regime_whipsaw_score: 0.0,
+            regime_path_efficiency: 0.0,
+            regime_reversal_pressure: 0.0,
+            regime_sign_flip_rate: 0.0,
             prior_market_range_1d: 0.0,
             prior_market_range_3d: 0.0,
             prior_market_range_7d: 0.0,
@@ -600,6 +616,10 @@ mod tests {
             no_shares: 0.0,
             cash_usdc: 100.0,
             market_yes_range_so_far: 0.0,
+            regime_whipsaw_score: 0.0,
+            regime_path_efficiency: 0.0,
+            regime_reversal_pressure: 0.0,
+            regime_sign_flip_rate: 0.0,
             prior_market_range_1d: 0.0,
             prior_market_range_3d: 0.0,
             prior_market_range_7d: 0.0,
@@ -625,7 +645,10 @@ mod tests {
         // Should still emit the repair (BuyNo), even though pair_cost gate would
         // have blocked if balanced.
         let has_no = out.orders.iter().any(|o| matches!(o.side, Side::BuyNo));
-        assert!(has_no, "repair leg must be emitted even under tight pair_cost gate");
+        assert!(
+            has_no,
+            "repair leg must be emitted even under tight pair_cost gate"
+        );
         // Should not emit the heavy side.
         let has_yes = out.orders.iter().any(|o| matches!(o.side, Side::BuyYes));
         assert!(!has_yes);

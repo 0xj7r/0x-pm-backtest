@@ -736,12 +736,21 @@ pub fn run_backtest<S: Strategy>(
             last_meta_sample_bucket = Some(meta_sample_bucket);
         }
         last_canonical_sample_point = Some(canonical_sample_point);
+        let whipsaw_snapshot = if spot.is_empty() {
+            WhipsawRiskSnapshot::default()
+        } else {
+            WhipsawRiskSnapshot::from_history(event.ts_ns, spot)
+        };
         let ctx = Ctx {
             events_seen: events_processed as u64,
             yes_shares,
             no_shares,
             cash_usdc: cash,
             market_yes_range_so_far,
+            regime_whipsaw_score: whipsaw_snapshot.score,
+            regime_path_efficiency: whipsaw_snapshot.path_efficiency,
+            regime_reversal_pressure: whipsaw_snapshot.reversal_pressure,
+            regime_sign_flip_rate: whipsaw_snapshot.sign_flip_rate,
             prior_market_range_1d: cfg.prior_market_range_1d,
             prior_market_range_3d: cfg.prior_market_range_3d,
             prior_market_range_7d: cfg.prior_market_range_7d,
@@ -761,11 +770,6 @@ pub fn run_backtest<S: Strategy>(
         let strategy_emitted_model_output = strategy_model_output.is_some();
         let model_output = strategy_model_output.unwrap_or(canonical_model_eval.output);
         let model_attribution = canonical_model_eval.attribution;
-        let whipsaw_snapshot = if spot.is_empty() {
-            WhipsawRiskSnapshot::default()
-        } else {
-            WhipsawRiskSnapshot::from_history(event.ts_ns, spot)
-        };
         let has_model_attribution = true;
         let edge = edge_vs_mid(&model_output, event.yes_mid);
         let direction_score = model_output.direction_score;
@@ -784,8 +788,10 @@ pub fn run_backtest<S: Strategy>(
         for req in output.orders {
             let yes_side = order_adds_yes_exposure(req.side);
             if cfg.enforce_model_gate && order_requires_model_gate(req.tag) {
-                let side_edge = pm_model::side_edge_vs_mid(&model_output, event.yes_mid, yes_side)
-                    .clamp(0.0, 1.0);
+                let side_edge = model_gate_edge_for_order(&model_output, event, &req)
+                    .unwrap_or_else(|| {
+                        pm_model::side_edge_vs_mid(&model_output, event.yes_mid, yes_side)
+                    });
                 if model_output.confidence_score < cfg.model_gate_min_confidence {
                     counters.orders_rejected_model_gate += 1;
                     counters.orders_rejected_model_gate_confidence += 1;
@@ -1579,6 +1585,35 @@ fn order_request_notional_usdc(req: OrderRequest, event: &ReplayEvent) -> Option
             Some(px as f64 * req.shares)
         }
     }
+}
+
+fn side_model_probability(model_output: &ModelOutput, yes_side: bool) -> f32 {
+    let predicted_yes = model_output.direction_score >= 0.0;
+    if yes_side == predicted_yes {
+        model_output.calibrated_p
+    } else {
+        1.0 - model_output.calibrated_p
+    }
+}
+
+fn model_gate_edge_for_order(
+    model_output: &ModelOutput,
+    event: &ReplayEvent,
+    req: &OrderRequest,
+) -> Option<f32> {
+    let yes_side = order_adds_yes_exposure(req.side);
+    let side_model_p = side_model_probability(model_output, yes_side);
+    let fill_price = depth_weighted_fill(event, req)
+        .map(|(price, _)| price)
+        .or_else(|| {
+            if req.shares > 0.0 {
+                order_request_notional_usdc(*req, event)
+                    .map(|notional| (notional / req.shares) as f32)
+            } else {
+                None
+            }
+        })?;
+    Some(side_model_p - fill_price)
 }
 
 fn mark_to_market(cash: f64, yes_shares: f64, no_shares: f64, yes_mid: f32) -> f64 {
@@ -3147,6 +3182,70 @@ mod tests {
         .unwrap();
         assert_eq!(rep.counters.orders_submitted, 0);
         assert_eq!(rep.counters.orders_rejected_model_gate, 1);
+        assert_eq!(
+            rep.counters.orders_filled_taker + rep.counters.orders_filled_maker,
+            0
+        );
+    }
+
+    #[test]
+    fn model_gate_blocks_negative_expected_fill_edge() {
+        struct NegativeFillEdgeShot;
+        impl Strategy for NegativeFillEdgeShot {
+            fn on_event(
+                &mut self,
+                _event: &ReplayEvent,
+                _ctx: &Ctx,
+                _spot: &SpotHistory,
+                _trades: &TradeHistory,
+            ) -> StrategyOutput {
+                StrategyOutput::one(OrderRequest {
+                    side: Side::BuyYes,
+                    shares: 10.0,
+                    max_depth: 1,
+                    limit_price: None,
+                    tag: "negative_fill_edge",
+                })
+            }
+
+            fn on_event_scored(
+                &mut self,
+                event: &ReplayEvent,
+                ctx: &Ctx,
+                spot: &SpotHistory,
+                trades: &TradeHistory,
+            ) -> (StrategyOutput, Option<ModelOutput>) {
+                (
+                    self.on_event(event, ctx, spot, trades),
+                    Some(ModelOutput {
+                        direction_score: 0.20,
+                        confidence_score: 0.90,
+                        calibrated_p: 0.55,
+                        risk_score: 0.10,
+                    }),
+                )
+            }
+        }
+
+        let events = vec![evt(0, 0.48, 0.60, 200.0)];
+        let cfg = RunnerConfig {
+            enforce_model_gate: true,
+            model_gate_min_edge: 0.0,
+            ..Default::default()
+        };
+        let mut strat = NegativeFillEdgeShot;
+        let rep = run_backtest(
+            &events,
+            &SpotHistory::default(),
+            &pm_types::TradeHistory::default(),
+            &mut strat,
+            &cfg,
+        )
+        .unwrap();
+
+        assert_eq!(rep.counters.orders_submitted, 0);
+        assert_eq!(rep.counters.orders_rejected_model_gate, 1);
+        assert_eq!(rep.counters.orders_rejected_model_gate_edge, 1);
         assert_eq!(
             rep.counters.orders_filled_taker + rep.counters.orders_filled_maker,
             0

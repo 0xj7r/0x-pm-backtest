@@ -72,6 +72,12 @@ pub struct Ctx {
     /// Observed market volatility so far as `max(yes_mid) - min(yes_mid)`.
     /// This is live-safe: it only includes ticks already seen by the runner.
     pub market_yes_range_so_far: f32,
+    /// Live-safe spot regime snapshot at this event. These distinguish clean
+    /// directional expansion from chop with the same observed market range.
+    pub regime_whipsaw_score: f32,
+    pub regime_path_efficiency: f32,
+    pub regime_reversal_pressure: f32,
+    pub regime_sign_flip_rate: f32,
     /// Mean full-market YES-mid range over already closed prior BTC 5m markets.
     /// These fields are live-safe in portfolio replay because they never include
     /// the current market.

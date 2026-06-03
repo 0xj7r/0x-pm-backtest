@@ -136,6 +136,7 @@ class FoldData:
     train_end: str
     test_start: str
     test_end: str
+    test_rows: list[dict[str, Any]]
     raw_pnl: np.ndarray
     cluster_mean: np.ndarray
     clusters: list[str]
@@ -172,6 +173,7 @@ def prepare_folds(
                 train_end=rows[train_end - 1]["date"],
                 test_start=rows[train_end]["date"],
                 test_end=rows[test_end - 1]["date"],
+                test_rows=test,
                 raw_pnl=np.asarray([bte_pnl(row, candidate) for row in test], dtype=np.float64),
                 cluster_mean=np.asarray(
                     [cluster_means.get(str(row["diagnostic_cluster"]), 0.0) for row in test],
@@ -513,6 +515,30 @@ def write_policy_artifact(
     path.write_text(json.dumps(policy, indent=2, sort_keys=True) + "\n")
 
 
+def write_policy_scale_rows(
+    path: Path,
+    fold_data: list[FoldData],
+    result: dict[str, Any],
+    candidate: str,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as file:
+        for fold in fold_data:
+            scales = scales_for_fold(fold, result["params"])
+            for row, scale in zip(fold.test_rows, scales, strict=True):
+                out = {
+                    "slug": row["slug"],
+                    "close_ts": int(row["close_ts"]),
+                    "date": row["date"],
+                    "diagnostic_cluster": row["diagnostic_cluster"],
+                    "strategy": "back_to_explore",
+                    "policy_label": result["params"]["label"],
+                    "scale": float(scale),
+                    "candidate_pnl_usdc": bte_pnl(row, candidate),
+                }
+                file.write(json.dumps(out, sort_keys=True) + "\n")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("dataset_jsonl")
@@ -527,6 +553,11 @@ def main() -> int:
     parser.add_argument("--out-md", required=True, type=Path)
     parser.add_argument("--out-json", required=True, type=Path)
     parser.add_argument("--out-policy-json", type=Path)
+    parser.add_argument(
+        "--out-scale-jsonl",
+        type=Path,
+        help="Write per-held-out-market policy scale rows for engine replay.",
+    )
     parser.add_argument(
         "--policy-selector",
         choices=("no_boost", "best", "risk_on", "fixed"),
@@ -587,6 +618,13 @@ def main() -> int:
             policies_evaluated,
             equivalent_policies_dropped,
         )
+    if args.out_scale_jsonl is not None:
+        write_policy_scale_rows(
+            args.out_scale_jsonl,
+            fold_data,
+            select_result(results, args.policy_selector),
+            args.candidate,
+        )
     print(
         f"searched {policies_evaluated} policies across {len(folds)} folds "
         f"({len(results)} unique behaviours)"
@@ -594,6 +632,8 @@ def main() -> int:
     print(f"best: {results[0]['params']['label']} objective={results[0]['objective']:.2f}")
     if args.out_policy_json is not None:
         print(f"policy: {args.policy_selector} -> {args.out_policy_json}")
+    if args.out_scale_jsonl is not None:
+        print(f"scales: {args.policy_selector} -> {args.out_scale_jsonl}")
     return 0
 
 

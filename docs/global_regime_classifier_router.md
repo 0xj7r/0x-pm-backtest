@@ -234,8 +234,31 @@ python3 scripts/bte_cluster_policy_search.py \
   --out-md data/runs/regime_clusters/bte_cluster_policy_search_combined.md \
   --out-json data/runs/regime_clusters/bte_cluster_policy_search_combined.json \
   --out-policy-json configs/back_to_explore_cluster_policy_combined_no_boost.json \
+  --out-scale-jsonl data/runs/regime_clusters/bte_cluster_policy_combined_no_boost_scales.jsonl \
   --policy-selector no_boost
 ```
+
+The scale JSONL contains one held-out market row per replay target:
+`slug`, `close_ts`, `policy_label`, and `scale`. Current combined output has
+`7,350` rows: `3,885` risk-off rows at `0.0x` and `3,465` normal-risk rows at
+`1.0x`.
+
+Engine replay should use that scale file with the BackToExplore runtime overlay:
+
+```bash
+cargo run --release -p pm-app -- walk-forward \
+  --markets <held-out-markets.jsonl> \
+  --strategies back_to_explore \
+  --portfolio-mode \
+  --starting-cash 2700 \
+  --back-to-explore-policy-scales-jsonl data/runs/regime_clusters/bte_cluster_policy_combined_no_boost_scales.jsonl \
+  --out-markets data/runs/<run>/markets.jsonl \
+  --out-summary data/runs/<run>/summary.json
+```
+
+Rows missing from the scale JSONL default to `1.0x`, so replay manifests must
+verify that the market list matches the exported held-out window before treating
+the result as policy validation.
 
 ## Pre-Route Feature Export
 

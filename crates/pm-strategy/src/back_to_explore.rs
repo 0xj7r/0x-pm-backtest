@@ -105,6 +105,9 @@ pub struct BackToExploreConfig {
     pub base_target_net_shares: f64,
     /// Multiplier on target net during high-activity hours.
     pub good_hour_target_net_mult: f64,
+    /// External run/harness risk overlay. `1.0` leaves BTE unchanged; `0.0`
+    /// disables new orders for this market.
+    pub external_risk_multiplier: f64,
     /// Emit per-fill internal signal logs when enabled.
     pub debug_signals: bool,
 }
@@ -145,6 +148,7 @@ impl Default for BackToExploreConfig {
             target_risk_per_clip_frac: 0.0025, // 0.25% equity risk per clip base for 2.7k cap
             base_target_net_shares: 6.0,
             good_hour_target_net_mult: 3.0,
+            external_risk_multiplier: 1.0,
             debug_signals: false,
         }
     }
@@ -546,6 +550,12 @@ impl Strategy for BackToExploreTaker {
         // Time-based risk scaling (leading signal: outside peaks, much lower risk).
         let time_risk_mult = time.size_mult.clamp(0.4, 1.2);
         size_mult *= time_risk_mult;
+
+        let external_risk_multiplier = self.cfg.external_risk_multiplier.clamp(0.0, 3.0);
+        if external_risk_multiplier <= 0.0 {
+            return StrategyOutput::hold();
+        }
+        size_mult *= external_risk_multiplier;
 
         // Occasional larger clip on very hot signals (fat tail).
         if !is_pair_fill && signal_strength_for_size > 1.25 && pair_cost < 1.01 {

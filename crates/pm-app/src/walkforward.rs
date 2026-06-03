@@ -473,6 +473,9 @@ pub struct BackToExploreProfile {
     pub target_risk_per_clip_frac: Option<f64>,
     pub base_target_net_shares: Option<f64>,
     pub good_hour_target_net_mult: Option<f64>,
+    /// Optional JSONL of per-market risk scales exported by
+    /// `scripts/bte_cluster_policy_search.py --out-scale-jsonl`.
+    pub policy_scales_jsonl: Option<PathBuf>,
     pub debug_signals: Option<bool>,
 }
 
@@ -561,6 +564,9 @@ impl BackToExploreProfile {
             good_hour_target_net_mult,
             back_to_explore_good_hour_target_net_mult
         );
+        if let Some(path) = &self.policy_scales_jsonl {
+            cfg.back_to_explore_policy_scales_jsonl = Some(path.clone());
+        }
         apply!(debug_signals, back_to_explore_debug_signals);
     }
 }
@@ -1040,6 +1046,7 @@ pub struct WalkForwardConfig {
     pub back_to_explore_target_risk_per_clip_frac: f64,
     pub back_to_explore_base_target_net_shares: f64,
     pub back_to_explore_good_hour_target_net_mult: f64,
+    pub back_to_explore_policy_scales_jsonl: Option<PathBuf>,
     pub back_to_explore_debug_signals: bool,
     /// Phase-3 reversal-risk score modulators. OFF by default; inert defaults
     /// keep orders byte-identical to baseline.
@@ -1305,6 +1312,7 @@ impl Default for WalkForwardConfig {
             back_to_explore_target_risk_per_clip_frac: 0.0025,
             back_to_explore_base_target_net_shares: 6.0,
             back_to_explore_good_hour_target_net_mult: 3.0,
+            back_to_explore_policy_scales_jsonl: None,
             back_to_explore_debug_signals: false,
             br2_reversal_score_enabled: false,
             br2_reversal_score_coeffs_path: None,
@@ -1367,6 +1375,7 @@ impl WalkForwardConfig {
         &self,
         clip: f64,
         market_window_ns: i64,
+        external_risk_multiplier: f64,
     ) -> BackToExploreConfig {
         let base_clip_usdc = (clip.max(self.back_to_explore_base_clip_usdc).max(4.0))
             .min(self.back_to_explore_max_clip_usdc);
@@ -1400,6 +1409,7 @@ impl WalkForwardConfig {
             target_risk_per_clip_frac: self.back_to_explore_target_risk_per_clip_frac,
             base_target_net_shares: self.back_to_explore_base_target_net_shares,
             good_hour_target_net_mult: self.back_to_explore_good_hour_target_net_mult,
+            external_risk_multiplier,
             debug_signals: self.back_to_explore_debug_signals,
         }
     }
@@ -1485,6 +1495,51 @@ fn market_open_ns(m: &MarketHandle) -> i64 {
 
 fn market_close_ns(m: &MarketHandle) -> i64 {
     market_close_ts(m).saturating_mul(1_000_000_000)
+}
+
+type BtePolicyScaleMap = HashMap<(String, i64), f64>;
+
+#[derive(Debug, Deserialize)]
+struct BtePolicyScaleRow {
+    slug: String,
+    close_ts: i64,
+    scale: f64,
+}
+
+fn load_bte_policy_scales(path: &Path) -> Result<BtePolicyScaleMap> {
+    let file = File::open(path)
+        .with_context(|| format!("failed to open BTE policy scale file {}", path.display()))?;
+    let mut out = HashMap::new();
+    for (line_idx, line) in BufReader::new(file).lines().enumerate() {
+        let line = line.with_context(|| {
+            format!(
+                "failed to read line {} from BTE policy scale file {}",
+                line_idx + 1,
+                path.display()
+            )
+        })?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let row: BtePolicyScaleRow = serde_json::from_str(&line).with_context(|| {
+            format!(
+                "failed to parse line {} from BTE policy scale file {}",
+                line_idx + 1,
+                path.display()
+            )
+        })?;
+        out.insert((row.slug, row.close_ts), row.scale.clamp(0.0, 3.0));
+    }
+    Ok(out)
+}
+
+fn bte_policy_scale_for(scales: Option<&BtePolicyScaleMap>, market: &MarketHandle) -> f64 {
+    scales
+        .and_then(|map| {
+            map.get(&(market.slug.clone(), market_close_ts(market)))
+                .copied()
+        })
+        .unwrap_or(1.0)
 }
 
 fn outcome_label_resolved_yes(outcome: &str) -> Option<bool> {
@@ -2013,6 +2068,8 @@ pub struct BackToExploreSummaryConfig {
     pub target_risk_per_clip_frac: f64,
     pub base_target_net_shares: f64,
     pub good_hour_target_net_mult: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_scales_jsonl: Option<String>,
     pub debug_signals: bool,
 }
 
@@ -2047,6 +2104,10 @@ impl From<&WalkForwardConfig> for BackToExploreSummaryConfig {
             target_risk_per_clip_frac: cfg.back_to_explore_target_risk_per_clip_frac,
             base_target_net_shares: cfg.back_to_explore_base_target_net_shares,
             good_hour_target_net_mult: cfg.back_to_explore_good_hour_target_net_mult,
+            policy_scales_jsonl: cfg
+                .back_to_explore_policy_scales_jsonl
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string()),
             debug_signals: cfg.back_to_explore_debug_signals,
         }
     }
@@ -4186,6 +4247,12 @@ async fn run_markets(
     let spot_empty = Arc::new(SpotHistory::default());
     let store_inner = store.store();
     let cfg_arc = Arc::new(cfg.clone());
+    let bte_policy_scales = cfg
+        .back_to_explore_policy_scales_jsonl
+        .as_deref()
+        .map(load_bte_policy_scales)
+        .transpose()?
+        .map(Arc::new);
 
     // Phase 1: bounded async I/O — only load raw data + build runner config.
     // No strategy execution here.
@@ -4339,6 +4406,7 @@ async fn run_markets(
             let mut market_runner_cfg = runner_cfg.clone();
             market_runner_cfg.current_btc_net_shares = btc_net;
             market_runner_cfg.current_eth_net_shares = eth_net;
+            let bte_policy_scale = bte_policy_scale_for(bte_policy_scales.as_deref(), &m);
 
             let mut per_strategy = HashMap::new();
             for &strat in &cfg.strategies {
@@ -4353,6 +4421,11 @@ async fn run_markets(
                     cfg.max_clip_usdc,
                     None,
                     None,
+                    if strat == StratId::BackToExplore {
+                        bte_policy_scale
+                    } else {
+                        1.0
+                    },
                 ) {
                     Ok(mut r) => {
                         for sample in &mut r.model_training_samples {
@@ -4403,6 +4476,7 @@ async fn run_markets(
             .into_par_iter()
             .map(|(m, events_for_run, spot, trades, runner_cfg, idx)| {
                 let mut per_strategy = HashMap::new();
+                let bte_policy_scale = bte_policy_scale_for(bte_policy_scales.as_deref(), &m);
                 for &strat in &cfg.strategies {
                     match run_one_strategy(
                         strat,
@@ -4415,6 +4489,11 @@ async fn run_markets(
                         cfg.max_clip_usdc,
                         None,
                         None,
+                        if strat == StratId::BackToExplore {
+                            bte_policy_scale
+                        } else {
+                            1.0
+                        },
                     ) {
                         Ok(mut r) => {
                             for sample in &mut r.model_training_samples {
@@ -4462,6 +4541,7 @@ fn run_one_strategy(
     clip: f64,
     shared_skew_table: Option<Arc<Mutex<SkewWinRateTable>>>,
     shared_model_state: Option<Arc<Mutex<ModelState>>>,
+    bte_external_risk_multiplier: f64,
 ) -> Result<StrategyMarketResult> {
     let (report, bonereaper_v2_gate_stats) = match strat {
         StratId::BuyYesAtOpen => {
@@ -4748,7 +4828,11 @@ fn run_one_strategy(
                 .market_close_ns
                 .saturating_sub(runner_cfg.market_open_ns)
                 .max(1);
-            let bte_cfg = cfg.build_back_to_explore_config(clip, market_window_ns);
+            let bte_cfg = cfg.build_back_to_explore_config(
+                clip,
+                market_window_ns,
+                bte_external_risk_multiplier,
+            );
             let mut s = BackToExploreTaker::new(bte_cfg);
             (
                 run_backtest(events, spot, trades, &mut s, runner_cfg)?,
@@ -4820,6 +4904,11 @@ async fn run_portfolio(
 ) -> Result<(Vec<MarketResult>, WalkForwardSummary)> {
     let store_inner = store.store();
     let empty_spot = Arc::new(SpotHistory::default());
+    let bte_policy_scales = cfg
+        .back_to_explore_policy_scales_jsonl
+        .as_deref()
+        .map(load_bte_policy_scales)
+        .transpose()?;
     let mut equity_by_strategy: HashMap<&'static str, f64> = cfg
         .strategies
         .iter()
@@ -4913,6 +5002,7 @@ async fn run_portfolio(
 
         let mut per_strategy = HashMap::new();
         let mut captured_meta_sample_for_market = false;
+        let bte_policy_scale = bte_policy_scale_for(bte_policy_scales.as_ref(), m);
         for &strat in &cfg.strategies {
             let bankroll = *equity_by_strategy
                 .get(strat.name())
@@ -5052,6 +5142,11 @@ async fn run_portfolio(
                 clip,
                 shared_skew_tables.get(strat.name()).cloned(),
                 shared_model_states.get(strat.name()).cloned(),
+                if strat == StratId::BackToExplore {
+                    bte_policy_scale
+                } else {
+                    1.0
+                },
             ) {
                 Ok(mut r) => {
                     for sample in &mut r.model_training_samples {
@@ -5793,6 +5888,7 @@ range_min_clip_multiplier = 0.20
 range_repair_min_clip_multiplier = 0.70
 range_chop_min_range = 0.20
 range_clean_path_efficiency = 0.78
+policy_scales_jsonl = "data/runs/regime_clusters/bte_scales.jsonl"
 debug_signals = true
 "#,
         )
@@ -5823,6 +5919,10 @@ debug_signals = true
         assert!((cfg.back_to_explore_range_repair_min_clip_multiplier - 0.70).abs() < f64::EPSILON);
         assert!((cfg.back_to_explore_range_chop_min_range - 0.20).abs() < f32::EPSILON);
         assert!((cfg.back_to_explore_range_clean_path_efficiency - 0.78).abs() < f32::EPSILON);
+        assert_eq!(
+            cfg.back_to_explore_policy_scales_jsonl.as_deref(),
+            Some(Path::new("data/runs/regime_clusters/bte_scales.jsonl"))
+        );
         assert!(cfg.back_to_explore_debug_signals);
 
         let _ = std::fs::remove_dir_all(&root);
@@ -5839,7 +5939,7 @@ debug_signals = true
         cfg.back_to_explore_range_repair_min_clip_multiplier = 0.75;
         cfg.back_to_explore_range_chop_min_range = 0.22;
 
-        let bte_cfg = cfg.build_back_to_explore_config(6.0, 123_456_789);
+        let bte_cfg = cfg.build_back_to_explore_config(6.0, 123_456_789, 0.25);
 
         assert!((bte_cfg.base_clip_usdc - 15.0).abs() < f64::EPSILON);
         assert!((bte_cfg.market_window_ns - 123_456_789) == 0);
@@ -5848,6 +5948,7 @@ debug_signals = true
         assert!((bte_cfg.range_min_clip_multiplier - 0.25).abs() < f64::EPSILON);
         assert!((bte_cfg.range_repair_min_clip_multiplier - 0.75).abs() < f64::EPSILON);
         assert!((bte_cfg.range_chop_min_range - 0.22).abs() < f32::EPSILON);
+        assert!((bte_cfg.external_risk_multiplier - 0.25).abs() < f64::EPSILON);
     }
 
     #[test]

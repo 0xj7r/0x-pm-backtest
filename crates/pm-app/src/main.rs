@@ -288,6 +288,10 @@ enum Cmd {
         /// values for the fields present in the profile.
         #[arg(long)]
         profile: Option<PathBuf>,
+        /// Optional per-market BTE risk scale JSONL exported by
+        /// scripts/bte_cluster_policy_search.py --out-scale-jsonl.
+        #[arg(long)]
+        back_to_explore_policy_scales_jsonl: Option<PathBuf>,
         /// Chronological offset for smoke/diagnostic slices.
         #[arg(long, default_value_t = 0)]
         skip_markets: usize,
@@ -1230,6 +1234,7 @@ async fn main() -> Result<()> {
         Cmd::WalkForward {
             markets,
             profile,
+            back_to_explore_policy_scales_jsonl,
             skip_markets,
             max_markets,
             starting_cash,
@@ -1425,6 +1430,7 @@ async fn main() -> Result<()> {
             walk_forward(
                 markets,
                 profile,
+                back_to_explore_policy_scales_jsonl,
                 skip_markets,
                 max_markets,
                 starting_cash,
@@ -2162,6 +2168,7 @@ fn string_value(array: &StringArray, row: usize) -> Option<&str> {
 async fn walk_forward(
     markets_path: PathBuf,
     profile: Option<PathBuf>,
+    back_to_explore_policy_scales_jsonl: Option<PathBuf>,
     skip_markets: usize,
     max_markets: usize,
     starting_cash: f64,
@@ -2682,6 +2689,7 @@ async fn walk_forward(
         decision_log_every_n,
         checkpoint_markets_out: out_markets.clone(),
         checkpoint_summary_out: out_summary.clone(),
+        back_to_explore_policy_scales_jsonl,
         ..WalkForwardConfig::default()
     };
 
@@ -2718,6 +2726,10 @@ async fn walk_forward(
         "clip_drawdown_soft_pct": wf_cfg.clip_drawdown_soft_pct,
         "clip_drawdown_hard_pct": wf_cfg.clip_drawdown_hard_pct,
         "daily_loss_cap_pct": wf_cfg.daily_loss_cap_pct,
+        "back_to_explore_policy_scales_jsonl": wf_cfg
+            .back_to_explore_policy_scales_jsonl
+            .as_ref()
+            .map(|path| path.to_string_lossy()),
         "forbid_meta_training": wf_cfg.forbid_meta_training,
     });
     tracing::info!(

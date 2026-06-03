@@ -224,6 +224,25 @@ def brier(y: np.ndarray, p: np.ndarray) -> float:
     return float(((p - y) ** 2).mean())
 
 
+def roc_auc(y: np.ndarray, p: np.ndarray) -> float:
+    positives = int(y.sum())
+    negatives = int(len(y) - positives)
+    if positives == 0 or negatives == 0:
+        return float("nan")
+    order = np.argsort(p, kind="mergesort")
+    ranks = np.empty(len(p), dtype=np.float64)
+    i = 0
+    while i < len(order):
+        j = i + 1
+        while j < len(order) and p[order[j]] == p[order[i]]:
+            j += 1
+        avg_rank = (i + 1 + j) / 2.0
+        ranks[order[i:j]] = avg_rank
+        i = j
+    rank_sum_pos = float(ranks[y == 1.0].sum())
+    return (rank_sum_pos - positives * (positives + 1) / 2.0) / (positives * negatives)
+
+
 def summarize_gate(name: str, fills: list[dict[str, Any]], probs: np.ndarray, threshold: float) -> dict[str, Any]:
     selected = [fill for fill, p in zip(fills, probs) if p - float(fill.get("price") or 0.0) >= threshold]
     pnl = sum(float(fill["pnl"]) for fill in selected)
@@ -312,7 +331,19 @@ def main() -> int:
         pt = p_test[idx]
         pe = existing_test[idx]
         pnl = sum(float(test[i]["pnl"]) for i in idx)
-        tag_rows.append((tag, len(idx), pnl, log_loss(yt, pt), log_loss(yt, pe), brier(yt, pt), brier(yt, pe)))
+        tag_rows.append(
+            (
+                tag,
+                len(idx),
+                pnl,
+                log_loss(yt, pt),
+                log_loss(yt, pe),
+                brier(yt, pt),
+                brier(yt, pe),
+                roc_auc(yt, pt),
+                roc_auc(yt, pe),
+            )
+        )
 
     lines = []
     lines.append("# Recent Regime Logistic Gate Report")
@@ -323,11 +354,20 @@ def main() -> int:
     lines.append("")
     lines.append("## Probability Quality")
     lines.append("")
-    lines.append("| Split | Model | Log Loss | Brier |")
-    lines.append("|---|---|---:|---:|")
-    lines.append(f"| train | regime logistic | {fmt(log_loss(y_train, p_train))} | {fmt(brier(y_train, p_train))} |")
-    lines.append(f"| test | regime logistic | {fmt(log_loss(y_test, p_test))} | {fmt(brier(y_test, p_test))} |")
-    lines.append(f"| test | existing side_model_p | {fmt(log_loss(y_test, existing_test))} | {fmt(brier(y_test, existing_test))} |")
+    lines.append("| Split | Model | Log Loss | Brier | AUC |")
+    lines.append("|---|---|---:|---:|---:|")
+    lines.append(
+        f"| train | regime logistic | {fmt(log_loss(y_train, p_train))} | "
+        f"{fmt(brier(y_train, p_train))} | {fmt(roc_auc(y_train, p_train))} |"
+    )
+    lines.append(
+        f"| test | regime logistic | {fmt(log_loss(y_test, p_test))} | "
+        f"{fmt(brier(y_test, p_test))} | {fmt(roc_auc(y_test, p_test))} |"
+    )
+    lines.append(
+        f"| test | existing side_model_p | {fmt(log_loss(y_test, existing_test))} | "
+        f"{fmt(brier(y_test, existing_test))} | {fmt(roc_auc(y_test, existing_test))} |"
+    )
     lines.append("")
     lines.append("## PnL Gate On Final Window")
     lines.append("")
@@ -355,10 +395,16 @@ def main() -> int:
     lines.append("")
     lines.append("## Test Metrics By Fill Tag")
     lines.append("")
-    lines.append("| Tag | Fills | PnL | Logistic LL | Existing LL | Logistic Brier | Existing Brier |")
-    lines.append("|---|---:|---:|---:|---:|---:|---:|")
-    for tag, count, pnl, ll_m, ll_e, br_m, br_e in tag_rows:
-        lines.append(f"| {tag} | {count} | ${pnl:.2f} | {ll_m:.4f} | {ll_e:.4f} | {br_m:.4f} | {br_e:.4f} |")
+    lines.append(
+        "| Tag | Fills | PnL | Logistic LL | Existing LL | Logistic Brier | "
+        "Existing Brier | Logistic AUC | Existing AUC |"
+    )
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|")
+    for tag, count, pnl, ll_m, ll_e, br_m, br_e, auc_m, auc_e in tag_rows:
+        lines.append(
+            f"| {tag} | {count} | ${pnl:.2f} | {ll_m:.4f} | {ll_e:.4f} | "
+            f"{br_m:.4f} | {br_e:.4f} | {auc_m:.4f} | {auc_e:.4f} |"
+        )
     lines.append("")
     lines.append("## Largest Coefficients")
     lines.append("")
@@ -385,6 +431,9 @@ def main() -> int:
                 "existing_test_log_loss": log_loss(y_test, existing_test),
                 "test_brier": brier(y_test, p_test),
                 "existing_test_brier": brier(y_test, existing_test),
+                "train_auc": roc_auc(y_train, p_train),
+                "test_auc": roc_auc(y_test, p_test),
+                "existing_test_auc": roc_auc(y_test, existing_test),
                 "all_test_pnl": all_test_pnl,
                 "model_gate": model_gate,
                 "existing_gate": existing_gate,

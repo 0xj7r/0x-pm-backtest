@@ -292,6 +292,17 @@ pub struct DecisionLogRow {
     pub confidence_score: f32,
     pub calibrated_p: f32,
     pub risk_score: f32,
+    pub market_yes_range_so_far: f32,
+    pub seconds_since_open: f32,
+    pub seconds_to_close: f32,
+    pub regime_whipsaw_score: f32,
+    pub regime_path_efficiency: f32,
+    pub regime_reversal_pressure: f32,
+    pub regime_sign_flip_rate: f32,
+    pub regime_realized_vol_180s_bps: f32,
+    pub prior_market_range_1d: f32,
+    pub prior_market_range_3d: f32,
+    pub prior_market_range_7d: f32,
     pub feature_observed_yes_range_so_far: f32,
     pub feature_observed_range_high_cert_interaction: f32,
     pub edge: f32,
@@ -924,6 +935,17 @@ pub fn run_backtest<S: Strategy>(
                     confidence_score,
                     calibrated_p,
                     risk_score,
+                    market_yes_range_so_far,
+                    seconds_since_open: secs_since_open as f32,
+                    seconds_to_close: ((cfg.market_close_ns - event.ts_ns).max(0) as f32) / 1e9,
+                    regime_whipsaw_score: whipsaw_snapshot.score,
+                    regime_path_efficiency: whipsaw_snapshot.path_efficiency,
+                    regime_reversal_pressure: whipsaw_snapshot.reversal_pressure,
+                    regime_sign_flip_rate: whipsaw_snapshot.sign_flip_rate,
+                    regime_realized_vol_180s_bps: whipsaw_snapshot.realized_vol_180s_bps,
+                    prior_market_range_1d: cfg.prior_market_range_1d,
+                    prior_market_range_3d: cfg.prior_market_range_3d,
+                    prior_market_range_7d: cfg.prior_market_range_7d,
                     feature_observed_yes_range_so_far: model_attribution.observed_yes_range_so_far,
                     feature_observed_range_high_cert_interaction: model_attribution
                         .observed_range_high_cert_interaction,
@@ -1021,6 +1043,17 @@ pub fn run_backtest<S: Strategy>(
                     confidence_score,
                     calibrated_p,
                     risk_score,
+                    market_yes_range_so_far,
+                    seconds_since_open: secs_since_open as f32,
+                    seconds_to_close: ((cfg.market_close_ns - event.ts_ns).max(0) as f32) / 1e9,
+                    regime_whipsaw_score: whipsaw_snapshot.score,
+                    regime_path_efficiency: whipsaw_snapshot.path_efficiency,
+                    regime_reversal_pressure: whipsaw_snapshot.reversal_pressure,
+                    regime_sign_flip_rate: whipsaw_snapshot.sign_flip_rate,
+                    regime_realized_vol_180s_bps: whipsaw_snapshot.realized_vol_180s_bps,
+                    prior_market_range_1d: cfg.prior_market_range_1d,
+                    prior_market_range_3d: cfg.prior_market_range_3d,
+                    prior_market_range_7d: cfg.prior_market_range_7d,
                     feature_observed_yes_range_so_far: model_attribution.observed_yes_range_so_far,
                     feature_observed_range_high_cert_interaction: model_attribution
                         .observed_range_high_cert_interaction,
@@ -1210,6 +1243,17 @@ fn write_decision_rows_parquet(path: &Path, rows: &[DecisionLogRow]) -> Result<(
         Field::new("confidence_score", DataType::Float32, false),
         Field::new("calibrated_p", DataType::Float32, false),
         Field::new("risk_score", DataType::Float32, false),
+        Field::new("market_yes_range_so_far", DataType::Float32, false),
+        Field::new("seconds_since_open", DataType::Float32, false),
+        Field::new("seconds_to_close", DataType::Float32, false),
+        Field::new("regime_whipsaw_score", DataType::Float32, false),
+        Field::new("regime_path_efficiency", DataType::Float32, false),
+        Field::new("regime_reversal_pressure", DataType::Float32, false),
+        Field::new("regime_sign_flip_rate", DataType::Float32, false),
+        Field::new("regime_realized_vol_180s_bps", DataType::Float32, false),
+        Field::new("prior_market_range_1d", DataType::Float32, false),
+        Field::new("prior_market_range_3d", DataType::Float32, false),
+        Field::new("prior_market_range_7d", DataType::Float32, false),
         Field::new(
             "feature_observed_yes_range_so_far",
             DataType::Float32,
@@ -1331,6 +1375,39 @@ fn write_decision_rows_parquet(path: &Path, rows: &[DecisionLogRow]) -> Result<(
         )),
         Arc::new(Float32Array::from_iter_values(
             rows.iter().map(|r| r.risk_score),
+        )),
+        Arc::new(Float32Array::from_iter_values(
+            rows.iter().map(|r| r.market_yes_range_so_far),
+        )),
+        Arc::new(Float32Array::from_iter_values(
+            rows.iter().map(|r| r.seconds_since_open),
+        )),
+        Arc::new(Float32Array::from_iter_values(
+            rows.iter().map(|r| r.seconds_to_close),
+        )),
+        Arc::new(Float32Array::from_iter_values(
+            rows.iter().map(|r| r.regime_whipsaw_score),
+        )),
+        Arc::new(Float32Array::from_iter_values(
+            rows.iter().map(|r| r.regime_path_efficiency),
+        )),
+        Arc::new(Float32Array::from_iter_values(
+            rows.iter().map(|r| r.regime_reversal_pressure),
+        )),
+        Arc::new(Float32Array::from_iter_values(
+            rows.iter().map(|r| r.regime_sign_flip_rate),
+        )),
+        Arc::new(Float32Array::from_iter_values(
+            rows.iter().map(|r| r.regime_realized_vol_180s_bps),
+        )),
+        Arc::new(Float32Array::from_iter_values(
+            rows.iter().map(|r| r.prior_market_range_1d),
+        )),
+        Arc::new(Float32Array::from_iter_values(
+            rows.iter().map(|r| r.prior_market_range_3d),
+        )),
+        Arc::new(Float32Array::from_iter_values(
+            rows.iter().map(|r| r.prior_market_range_7d),
         )),
         Arc::new(Float32Array::from_iter_values(
             rows.iter().map(|r| r.feature_observed_yes_range_so_far),
@@ -3521,6 +3598,17 @@ mod tests {
         assert!((row.confidence_score - 0.80).abs() < 1e-6);
         assert!((row.calibrated_p - 0.74).abs() < 1e-6);
         assert!((row.risk_score - 0.22).abs() < 1e-6);
+        assert!((row.market_yes_range_so_far - 0.0).abs() < 1e-6);
+        assert!((row.seconds_since_open - 0.0).abs() < 1e-6);
+        assert!((row.seconds_to_close - 5.0).abs() < 1e-6);
+        assert!((0.0..=1.0).contains(&row.regime_whipsaw_score));
+        assert!((0.0..=1.0).contains(&row.regime_path_efficiency));
+        assert!((0.0..=1.0).contains(&row.regime_reversal_pressure));
+        assert!((0.0..=1.0).contains(&row.regime_sign_flip_rate));
+        assert!(row.regime_realized_vol_180s_bps >= 0.0);
+        assert_eq!(row.prior_market_range_1d, 0.0);
+        assert_eq!(row.prior_market_range_3d, 0.0);
+        assert_eq!(row.prior_market_range_7d, 0.0);
         assert!((row.edge - (0.74 - 0.51)).abs() < 1e-6);
         assert!(row.side_is_yes);
         assert_eq!(row.orders_requested, 0);

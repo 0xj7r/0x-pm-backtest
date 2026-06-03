@@ -27,6 +27,22 @@ def pct(value: float) -> str:
     return f"{value:.2f}%"
 
 
+def compact_stats(stats: dict[str, float]) -> dict[str, float]:
+    return {
+        "markets": stats["markets"],
+        "pnl_usdc": stats["pnl"],
+        "end_equity_usdc": stats["end_equity"],
+        "max_dd_pct": stats["max_dd_pct"],
+        "mean_pnl_usdc": stats["mean"],
+        "win_rate": stats["win_rate"],
+        "loss_rate": stats["loss_rate"],
+        "worst_market_pnl_usdc": stats["worst"],
+        "best_market_pnl_usdc": stats["best"],
+        "q05_market_pnl_usdc": stats["q05"],
+        "cvar05_market_pnl_usdc": stats["cvar05"],
+    }
+
+
 def load_rows(path: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     with path.open() as file:
@@ -411,6 +427,92 @@ def write_report(
     path.write_text("\n".join(lines) + "\n")
 
 
+def select_result(results: list[dict[str, Any]], selector: str) -> dict[str, Any]:
+    if selector == "best":
+        return results[0]
+    if selector == "no_boost":
+        for result in results:
+            if result["params"].get("boost_scale", 1.0) <= 1.0:
+                return result
+    if selector == "risk_on":
+        for result in results:
+            if set(result["scale_counts"]) <= {"0.5", "0.75", "1"} and "0" not in result["scale_counts"]:
+                return result
+    if selector == "fixed":
+        for result in results:
+            if result["params"]["label"] == "fixed_bte":
+                return result
+    raise ValueError(f"no result matched selector {selector!r}")
+
+
+def write_policy_artifact(
+    path: Path,
+    result: dict[str, Any],
+    fixed_result: dict[str, Any] | None,
+    rows: list[dict[str, Any]],
+    folds: list[tuple[int, int, int]],
+    args: argparse.Namespace,
+    objective_name: str,
+    policies_evaluated: int,
+    equivalent_policies_dropped: int,
+) -> None:
+    stats = result["stats"]
+    policy = {
+        "schema_version": 1,
+        "strategy": "back_to_explore",
+        "policy_family": "cluster_recent_performance_scale",
+        "status": "candidate_requires_engine_rerun",
+        "selection": args.policy_selector,
+        "source": {
+            "dataset_jsonl": args.dataset_jsonl,
+            "date_start": rows[0]["date"],
+            "date_end": rows[-1]["date"],
+            "rows": len(rows),
+            "candidate": args.candidate,
+            "train_size": args.train_size,
+            "test_size": args.test_size,
+            "step_size": args.step_size,
+            "folds": len(folds),
+            "starting_cash_usdc": args.starting_cash,
+            "objective": objective_name,
+            "policies_evaluated": policies_evaluated,
+            "unique_behaviours": policies_evaluated - equivalent_policies_dropped,
+            "equivalent_policies_dropped": equivalent_policies_dropped,
+        },
+        "rule": {
+            "description": (
+                "Scale BTE market risk by train-window cluster mean and no-lookahead "
+                "recent BTE mean PnL. A zero scale means risk-off for that market."
+            ),
+            "params": result["params"],
+            "scale_counts": result["scale_counts"],
+            "scale_signature": result["scale_signature"],
+        },
+        "validation": {
+            "selected": compact_stats(stats),
+            "fixed_bte": compact_stats(fixed_result["stats"]) if fixed_result is not None else None,
+            "delta_vs_fixed": {
+                "pnl_usdc": stats["pnl"] - fixed_result["stats"]["pnl"] if fixed_result is not None else None,
+                "max_dd_pct": stats["max_dd_pct"] - fixed_result["stats"]["max_dd_pct"]
+                if fixed_result is not None
+                else None,
+                "cvar05_market_pnl_usdc": stats["cvar05"] - fixed_result["stats"]["cvar05"]
+                if fixed_result is not None
+                else None,
+            },
+            "folds": result["folds"],
+            "cluster_pnl": result["cluster_pnl"],
+        },
+        "implementation_notes": [
+            "This policy was selected from synthetic scaled market PnL, not from a fresh engine replay.",
+            "Deployable implementation needs pre-route regime_cluster plus rolling prior BTE performance in runtime context.",
+            "Use this candidate first as a risk-off/throttle overlay; do not trust boosted sizing until engine replay confirms it.",
+        ],
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(policy, indent=2, sort_keys=True) + "\n")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("dataset_jsonl")
@@ -424,6 +526,13 @@ def main() -> int:
     parser.add_argument("--window", action="append", type=int, dest="windows")
     parser.add_argument("--out-md", required=True, type=Path)
     parser.add_argument("--out-json", required=True, type=Path)
+    parser.add_argument("--out-policy-json", type=Path)
+    parser.add_argument(
+        "--policy-selector",
+        choices=("no_boost", "best", "risk_on", "fixed"),
+        default="no_boost",
+        help="Which deduplicated result to export as a compact policy artifact.",
+    )
     args = parser.parse_args()
 
     rows = load_rows(Path(args.dataset_jsonl))
@@ -462,11 +571,29 @@ def main() -> int:
     )
     args.out_json.parent.mkdir(parents=True, exist_ok=True)
     args.out_json.write_text(json.dumps(results[:100], indent=2, sort_keys=True) + "\n")
+    if args.out_policy_json is not None:
+        fixed_result = next(
+            (result for result in results if result["params"]["label"] == "fixed_bte"),
+            None,
+        )
+        write_policy_artifact(
+            args.out_policy_json,
+            select_result(results, args.policy_selector),
+            fixed_result,
+            rows,
+            folds,
+            args,
+            objective_name,
+            policies_evaluated,
+            equivalent_policies_dropped,
+        )
     print(
         f"searched {policies_evaluated} policies across {len(folds)} folds "
         f"({len(results)} unique behaviours)"
     )
     print(f"best: {results[0]['params']['label']} objective={results[0]['objective']:.2f}")
+    if args.out_policy_json is not None:
+        print(f"policy: {args.policy_selector} -> {args.out_policy_json}")
     return 0
 
 

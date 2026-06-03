@@ -1,0 +1,152 @@
+{
+  "implementation_notes": [
+    "This policy was selected from synthetic scaled market PnL, not from a fresh engine replay.",
+    "Deployable implementation needs pre-route regime_cluster plus rolling prior BTE performance in runtime context.",
+    "Use this candidate first as a risk-off/throttle overlay; do not trust boosted sizing until engine replay confirms it."
+  ],
+  "policy_family": "cluster_recent_performance_scale",
+  "rule": {
+    "description": "Scale BTE market risk by train-window cluster mean and no-lookahead recent BTE mean PnL. A zero scale means risk-off for that market.",
+    "params": {
+      "boost_scale": 1.0,
+      "cluster_boost_mean": 0.5,
+      "cluster_off_mean": 0.0,
+      "cluster_off_scale": 0.0,
+      "cluster_throttle_mean": 0.0,
+      "cold_start_risk_on": false,
+      "label": "bte_w864_same_min20_coff0_cs0_roff0_rt0_rb0.5_ts0.5_bs1_cold0",
+      "min_prior_markets": 20,
+      "recent_boost_mean": 0.5,
+      "recent_off_mean": 0.0,
+      "recent_throttle_mean": 0.0,
+      "same_cluster": true,
+      "throttle_scale": 0.5,
+      "window": 864
+    },
+    "scale_counts": {
+      "0": 3885,
+      "1": 3465
+    },
+    "scale_signature": "250a194926f54080ce67aa35c3567cdcb7d7e7ba40ddd1128a3e528b9026dfa3"
+  },
+  "schema_version": 1,
+  "selection": "no_boost",
+  "source": {
+    "candidate": "bte",
+    "dataset_jsonl": "data/runs/regime_clusters/router_market_dataset_combined_bte_vs_br2.jsonl",
+    "date_end": "2026-05-20",
+    "date_start": "2026-02-27",
+    "equivalent_policies_dropped": 4257,
+    "folds": 6,
+    "objective": "pnl - 30*max_dd_pct + 10*cvar05",
+    "policies_evaluated": 5761,
+    "rows": 12252,
+    "starting_cash_usdc": 2700.0,
+    "step_size": 1225,
+    "test_size": 1225,
+    "train_size": 4900,
+    "unique_behaviours": 1504
+  },
+  "status": "candidate_requires_engine_rerun",
+  "strategy": "back_to_explore",
+  "validation": {
+    "cluster_pnl": {
+      "calm_low_vol": 0.0,
+      "clean_directional_path": 993.8354958331383,
+      "early_tight_range": 147.08400402034658,
+      "expanded_high_flip": 0.0,
+      "expanded_reversal_pressure": -118.94287096961307,
+      "flow_adverse_vol_cluster": 399.449102269356,
+      "low_efficiency_nonreversal": 429.8641233120493,
+      "mixed_neutral": 523.124525684043,
+      "no_trade": 0.0
+    },
+    "delta_vs_fixed": {
+      "cvar05_market_pnl_usdc": 3.4058708830279443,
+      "max_dd_pct": -2.9592590333050293,
+      "pnl_usdc": 410.9557942906904
+    },
+    "fixed_bte": {
+      "best_market_pnl_usdc": 84.23797190698951,
+      "cvar05_market_pnl_usdc": -35.30420223773788,
+      "end_equity_usdc": 4663.45858585863,
+      "loss_rate": 0.2201360544217687,
+      "markets": 7350.0,
+      "max_dd_pct": 13.379205067833025,
+      "mean_pnl_usdc": 0.26713722256579997,
+      "pnl_usdc": 1963.4585858586297,
+      "q05_market_pnl_usdc": -23.12589988651871,
+      "win_rate": 0.39197278911564626,
+      "worst_market_pnl_usdc": -49.99327885389266
+    },
+    "folds": [
+      {
+        "cvar05": -43.09912432208126,
+        "max_dd_pct": 8.800706064530852,
+        "pnl": 642.8449811498836,
+        "test_end": "2026-03-20",
+        "test_start": "2026-03-16",
+        "train_end": "2026-03-16",
+        "train_start": "2026-02-27"
+      },
+      {
+        "cvar05": -25.090055942476525,
+        "max_dd_pct": 8.852170268189614,
+        "pnl": 730.2456601057006,
+        "test_end": "2026-05-03",
+        "test_start": "2026-03-20",
+        "train_end": "2026-03-20",
+        "train_start": "2026-03-03"
+      },
+      {
+        "cvar05": -25.144658043936893,
+        "max_dd_pct": 12.433743900460513,
+        "pnl": 242.41591813766036,
+        "test_end": "2026-05-08",
+        "test_start": "2026-05-03",
+        "train_end": "2026-05-03",
+        "train_start": "2026-03-08"
+      },
+      {
+        "cvar05": -27.130785565347466,
+        "max_dd_pct": 8.53283084836916,
+        "pnl": 336.99247886167313,
+        "test_end": "2026-05-12",
+        "test_start": "2026-05-08",
+        "train_end": "2026-05-08",
+        "train_start": "2026-03-12"
+      },
+      {
+        "cvar05": -31.635729684187062,
+        "max_dd_pct": 8.226131989078429,
+        "pnl": 242.98645036767493,
+        "test_end": "2026-05-16",
+        "test_start": "2026-05-12",
+        "train_end": "2026-05-12",
+        "train_start": "2026-03-16"
+      },
+      {
+        "cvar05": -32.35904827825142,
+        "max_dd_pct": 17.59802725316881,
+        "pnl": 178.9288915267275,
+        "test_end": "2026-05-20",
+        "test_start": "2026-05-16",
+        "train_end": "2026-05-16",
+        "train_start": "2026-03-20"
+      }
+    ],
+    "selected": {
+      "best_market_pnl_usdc": 84.23797190698951,
+      "cvar05_market_pnl_usdc": -31.89833135470994,
+      "end_equity_usdc": 5074.41438014932,
+      "loss_rate": 0.16095238095238096,
+      "markets": 7350.0,
+      "max_dd_pct": 10.419946034527996,
+      "mean_pnl_usdc": 0.3230495755305197,
+      "pnl_usdc": 2374.41438014932,
+      "q05_market_pnl_usdc": -18.117535453199707,
+      "win_rate": 0.29836734693877554,
+      "worst_market_pnl_usdc": -49.99327885389266
+    }
+  }
+}

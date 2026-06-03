@@ -93,6 +93,7 @@ Artifacts:
 - `data/runs/regime_clusters/router_policy_search_combined_bte_vs_br2_riskmax.md`
 - `data/runs/regime_clusters/bte_cluster_policy_search_may.md`
 - `data/runs/regime_clusters/bte_cluster_policy_search_combined.md`
+- `configs/back_to_explore_cluster_policy_combined_no_boost.json`
 
 Train/test split `60/40`, feature source `union`:
 
@@ -211,6 +212,30 @@ Interpretation: the strongest deployable signal is the no-boost risk-off overlay
 because it improves PnL while reducing drawdown and tail loss in both samples.
 Boosted overlays are promising, but they are synthetic sizing results and must
 be rerun through the actual engine before being trusted.
+
+The current conservative candidate is exported to
+`configs/back_to_explore_cluster_policy_combined_no_boost.json`. Its rule is:
+
+- Use same-cluster BTE performance over a `864` market rolling window.
+- Require at least `20` prior same-cluster markets.
+- Risk-off (`0.0x`) when the fold-train cluster mean PnL is `<= 0.0`.
+- Risk-off (`0.0x`) when recent same-cluster BTE mean PnL is `<= 0.0`.
+- Otherwise run normal BTE size (`1.0x`); no boosted sizing.
+
+Regenerate it with:
+
+```bash
+python3 scripts/bte_cluster_policy_search.py \
+  data/runs/regime_clusters/router_market_dataset_combined_bte_vs_br2.jsonl \
+  --train-size 4900 \
+  --test-size 1225 \
+  --step-size 1225 \
+  --starting-cash 2700 \
+  --out-md data/runs/regime_clusters/bte_cluster_policy_search_combined.md \
+  --out-json data/runs/regime_clusters/bte_cluster_policy_search_combined.json \
+  --out-policy-json configs/back_to_explore_cluster_policy_combined_no_boost.json \
+  --policy-selector no_boost
+```
 
 ## Pre-Route Feature Export
 

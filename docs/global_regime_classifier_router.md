@@ -201,6 +201,37 @@ both JSONL and Parquet decision logs. The next targeted backtests should enable
 `--decision-log` on a compact BTE/BR2 overlap slice and rebuild the router
 dataset from these rows rather than from `fills_detail`.
 
+`scripts/router_decision_log_dataset.py` is the dataset builder for that path.
+It joins:
+
+- candidate `markets.jsonl` files for realized per-strategy PnL labels
+- one updated runner `decision_log.jsonl` for pre-route market-state features
+
+Old decision logs from before `4d8fe2fe` do not contain the new regime fields.
+They can be used only with `--allow-legacy-decision-log` for smoke testing; they
+are not deploy-validation evidence.
+
+Example validation command after rerunning a paired overlap with updated
+decision logs:
+
+```bash
+python3 scripts/router_decision_log_dataset.py \
+  --candidate bte=back_to_explore:data/runs/<run>/markets.jsonl \
+  --candidate br2=bonereaper_v2:data/runs/<run>/markets.jsonl \
+  --feature-candidate bte \
+  --decision-log data/runs/<run>/decision_log.jsonl \
+  --out-jsonl data/runs/regime_clusters/router_decision_log_dataset_bte_vs_br2.jsonl \
+  --out-md data/runs/regime_clusters/router_decision_log_dataset_bte_vs_br2.md
+
+python3 scripts/router_policy_search.py \
+  data/runs/regime_clusters/router_decision_log_dataset_bte_vs_br2.jsonl \
+  --train-size 2600 \
+  --test-size 650 \
+  --step-size 650 \
+  --out-md data/runs/regime_clusters/router_policy_search_decision_log_bte_vs_br2.md \
+  --out-json data/runs/regime_clusters/router_policy_search_decision_log_bte_vs_br2.json
+```
+
 ## Routing Hypothesis
 
 Initial routing should be conservative:
@@ -233,6 +264,7 @@ Scripts:
 - `scripts/recent_regime_model.py`
 - `scripts/router_overlap_eval.py`
 - `scripts/router_market_dataset.py`
+- `scripts/router_decision_log_dataset.py`
 - `scripts/router_policy_search.py`
 
 ## Next Work

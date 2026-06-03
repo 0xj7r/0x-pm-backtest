@@ -91,6 +91,8 @@ Artifacts:
 - `data/runs/regime_clusters/router_policy_search_combined_bte_vs_br2.md`
 - `data/runs/regime_clusters/router_policy_search_combined_bte_vs_br2_riskheavy.md`
 - `data/runs/regime_clusters/router_policy_search_combined_bte_vs_br2_riskmax.md`
+- `data/runs/regime_clusters/bte_cluster_policy_search_may.md`
+- `data/runs/regime_clusters/bte_cluster_policy_search_combined.md`
 
 Train/test split `60/40`, feature source `union`:
 
@@ -178,6 +180,37 @@ The deployable shape is therefore:
 2. Use recent no-lookahead strategy/regime performance for adaptive routing.
 3. Route to `risk_off` when both current regime confidence and recent strategy
    edge are weak.
+
+## BTE Specialist Policy Search
+
+`scripts/bte_cluster_policy_search.py` is a cheap, synthetic policy-layer search
+for BackToExplore throttle/risk-off rules. It scales already-realized BTE
+per-market PnL by cluster and no-lookahead recent performance features, then
+evaluates chronological walk-forward folds. This is deliberately a small,
+interpretable policy family, not a replacement for engine-level optimization.
+
+The script drops behavior-equivalent policies by hashing the actual per-market
+scale decisions. Current local searches evaluate `5,761` parameter rows, but
+only `1,629` unique behaviours on May and `1,504` on the combined sample.
+
+May BTE-only overlap (`5,752` markets, `2026-05-01` to `2026-05-20`, six
+walk-forward folds):
+
+- Fixed BTE: `+$815.51`, max DD `17.28%`, CVaR 5% `-$34.66`
+- Best no-boost policy: `+$964.82`, max DD `9.89%`, CVaR 5% `-$32.62`
+- Best boosted policy: `+$1,270.78`, max DD `14.30%`, CVaR 5% `-$43.31`
+
+Combined BTE-only overlap (`12,252` markets, `2026-02-27` to `2026-05-20`, six
+walk-forward folds):
+
+- Fixed BTE: `+$1,963.46`, max DD `13.38%`, CVaR 5% `-$35.30`
+- Best no-boost policy: `+$2,374.41`, max DD `10.42%`, CVaR 5% `-$31.90`
+- Best boosted policy: `+$3,482.13`, max DD `12.66%`, CVaR 5% `-$43.89`
+
+Interpretation: the strongest deployable signal is the no-boost risk-off overlay
+because it improves PnL while reducing drawdown and tail loss in both samples.
+Boosted overlays are promising, but they are synthetic sizing results and must
+be rerun through the actual engine before being trusted.
 
 ## Pre-Route Feature Export
 
@@ -279,6 +312,7 @@ Scripts:
 - `scripts/router_market_dataset.py`
 - `scripts/router_decision_log_dataset.py`
 - `scripts/router_policy_search.py`
+- `scripts/bte_cluster_policy_search.py`
 
 ## Next Work
 

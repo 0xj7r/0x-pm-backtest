@@ -4118,6 +4118,7 @@ async fn collect_training_samples_for_market(
         taker_fee_bps: 0.0,
         decision_log_jsonl: None,
         decision_log_parquet: None,
+        strategy_name: "meta_training".to_string(),
         shared_model_state: None,
         update_model_state_on_resolution: true,
         meta_calibrator_snapshot: None,
@@ -4267,6 +4268,7 @@ async fn run_markets(
                 taker_fee_bps: cfg_arc.taker_fee_bps,
                 decision_log_jsonl: None,
                 decision_log_parquet: None,
+                strategy_name: "parallel_walkforward".to_string(),
                 shared_model_state: None,
                 update_model_state_on_resolution: meta_calibrator_snapshot.is_none(),
                 meta_calibrator_snapshot,
@@ -5009,6 +5011,7 @@ async fn run_portfolio(
                 taker_fee_bps: cfg.taker_fee_bps,
                 decision_log_jsonl: cfg.decision_log_jsonl.clone(),
                 decision_log_parquet: None,
+                strategy_name: strat.name().to_string(),
                 shared_model_state: if strat == StratId::ReactiveDirectional {
                     None
                 } else {

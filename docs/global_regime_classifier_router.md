@@ -220,6 +220,7 @@ python3 scripts/router_decision_log_dataset.py \
   --candidate br2=bonereaper_v2:data/runs/<run>/markets.jsonl \
   --feature-candidate bte \
   --decision-log data/runs/<run>/decision_log.jsonl \
+  --decision-strategy back_to_explore \
   --out-jsonl data/runs/regime_clusters/router_decision_log_dataset_bte_vs_br2.jsonl \
   --out-md data/runs/regime_clusters/router_decision_log_dataset_bte_vs_br2.md
 

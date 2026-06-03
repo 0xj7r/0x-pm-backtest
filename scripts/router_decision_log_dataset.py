@@ -209,6 +209,7 @@ def load_decision_features(
     market_id_base: int,
     use_ts_mapping: bool,
     allow_legacy: bool,
+    decision_strategy: str | None,
 ) -> dict[str, dict[str, Any]]:
     by_slug: dict[str, list[dict[str, Any]]] = defaultdict(list)
     with path.open() as file:
@@ -216,6 +217,8 @@ def load_decision_features(
             if not line.strip():
                 continue
             row = json.loads(line)
+            if decision_strategy is not None and row.get("strategy") != decision_strategy:
+                continue
             slug = slug_for_decision_row(
                 row,
                 markets_by_ordinal,
@@ -364,6 +367,10 @@ def main() -> int:
         help="candidate name whose markets/log order should be used for decision features",
     )
     parser.add_argument("--decision-log", required=True, type=Path)
+    parser.add_argument(
+        "--decision-strategy",
+        help="optional strategy name to keep from a multi-strategy decision log",
+    )
     parser.add_argument("--market-id-base", type=int, default=1)
     parser.add_argument("--use-ts-mapping", action="store_true")
     parser.add_argument(
@@ -398,6 +405,7 @@ def main() -> int:
         args.market_id_base,
         args.use_ts_mapping,
         args.allow_legacy_decision_log,
+        args.decision_strategy,
     )
 
     rows = make_rows(loaded, decision_features, windows)

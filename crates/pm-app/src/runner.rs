@@ -278,6 +278,7 @@ pub struct BacktestReport {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecisionLogRow {
+    pub strategy: String,
     pub market_id: u32,
     pub event_idx: u64,
     pub ts_ns: i64,
@@ -397,6 +398,9 @@ pub struct RunnerConfig {
     pub decision_log_jsonl: Option<PathBuf>,
     /// Optional per-decision attribution log (Parquet).
     pub decision_log_parquet: Option<PathBuf>,
+    /// Strategy name for decision-log rows when a shared walk-forward run logs
+    /// multiple strategies to the same file.
+    pub strategy_name: String,
     /// Optional shared canonical model state for walk-forward or portfolio
     /// calibration continuity across markets.
     pub shared_model_state: Option<Arc<Mutex<ModelState>>>,
@@ -468,6 +472,7 @@ impl Default for RunnerConfig {
             taker_latency_ms: 0,
             decision_log_jsonl: None,
             decision_log_parquet: None,
+            strategy_name: "unknown".to_string(),
             shared_model_state: None,
             update_model_state_on_resolution: true,
             meta_calibrator_snapshot: None,
@@ -921,6 +926,7 @@ pub fn run_backtest<S: Strategy>(
         if let Some(f) = decision_file.as_mut() {
             if idx % decision_every == 0 {
                 let row = DecisionLogRow {
+                    strategy: cfg.strategy_name.clone(),
                     market_id: event.market_id.0,
                     event_idx: (idx + 1) as u64,
                     ts_ns: event.ts_ns,
@@ -1029,6 +1035,7 @@ pub fn run_backtest<S: Strategy>(
         } else if let Some(rows) = decision_rows.as_mut() {
             if idx % decision_every == 0 {
                 rows.push(DecisionLogRow {
+                    strategy: cfg.strategy_name.clone(),
                     market_id: event.market_id.0,
                     event_idx: (idx + 1) as u64,
                     ts_ns: event.ts_ns,
@@ -1229,6 +1236,7 @@ pub fn run_backtest<S: Strategy>(
 
 fn write_decision_rows_parquet(path: &Path, rows: &[DecisionLogRow]) -> Result<()> {
     let schema = Arc::new(Schema::new(vec![
+        Field::new("strategy", DataType::Utf8, false),
         Field::new("market_id", DataType::UInt32, false),
         Field::new("event_idx", DataType::UInt64, false),
         Field::new("ts_ns", DataType::Int64, false),
@@ -1336,6 +1344,9 @@ fn write_decision_rows_parquet(path: &Path, rows: &[DecisionLogRow]) -> Result<(
     ]));
 
     let cols: Vec<ArrayRef> = vec![
+        Arc::new(StringArray::from_iter_values(
+            rows.iter().map(|r| r.strategy.as_str()),
+        )),
         Arc::new(UInt32Array::from_iter_values(
             rows.iter().map(|r| r.market_id),
         )),

@@ -3065,6 +3065,7 @@ async fn run_market_backtest(
         taker_latency_ms: 0,
         decision_log_jsonl: decision_log,
         decision_log_parquet: None,
+        strategy_name: market_run_mode.to_string(),
         shared_model_state: None,
         update_model_state_on_resolution: true,
         meta_calibrator_snapshot: None,

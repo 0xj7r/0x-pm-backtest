@@ -170,6 +170,80 @@ impl WhipsawRiskSnapshot {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarketRegimeCluster {
+    ExpandedHighFlip,
+    ExpandedReversalPressure,
+    FlowAdverseVolCluster,
+    LowEfficiencyNonreversal,
+    CleanDirectionalPath,
+    CalmLowVol,
+    EarlyTightRange,
+    MixedNeutral,
+}
+
+impl MarketRegimeCluster {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ExpandedHighFlip => "expanded_high_flip",
+            Self::ExpandedReversalPressure => "expanded_reversal_pressure",
+            Self::FlowAdverseVolCluster => "flow_adverse_vol_cluster",
+            Self::LowEfficiencyNonreversal => "low_efficiency_nonreversal",
+            Self::CleanDirectionalPath => "clean_directional_path",
+            Self::CalmLowVol => "calm_low_vol",
+            Self::EarlyTightRange => "early_tight_range",
+            Self::MixedNeutral => "mixed_neutral",
+        }
+    }
+}
+
+impl std::fmt::Display for MarketRegimeCluster {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Classify the live-safe market regime using the same threshold ordering as
+/// `scripts/strategy_regime_clusters.py`.
+pub fn classify_market_regime_cluster(
+    market_yes_range_so_far: f32,
+    regime_path_efficiency: f32,
+    regime_reversal_pressure: f32,
+    regime_sign_flip_rate: f32,
+    regime_realized_vol_180s_bps: f32,
+    adverse_vol_30s: Option<f32>,
+) -> MarketRegimeCluster {
+    let observed_range = market_yes_range_so_far.max(0.0);
+    let path_efficiency = regime_path_efficiency.max(0.0);
+    let reversal = regime_reversal_pressure.max(0.0);
+    let sign_flip = regime_sign_flip_rate.max(0.0);
+    let realized_vol = regime_realized_vol_180s_bps.max(0.0);
+    let adverse_vol = adverse_vol_30s.unwrap_or(0.0).max(0.0);
+
+    if observed_range >= 0.20 && sign_flip >= 0.50 {
+        return MarketRegimeCluster::ExpandedHighFlip;
+    }
+    if observed_range >= 0.20 && reversal >= 0.30 {
+        return MarketRegimeCluster::ExpandedReversalPressure;
+    }
+    if (2.0..=8.0).contains(&realized_vol) && (1.0..=4.0).contains(&adverse_vol) {
+        return MarketRegimeCluster::FlowAdverseVolCluster;
+    }
+    if path_efficiency < 0.10 && reversal < 0.30 {
+        return MarketRegimeCluster::LowEfficiencyNonreversal;
+    }
+    if path_efficiency >= 0.35 && sign_flip < 0.50 && reversal < 0.30 {
+        return MarketRegimeCluster::CleanDirectionalPath;
+    }
+    if realized_vol < 1.0 && adverse_vol < 1.0 && reversal < 0.30 {
+        return MarketRegimeCluster::CalmLowVol;
+    }
+    if observed_range < 0.10 {
+        return MarketRegimeCluster::EarlyTightRange;
+    }
+    MarketRegimeCluster::MixedNeutral
+}
+
 impl BtcRegimeSnapshot {
     /// Build from a spot tape at `now_ns`. Returns a snapshot whose individual
     /// fields may be `None` during warmup.
@@ -328,5 +402,37 @@ mod tests {
         );
         assert!(zigzag_snap.sign_flip_rate > 0.80);
         assert!(smooth_snap.path_efficiency > 0.95);
+    }
+
+    #[test]
+    fn market_cluster_matches_report_threshold_ordering() {
+        assert_eq!(
+            classify_market_regime_cluster(0.25, 0.20, 0.60, 0.55, 3.0, Some(2.0)),
+            MarketRegimeCluster::ExpandedHighFlip
+        );
+        assert_eq!(
+            classify_market_regime_cluster(0.25, 0.20, 0.35, 0.20, 3.0, Some(2.0)),
+            MarketRegimeCluster::ExpandedReversalPressure
+        );
+        assert_eq!(
+            classify_market_regime_cluster(0.12, 0.20, 0.10, 0.20, 3.0, Some(2.0)),
+            MarketRegimeCluster::FlowAdverseVolCluster
+        );
+        assert_eq!(
+            classify_market_regime_cluster(0.12, 0.05, 0.10, 0.20, 0.8, Some(0.2)),
+            MarketRegimeCluster::LowEfficiencyNonreversal
+        );
+        assert_eq!(
+            classify_market_regime_cluster(0.12, 0.50, 0.10, 0.20, 1.5, Some(0.2)),
+            MarketRegimeCluster::CleanDirectionalPath
+        );
+        assert_eq!(
+            classify_market_regime_cluster(0.12, 0.20, 0.10, 0.20, 0.8, Some(0.2)),
+            MarketRegimeCluster::CalmLowVol
+        );
+        assert_eq!(
+            classify_market_regime_cluster(0.05, 0.20, 0.40, 0.20, 1.5, Some(0.2)),
+            MarketRegimeCluster::EarlyTightRange
+        );
     }
 }

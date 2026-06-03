@@ -2487,6 +2487,7 @@ mod tests {
             daily_start_cash_usdc: 0.0,
             daily_loss_cap_pct: 1.0,
             current_daily_loss_pct: 0.0,
+            ..Ctx::default()
         }
     }
 
@@ -2913,6 +2914,7 @@ mod tests {
             daily_start_cash_usdc: 0.0,
             daily_loss_cap_pct: 1.0,
             current_daily_loss_pct: 0.0,
+            ..Ctx::default()
         };
 
         let threshold = late_favourite_effective_skew_threshold(
@@ -2952,6 +2954,7 @@ mod tests {
             daily_start_cash_usdc: 0.0,
             daily_loss_cap_pct: 1.0,
             current_daily_loss_pct: 0.0,
+            ..Ctx::default()
         };
 
         assert_eq!(
@@ -3034,6 +3037,7 @@ mod tests {
             daily_start_cash_usdc: 0.0,
             daily_loss_cap_pct: 1.0,
             current_daily_loss_pct: 0.0,
+            ..Ctx::default()
         };
 
         assert!((model_limited_buy_price(&ctx, Side::BuyYes, 0.93, 0.02) - 0.86).abs() < 1e-6);

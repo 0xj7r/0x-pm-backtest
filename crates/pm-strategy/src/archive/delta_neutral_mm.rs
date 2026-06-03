@@ -201,6 +201,7 @@ mod tests {
             daily_start_cash_usdc: 0.0,
             daily_loss_cap_pct: 1.0,
             current_daily_loss_pct: 0.0,
+            ..Ctx::default()
         };
         let mut s = DeltaNeutralMm::new(DeltaNeutralMmConfig {
             max_pair_cost: 1.05, // permissive for this test fixture
@@ -250,6 +251,7 @@ mod tests {
             daily_start_cash_usdc: 0.0,
             daily_loss_cap_pct: 1.0,
             current_daily_loss_pct: 0.0,
+            ..Ctx::default()
         };
         let mut s = DeltaNeutralMm::new(DeltaNeutralMmConfig {
             max_pair_cost: 1.05,
@@ -297,6 +299,7 @@ mod tests {
             daily_start_cash_usdc: 0.0,
             daily_loss_cap_pct: 1.0,
             current_daily_loss_pct: 0.0,
+            ..Ctx::default()
         };
         let mut s = DeltaNeutralMm::new(DeltaNeutralMmConfig::default());
         // 15s to close — should hold

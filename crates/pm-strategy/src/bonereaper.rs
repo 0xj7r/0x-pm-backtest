@@ -319,6 +319,7 @@ mod tests {
             daily_start_cash_usdc: 0.0,
             daily_loss_cap_pct: 1.0,
             current_daily_loss_pct: 0.0,
+            ..Ctx::default()
         };
         let mut s = BonereaperLite::new(BonereaperLiteConfig::default());
         // 10s into the window
@@ -352,6 +353,7 @@ mod tests {
             daily_start_cash_usdc: 0.0,
             daily_loss_cap_pct: 1.0,
             current_daily_loss_pct: 0.0,
+            ..Ctx::default()
         };
         let mut s = BonereaperLite::new(BonereaperLiteConfig::default());
         // mid = 0.92, very high YES; should fire convex_no

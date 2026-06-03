@@ -251,6 +251,7 @@ mod tests {
             daily_start_cash_usdc: 0.0,
             daily_loss_cap_pct: 1.0,
             current_daily_loss_pct: 0.0,
+            ..Ctx::default()
         };
         let mut s = LateBigBet::new(LateBigBetConfig::default());
         // 200s before close — not yet "late"
@@ -284,6 +285,7 @@ mod tests {
             daily_start_cash_usdc: 0.0,
             daily_loss_cap_pct: 1.0,
             current_daily_loss_pct: 0.0,
+            ..Ctx::default()
         };
         let mut s = LateBigBet::new(LateBigBetConfig {
             min_conviction: 0.0, // no gate

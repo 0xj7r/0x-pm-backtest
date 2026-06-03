@@ -25,7 +25,7 @@ use pm_model::{
     OnlineMetaCalibratorSnapshot, edge_vs_mid,
 };
 use pm_risk::{PortfolioLimits, PortfolioSnapshot, PortfolioState};
-use pm_strategy::regime::WhipsawRiskSnapshot;
+use pm_strategy::regime::{WhipsawRiskSnapshot, classify_market_regime_cluster};
 use pm_strategy::{Ctx, OrderRequest, Side, Strategy};
 use pm_types::{ReplayEvent, SpotHistory, TradeHistory};
 use serde::{Deserialize, Serialize};
@@ -301,6 +301,12 @@ pub struct DecisionLogRow {
     pub regime_reversal_pressure: f32,
     pub regime_sign_flip_rate: f32,
     pub regime_realized_vol_180s_bps: f32,
+    #[serde(default)]
+    pub regime_cluster: String,
+    #[serde(default)]
+    pub binance_flow_imbal_30s: f64,
+    #[serde(default)]
+    pub binance_adverse_vol_30s: f64,
     pub prior_market_range_1d: f32,
     pub prior_market_range_3d: f32,
     pub prior_market_range_7d: f32,
@@ -923,6 +929,22 @@ pub fn run_backtest<S: Strategy>(
         let event_cash_delta = cash - pre_cash;
         let event_mtm_after = mark_to_market(cash, yes_shares, no_shares, last_mid);
         let event_mtm_delta = event_mtm_after - pre_mtm;
+        let decision_side = if direction_score >= 0.0 {
+            Side::BuyYes
+        } else {
+            Side::BuyNo
+        };
+        let decision_flow = BinanceFlowFeatures::compute(spot, event.ts_ns, decision_side);
+        let decision_regime_cluster = classify_market_regime_cluster(
+            market_yes_range_so_far,
+            whipsaw_snapshot.path_efficiency,
+            whipsaw_snapshot.reversal_pressure,
+            whipsaw_snapshot.sign_flip_rate,
+            whipsaw_snapshot.realized_vol_180s_bps,
+            Some(decision_flow.adverse_vol_30s as f32),
+        )
+        .as_str()
+        .to_string();
         if let Some(f) = decision_file.as_mut() {
             if idx % decision_every == 0 {
                 let row = DecisionLogRow {
@@ -949,6 +971,9 @@ pub fn run_backtest<S: Strategy>(
                     regime_reversal_pressure: whipsaw_snapshot.reversal_pressure,
                     regime_sign_flip_rate: whipsaw_snapshot.sign_flip_rate,
                     regime_realized_vol_180s_bps: whipsaw_snapshot.realized_vol_180s_bps,
+                    regime_cluster: decision_regime_cluster.clone(),
+                    binance_flow_imbal_30s: decision_flow.flow_imbal_30s,
+                    binance_adverse_vol_30s: decision_flow.adverse_vol_30s,
                     prior_market_range_1d: cfg.prior_market_range_1d,
                     prior_market_range_3d: cfg.prior_market_range_3d,
                     prior_market_range_7d: cfg.prior_market_range_7d,
@@ -1058,6 +1083,9 @@ pub fn run_backtest<S: Strategy>(
                     regime_reversal_pressure: whipsaw_snapshot.reversal_pressure,
                     regime_sign_flip_rate: whipsaw_snapshot.sign_flip_rate,
                     regime_realized_vol_180s_bps: whipsaw_snapshot.realized_vol_180s_bps,
+                    regime_cluster: decision_regime_cluster,
+                    binance_flow_imbal_30s: decision_flow.flow_imbal_30s,
+                    binance_adverse_vol_30s: decision_flow.adverse_vol_30s,
                     prior_market_range_1d: cfg.prior_market_range_1d,
                     prior_market_range_3d: cfg.prior_market_range_3d,
                     prior_market_range_7d: cfg.prior_market_range_7d,
@@ -1259,6 +1287,9 @@ fn write_decision_rows_parquet(path: &Path, rows: &[DecisionLogRow]) -> Result<(
         Field::new("regime_reversal_pressure", DataType::Float32, false),
         Field::new("regime_sign_flip_rate", DataType::Float32, false),
         Field::new("regime_realized_vol_180s_bps", DataType::Float32, false),
+        Field::new("regime_cluster", DataType::Utf8, false),
+        Field::new("binance_flow_imbal_30s", DataType::Float64, false),
+        Field::new("binance_adverse_vol_30s", DataType::Float64, false),
         Field::new("prior_market_range_1d", DataType::Float32, false),
         Field::new("prior_market_range_3d", DataType::Float32, false),
         Field::new("prior_market_range_7d", DataType::Float32, false),
@@ -1410,6 +1441,15 @@ fn write_decision_rows_parquet(path: &Path, rows: &[DecisionLogRow]) -> Result<(
         )),
         Arc::new(Float32Array::from_iter_values(
             rows.iter().map(|r| r.regime_realized_vol_180s_bps),
+        )),
+        Arc::new(StringArray::from_iter_values(
+            rows.iter().map(|r| r.regime_cluster.as_str()),
+        )),
+        Arc::new(Float64Array::from_iter_values(
+            rows.iter().map(|r| r.binance_flow_imbal_30s),
+        )),
+        Arc::new(Float64Array::from_iter_values(
+            rows.iter().map(|r| r.binance_adverse_vol_30s),
         )),
         Arc::new(Float32Array::from_iter_values(
             rows.iter().map(|r| r.prior_market_range_1d),

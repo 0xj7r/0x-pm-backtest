@@ -399,6 +399,7 @@ mod tests {
             daily_start_cash_usdc: 0.0,
             daily_loss_cap_pct: 1.0,
             current_daily_loss_pct: 0.0,
+            ..Ctx::default()
         }
     }
 

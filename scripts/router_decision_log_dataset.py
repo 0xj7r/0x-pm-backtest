@@ -37,6 +37,9 @@ DECISION_FEATURES = (
     "regime_reversal_pressure",
     "regime_sign_flip_rate",
     "regime_realized_vol_180s_bps",
+    "regime_cluster",
+    "binance_flow_imbal_30s",
+    "binance_adverse_vol_30s",
     "prior_market_range_1d",
     "prior_market_range_3d",
     "prior_market_range_7d",
@@ -61,6 +64,7 @@ CLUSTER_FEATURE_ALIASES = {
     "regime_reversal_pressure": "regime_reversal_pressure",
     "regime_sign_flip_rate": "regime_sign_flip_rate",
     "regime_realized_vol_180s_bps": "regime_realized_vol_180s_bps",
+    "binance_adverse_vol_30s": "binance_adverse_vol_30s",
 }
 
 LEGACY_ALIASES = {
@@ -173,6 +177,15 @@ def summarize_decision_rows(rows: list[dict[str, Any]], allow_legacy: bool) -> d
         return out
 
     for key in DECISION_FEATURES:
+        if key == "regime_cluster":
+            labels = [
+                str(value)
+                for row in rows
+                if (value := row.get(key)) is not None and str(value)
+            ]
+            if labels:
+                out[key] = labels[-1]
+            continue
         values = [value for row in rows if (value := numeric(row.get(key))) is not None]
         if values:
             out[f"{key}_mean"] = mean(values)
@@ -263,7 +276,9 @@ def make_rows(
         best_candidate = max(names, key=lambda name: pnls[name])
         sorted_pnls = sorted(pnls.values(), reverse=True)
         current_features = decision_features[slug]
-        cluster = cluster_label(current_features.get("cluster_features") or {})
+        cluster = current_features.get("regime_cluster") or cluster_label(
+            current_features.get("cluster_features") or {}
+        )
         row = {
             "schema_version": 2,
             "slug": slug,

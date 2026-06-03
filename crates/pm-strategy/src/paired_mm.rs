@@ -322,6 +322,7 @@ mod tests {
             daily_start_cash_usdc: 0.0,
             daily_loss_cap_pct: 1.0,
             current_daily_loss_pct: 0.0,
+            ..Ctx::default()
         };
         let spot = SpotHistory::default();
         // book 0.50/0.51 → no_ask = 1 - 0.50 = 0.50; pair_cost = 0.49 + 0.49 = 0.98? wait
@@ -397,6 +398,7 @@ mod tests {
             daily_start_cash_usdc: 0.0,
             daily_loss_cap_pct: 1.0,
             current_daily_loss_pct: 0.0,
+            ..Ctx::default()
         };
         let spot = SpotHistory::default();
         // Wide spread → yes_ask + (1-yes_bid) = 1 + spread > gate
@@ -437,6 +439,7 @@ mod tests {
             daily_start_cash_usdc: 0.0,
             daily_loss_cap_pct: 1.0,
             current_daily_loss_pct: 0.0,
+            ..Ctx::default()
         };
         let spot = SpotHistory::default();
         let out1 = s.on_event(
@@ -498,6 +501,7 @@ mod tests {
             daily_start_cash_usdc: 0.0,
             daily_loss_cap_pct: 1.0,
             current_daily_loss_pct: 0.0,
+            ..Ctx::default()
         };
         // rising spot (favors yes/ heavy side) -> lean widens eff_max_yes -> should quote yes despite delta>base
         // IMPORTANT: first sample must be <= (evt_ts - 30s) else trailing_return start=None ->0
@@ -631,6 +635,7 @@ mod tests {
             daily_start_cash_usdc: 0.0,
             daily_loss_cap_pct: 1.0,
             current_daily_loss_pct: 0.0,
+            ..Ctx::default()
         };
         let spot = SpotHistory::default();
         // Book such that nominal pair would be high? The gate is now bypassed

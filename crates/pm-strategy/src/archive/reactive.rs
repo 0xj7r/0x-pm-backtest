@@ -389,6 +389,7 @@ mod tests {
             daily_start_cash_usdc: 0.0,
             daily_loss_cap_pct: 1.0,
             current_daily_loss_pct: 0.0,
+            ..Ctx::default()
         };
         let mut s = ReactiveDirectional::new(ReactiveDirectionalConfig::default());
         let spot = SpotHistory::default();
@@ -421,6 +422,7 @@ mod tests {
             daily_start_cash_usdc: 0.0,
             daily_loss_cap_pct: 1.0,
             current_daily_loss_pct: 0.0,
+            ..Ctx::default()
         };
         let mut s = ReactiveDirectional::new(ReactiveDirectionalConfig::default());
         let spot = SpotHistory::default();
@@ -459,6 +461,7 @@ mod tests {
             daily_start_cash_usdc: 0.0,
             daily_loss_cap_pct: 1.0,
             current_daily_loss_pct: 0.0,
+            ..Ctx::default()
         };
         let mut s = ReactiveDirectional::new(ReactiveDirectionalConfig::default());
         let spot = SpotHistory::default();
@@ -504,6 +507,7 @@ mod tests {
             daily_start_cash_usdc: 0.0,
             daily_loss_cap_pct: 1.0,
             current_daily_loss_pct: 0.0,
+            ..Ctx::default()
         };
         let mut s = ReactiveDirectional::new(ReactiveDirectionalConfig::default());
         let spot = SpotHistory::default();
@@ -574,6 +578,7 @@ mod tests {
             daily_start_cash_usdc: 0.0,
             daily_loss_cap_pct: 1.0,
             current_daily_loss_pct: 0.0,
+            ..Ctx::default()
         };
         let event = evt(close_ns - 100 * 1_000_000_000, 0.50, 0.51);
         let (_out, _model) =

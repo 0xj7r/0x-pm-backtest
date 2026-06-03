@@ -56,6 +56,22 @@ pub struct BackToExploreConfig {
     pub residual_taper_start_frac: f64,
     /// Minimum multiplier at the residual cap (never go to zero unless wanted).
     pub residual_min_clip_multiplier: f64,
+    /// Fill-time YES range where choppy-market size throttling starts.
+    pub range_soft_throttle: f32,
+    /// Fill-time YES range where choppy-market size throttling reaches its floor.
+    pub range_hard_throttle: f32,
+    /// Minimum size multiplier for directional adds in high-range choppy markets.
+    pub range_min_clip_multiplier: f64,
+    /// Minimum size multiplier for pair/balance adds in high-range choppy markets.
+    pub range_repair_min_clip_multiplier: f64,
+    /// Minimum fill-time YES range before chop throttling can engage.
+    pub range_chop_min_range: f32,
+    /// Path-efficiency threshold below which high range is treated as choppy.
+    pub range_clean_path_efficiency: f32,
+    /// Sign-flip threshold above which high range is treated as choppy.
+    pub range_chop_sign_flip_rate: f32,
+    /// Reversal-pressure threshold above which high range is treated as choppy.
+    pub range_reversal_pressure: f32,
     /// Hard cap on same-side residual shares before we stop adding that side.
     pub max_residual_shares: f64,
     /// Do not emit if the final multiplier falls below this.
@@ -89,6 +105,8 @@ pub struct BackToExploreConfig {
     pub base_target_net_shares: f64,
     /// Multiplier on target net during high-activity hours.
     pub good_hour_target_net_mult: f64,
+    /// Emit per-fill internal signal logs when enabled.
+    pub debug_signals: bool,
 }
 
 impl Default for BackToExploreConfig {
@@ -104,6 +122,14 @@ impl Default for BackToExploreConfig {
             directional_strength_mult: 1.6,
             residual_taper_start_frac: 0.55,
             residual_min_clip_multiplier: 0.35,
+            range_soft_throttle: 1.0,
+            range_hard_throttle: 1.0,
+            range_min_clip_multiplier: 1.0,
+            range_repair_min_clip_multiplier: 1.0,
+            range_chop_min_range: 1.0,
+            range_clean_path_efficiency: 1.0,
+            range_chop_sign_flip_rate: 1.0,
+            range_reversal_pressure: 1.0,
             max_residual_shares: 120.0, // conservative for small capital; will be further limited by ladder logic
             min_clip_multiplier_to_emit: 0.18,
             refresh_secs: 2.8,
@@ -119,6 +145,7 @@ impl Default for BackToExploreConfig {
             target_risk_per_clip_frac: 0.0025, // 0.25% equity risk per clip base for 2.7k cap
             base_target_net_shares: 6.0,
             good_hour_target_net_mult: 3.0,
+            debug_signals: false,
         }
     }
 }
@@ -285,7 +312,34 @@ fn clip_multiplier(
         mult *= 0.82;
     }
 
+    mult *= range_stress_multiplier(cfg, ctx, is_pair_fill);
+
     mult.clamp(0.0, 2.8)
+}
+
+fn range_stress_multiplier(cfg: &BackToExploreConfig, ctx: &Ctx, is_pair_fill: bool) -> f64 {
+    let observed_range = ctx.market_yes_range_so_far.max(0.0);
+    let soft = cfg.range_soft_throttle.max(0.0);
+    if observed_range < soft || observed_range < cfg.range_chop_min_range.max(0.0) {
+        return 1.0;
+    }
+
+    let choppy = ctx.regime_path_efficiency <= cfg.range_clean_path_efficiency
+        || ctx.regime_sign_flip_rate >= cfg.range_chop_sign_flip_rate
+        || ctx.regime_reversal_pressure >= cfg.range_reversal_pressure;
+    if !choppy {
+        return 1.0;
+    }
+
+    let hard = cfg.range_hard_throttle.max(soft + f32::EPSILON);
+    let progress = ((observed_range - soft) / (hard - soft)).clamp(0.0, 1.0) as f64;
+    let floor = if is_pair_fill {
+        cfg.range_repair_min_clip_multiplier
+    } else {
+        cfg.range_min_clip_multiplier
+    }
+    .clamp(0.0, 1.0);
+    1.0 - progress * (1.0 - floor)
 }
 
 impl Strategy for BackToExploreTaker {
@@ -601,6 +655,7 @@ mod tests {
             daily_start_cash_usdc: 0.0,
             daily_loss_cap_pct: 1.0,
             current_daily_loss_pct: 0.0,
+            ..Ctx::default()
         }
     }
 

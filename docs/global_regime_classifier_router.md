@@ -250,6 +250,18 @@ Initial routing should be conservative:
 - `risk_off`: activate after clustered strategy losses or when router confidence
   is low and drawdown is elevated.
 
+The symbolic clusters are a thin coordination layer on top of the continuous
+regime signals, not a replacement for specialist strategy gates. BR2 and
+BackToExplore should continue to consume `range_so_far`, path efficiency, flip
+rate, reversal pressure, realized vol, adverse flow, and model scores directly
+for sizing/gating. The router uses the cluster label plus no-lookahead rolling
+same-cluster PnL/win-rate/trade-rate to decide which specialist should receive
+capital.
+
+Fresh decision logs now carry a pre-route `regime_cluster` field. Dataset
+builders should prefer that field when present and fall back to recomputing the
+label from continuous features only for legacy logs.
+
 ## Analysis Artifacts
 
 Current local reports:

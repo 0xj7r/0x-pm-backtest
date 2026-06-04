@@ -17,6 +17,7 @@ SECURITY_GROUP_ID="${SECURITY_GROUP_ID:-sg-0714c4165723a894a}"
 SUBNET_ID="${SUBNET_ID:-subnet-0c16e9b7f39d97feb}"
 ROOT_VOLUME_GB="${ROOT_VOLUME_GB:-250}"
 USE_SPOT="${USE_SPOT:-1}"
+SYNC_SOURCE="${SYNC_SOURCE:-1}"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-bte-policy-replay-$$"
 
 LOCAL_MARKETS="data/manifests/regime_clusters/bte_combined_no_boost_heldout.jsonl"
@@ -40,6 +41,7 @@ while [ $# -gt 0 ]; do
         --instance-type) INSTANCE_TYPE="$2"; shift 2 ;;
         --arm) ARM="$2"; shift 2 ;;
         --on-demand) USE_SPOT="0"; shift ;;
+        --no-source-sync) SYNC_SOURCE="0"; shift ;;
         *) echo "unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -66,15 +68,19 @@ esac
 MARKETS_KEY="markets/regime_clusters/${RUN_ID}/markets.jsonl"
 SCALES_KEY="artifacts/regime_clusters/${RUN_ID}/bte_policy_scales.jsonl"
 
-echo "Syncing source to s3://${SOURCE_BUCKET}/${SOURCE_PREFIX}/"
-aws s3 rm "s3://${SOURCE_BUCKET}/${SOURCE_PREFIX}/" --recursive --quiet
-for file in Cargo.toml Cargo.lock rust-toolchain.toml README.md .gitignore; do
-    [ -f "$file" ] && aws s3 cp "$file" "s3://${SOURCE_BUCKET}/${SOURCE_PREFIX}/${file}" --quiet
-done
-aws s3 sync crates "s3://${SOURCE_BUCKET}/${SOURCE_PREFIX}/crates/" --delete --quiet
-aws s3 sync scripts "s3://${SOURCE_BUCKET}/${SOURCE_PREFIX}/scripts/" --delete --quiet
-aws s3 sync configs "s3://${SOURCE_BUCKET}/${SOURCE_PREFIX}/configs/" --delete --quiet
-[ -d docs ] && aws s3 sync docs "s3://${SOURCE_BUCKET}/${SOURCE_PREFIX}/docs/" --delete --quiet
+if [ "$SYNC_SOURCE" = "1" ]; then
+    echo "Syncing source to s3://${SOURCE_BUCKET}/${SOURCE_PREFIX}/"
+    aws s3 rm "s3://${SOURCE_BUCKET}/${SOURCE_PREFIX}/" --recursive --quiet
+    for file in Cargo.toml Cargo.lock rust-toolchain.toml README.md .gitignore; do
+        [ -f "$file" ] && aws s3 cp "$file" "s3://${SOURCE_BUCKET}/${SOURCE_PREFIX}/${file}" --quiet
+    done
+    aws s3 sync crates "s3://${SOURCE_BUCKET}/${SOURCE_PREFIX}/crates/" --delete --quiet
+    aws s3 sync scripts "s3://${SOURCE_BUCKET}/${SOURCE_PREFIX}/scripts/" --delete --quiet
+    aws s3 sync configs "s3://${SOURCE_BUCKET}/${SOURCE_PREFIX}/configs/" --delete --quiet
+    [ -d docs ] && aws s3 sync docs "s3://${SOURCE_BUCKET}/${SOURCE_PREFIX}/docs/" --delete --quiet
+else
+    echo "Skipping source sync; using existing s3://${SOURCE_BUCKET}/${SOURCE_PREFIX}/"
+fi
 
 aws s3 cp "$LOCAL_MARKETS" "s3://${SOURCE_BUCKET}/${MARKETS_KEY}" --quiet
 aws s3 cp "$LOCAL_SCALES" "s3://${SOURCE_BUCKET}/${SCALES_KEY}" --quiet

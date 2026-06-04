@@ -72,6 +72,12 @@ pub struct BackToExploreConfig {
     pub range_chop_sign_flip_rate: f32,
     /// Reversal-pressure threshold above which high range is treated as choppy.
     pub range_reversal_pressure: f32,
+    /// Observed YES range required before the dedicated reversal-pressure throttle can engage.
+    pub reversal_pressure_range_min: f32,
+    /// Reversal-pressure threshold for the dedicated toxic-reversal throttle.
+    pub reversal_pressure_min: f32,
+    /// Clip multiplier used when the dedicated toxic-reversal throttle engages.
+    pub reversal_pressure_clip_multiplier: f64,
     /// Hard cap on same-side residual shares before we stop adding that side.
     pub max_residual_shares: f64,
     /// Do not emit if the final multiplier falls below this.
@@ -133,6 +139,9 @@ impl Default for BackToExploreConfig {
             range_clean_path_efficiency: 1.0,
             range_chop_sign_flip_rate: 1.0,
             range_reversal_pressure: 1.0,
+            reversal_pressure_range_min: 1.0,
+            reversal_pressure_min: 1.0,
+            reversal_pressure_clip_multiplier: 1.0,
             max_residual_shares: 120.0, // conservative for small capital; will be further limited by ladder logic
             min_clip_multiplier_to_emit: 0.18,
             refresh_secs: 2.8,
@@ -317,8 +326,19 @@ fn clip_multiplier(
     }
 
     mult *= range_stress_multiplier(cfg, ctx, is_pair_fill);
+    mult *= reversal_pressure_multiplier(cfg, ctx);
 
     mult.clamp(0.0, 2.8)
+}
+
+fn reversal_pressure_multiplier(cfg: &BackToExploreConfig, ctx: &Ctx) -> f64 {
+    if ctx.market_yes_range_so_far < cfg.reversal_pressure_range_min.max(0.0) {
+        return 1.0;
+    }
+    if ctx.regime_reversal_pressure < cfg.reversal_pressure_min.max(0.0) {
+        return 1.0;
+    }
+    cfg.reversal_pressure_clip_multiplier.clamp(0.0, 1.0)
 }
 
 fn range_stress_multiplier(cfg: &BackToExploreConfig, ctx: &Ctx, is_pair_fill: bool) -> f64 {
@@ -760,5 +780,27 @@ mod tests {
         // May or may not emit depending on exact random gate, but must not panic or hard-reject on time.
         // We only assert it didn't crash and the type is correct.
         let _ = out;
+    }
+
+    #[test]
+    fn reversal_pressure_multiplier_only_hits_expanded_reversal_pressure() {
+        let cfg = BackToExploreConfig {
+            reversal_pressure_range_min: 0.20,
+            reversal_pressure_min: 0.30,
+            reversal_pressure_clip_multiplier: 0.0,
+            ..BackToExploreConfig::default()
+        };
+
+        let mut c = ctx(1_000_000_000_000);
+        c.market_yes_range_so_far = 0.25;
+        c.regime_reversal_pressure = 0.35;
+        assert_eq!(reversal_pressure_multiplier(&cfg, &c), 0.0);
+
+        c.market_yes_range_so_far = 0.10;
+        assert_eq!(reversal_pressure_multiplier(&cfg, &c), 1.0);
+
+        c.market_yes_range_so_far = 0.25;
+        c.regime_reversal_pressure = 0.20;
+        assert_eq!(reversal_pressure_multiplier(&cfg, &c), 1.0);
     }
 }

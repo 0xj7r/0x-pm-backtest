@@ -125,6 +125,11 @@ aws s3 sync "s3://${SOURCE_BUCKET}/${SOURCE_PREFIX}/" /opt/pm/ \\
     --exclude "target/*" --exclude "data/*" --exclude ".git/*"
 cd /opt/pm
 export PM_SOURCE_GIT_SHA="${SOURCE_GIT_SHA}"
+if [ ! -f "${PROFILE_PATH}" ]; then
+  echo "[\$(date -u)] missing required profile: ${PROFILE_PATH}" >&2
+  aws s3 cp /var/log/pm-bootstrap.log "s3://${RESULTS_BUCKET}/results/${RUN_ID}/bootstrap.log" || true
+  exit 66
+fi
 cargo build --release -p pm-app
 
 aws s3 cp "s3://${SOURCE_BUCKET}/${MARKETS_KEY}" /opt/pm/markets.jsonl
@@ -190,20 +195,26 @@ shutdown -h now
 EOF
 )
 
-INSTANCE_ID=$(aws ec2 run-instances \
-    --region "$REGION" \
-    --image-id "$AMI" \
-    --instance-type "$INSTANCE_TYPE" \
-    "${INSTANCE_MARKET_OPTIONS_ARGS[@]}" \
-    --iam-instance-profile "Name=$INSTANCE_PROFILE" \
-    --key-name "$KEY_NAME" \
-    --security-group-ids "$SECURITY_GROUP_ID" \
-    --subnet-id "$SUBNET_ID" \
-    --block-device-mappings "DeviceName=/dev/xvda,Ebs={VolumeSize=${ROOT_VOLUME_GB},VolumeType=gp3,DeleteOnTermination=true}" \
-    --instance-initiated-shutdown-behavior terminate \
-    --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=pm-bte-policy-${RUN_ID}},{Key=run_id,Value=${RUN_ID}},{Key=project,Value=polymarket-backtest}]" \
-    --user-data "$USER_DATA" \
-    --query 'Instances[0].InstanceId' --output text)
+RUN_INSTANCE_ARGS=(
+    --region "$REGION"
+    --image-id "$AMI"
+    --instance-type "$INSTANCE_TYPE"
+    --iam-instance-profile "Name=$INSTANCE_PROFILE"
+    --key-name "$KEY_NAME"
+    --security-group-ids "$SECURITY_GROUP_ID"
+    --subnet-id "$SUBNET_ID"
+    --block-device-mappings "DeviceName=/dev/xvda,Ebs={VolumeSize=${ROOT_VOLUME_GB},VolumeType=gp3,DeleteOnTermination=true}"
+    --instance-initiated-shutdown-behavior terminate
+    --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=pm-bte-policy-${RUN_ID}},{Key=run_id,Value=${RUN_ID}},{Key=project,Value=polymarket-backtest}]"
+    --user-data "$USER_DATA"
+    --query 'Instances[0].InstanceId'
+    --output text
+)
+if [ "$USE_SPOT" = "1" ]; then
+    RUN_INSTANCE_ARGS+=("${INSTANCE_MARKET_OPTIONS_ARGS[@]}")
+fi
+
+INSTANCE_ID=$(aws ec2 run-instances "${RUN_INSTANCE_ARGS[@]}")
 
 echo "Launched: $INSTANCE_ID"
 echo "Results: s3://${RESULTS_BUCKET}/results/${RUN_ID}/"

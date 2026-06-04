@@ -593,19 +593,19 @@ impl Strategy for BackToExploreTaker {
         self.clips += 1;
         self.last_emit_ns = event.ts_ns;
 
-        // Log strategy internal signals for post analysis (daily PnL vs leading indicators like ladder_net, target, pair_sig).
-        // These will appear in the backtest log and can be parsed/aligned with daily PnL from markets.jsonl.
-        eprintln!(
-            "STRAT_SIGNAL ts_ns={} window_delta_bps={:.1} ladder_net={:.1} target_net={:.1} net_vs_target={:.1} pair_sig={:.2} time_mult={:.2} directional={:.2}",
-            event.ts_ns,
-            window_delta_bps,
-            asset_ladder_net,
-            target_net,
-            net_vs_target,
-            pair_signal,
-            time.size_mult,
-            directional_strength
-        );
+        if self.cfg.debug_signals {
+            eprintln!(
+                "STRAT_SIGNAL ts_ns={} window_delta_bps={:.1} ladder_net={:.1} target_net={:.1} net_vs_target={:.1} pair_sig={:.2} time_mult={:.2} directional={:.2}",
+                event.ts_ns,
+                window_delta_bps,
+                asset_ladder_net,
+                target_net,
+                net_vs_target,
+                pair_signal,
+                time.size_mult,
+                directional_strength
+            );
+        }
 
         StrategyOutput::one(OrderRequest {
             side,

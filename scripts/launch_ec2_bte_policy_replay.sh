@@ -26,6 +26,7 @@ STARTING_CASH="2700"
 CLIP_FRACTION="0.0025"
 MAX_CONCURRENT_FETCHES="64"
 CHECKPOINT_EVERY="250"
+ARM="both"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -37,10 +38,26 @@ while [ $# -gt 0 ]; do
         --max-concurrent-fetches) MAX_CONCURRENT_FETCHES="$2"; shift 2 ;;
         --checkpoint-every) CHECKPOINT_EVERY="$2"; shift 2 ;;
         --instance-type) INSTANCE_TYPE="$2"; shift 2 ;;
+        --arm) ARM="$2"; shift 2 ;;
         --on-demand) USE_SPOT="0"; shift ;;
         *) echo "unknown arg: $1" >&2; exit 1 ;;
     esac
 done
+
+case "$ARM" in
+    fixed|policy|both) ;;
+    *) echo "--arm must be fixed, policy, or both" >&2; exit 1 ;;
+esac
+RUN_FIXED="0"
+RUN_POLICY="0"
+case "$ARM" in
+    fixed) RUN_FIXED="1" ;;
+    policy) RUN_POLICY="1" ;;
+    both)
+        RUN_FIXED="1"
+        RUN_POLICY="1"
+        ;;
+esac
 
 [ -f "$LOCAL_MARKETS" ] || { echo "missing markets file: $LOCAL_MARKETS" >&2; exit 1; }
 [ -f "$LOCAL_SCALES" ] || { echo "missing scale file: $LOCAL_SCALES" >&2; exit 1; }
@@ -73,6 +90,7 @@ echo "Run ID: $RUN_ID"
 echo "Source git SHA: $SOURCE_GIT_SHA"
 echo "Markets: s3://${SOURCE_BUCKET}/${MARKETS_KEY}"
 echo "Scales: s3://${SOURCE_BUCKET}/${SCALES_KEY}"
+echo "Arm: $ARM"
 
 INSTANCE_MARKET_OPTIONS_ARGS=()
 if [ "$USE_SPOT" = "1" ]; then
@@ -153,8 +171,12 @@ run_arm() {
   fi
 }
 
-run_arm fixed
-run_arm policy --back-to-explore-policy-scales-jsonl /opt/pm/bte_policy_scales.jsonl
+if [ "${RUN_FIXED}" = "1" ]; then
+  run_arm fixed
+fi
+if [ "${RUN_POLICY}" = "1" ]; then
+  run_arm policy --back-to-explore-policy-scales-jsonl /opt/pm/bte_policy_scales.jsonl
+fi
 
 aws s3 cp /var/log/pm-bootstrap.log "s3://${RESULTS_BUCKET}/results/${RUN_ID}/bootstrap.log" || true
 echo "[\$(date -u)] BTE policy replay complete"

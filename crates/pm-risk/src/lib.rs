@@ -147,7 +147,12 @@ impl PortfolioState {
     /// This fixes the case where "gating exposure" (tight max_daily or
     /// max_per_market) unintentionally blocked the repair side, leaving the
     /// book stranded.
-    pub fn can_open_position_ex(&self, market_id: u32, prospective_outlay_usdc: f64, is_repair: bool) -> bool {
+    pub fn can_open_position_ex(
+        &self,
+        market_id: u32,
+        prospective_outlay_usdc: f64,
+        is_repair: bool,
+    ) -> bool {
         if self.halt_reason.is_some() {
             // Drawdown halt is hard. Exposure halts (daily cap) can be bypassed
             // for repair trades so we can still pair up and avoid stranding when

@@ -22,6 +22,7 @@
 //! Scope for this focused effort: BTC + ETH 5m/15m only. Robust backtesting via
 //! `back_to_explore` StratId + BTC/ETH manifests + the mined priors.
 
+use crate::regime::{MarketRegimeCluster, classify_market_regime_cluster};
 use crate::spot_momentum::weighted_multi_tf_return;
 use crate::{Ctx, OrderRequest, Side, Strategy, StrategyOutput};
 use pm_types::{ReplayEvent, SpotHistory, TradeHistory};
@@ -72,11 +73,9 @@ pub struct BackToExploreConfig {
     pub range_chop_sign_flip_rate: f32,
     /// Reversal-pressure threshold above which high range is treated as choppy.
     pub range_reversal_pressure: f32,
-    /// Observed YES range required before the dedicated reversal-pressure throttle can engage.
-    pub reversal_pressure_range_min: f32,
-    /// Reversal-pressure threshold for the dedicated toxic-reversal throttle.
-    pub reversal_pressure_min: f32,
-    /// Clip multiplier used when the dedicated toxic-reversal throttle engages.
+    /// Directional-only clip multiplier when the market path is clean.
+    pub clean_path_directional_clip_multiplier: f64,
+    /// Clip multiplier used when the shared classifier reports expanded reversal pressure.
     pub reversal_pressure_clip_multiplier: f64,
     /// Hard cap on same-side residual shares before we stop adding that side.
     pub max_residual_shares: f64,
@@ -139,8 +138,7 @@ impl Default for BackToExploreConfig {
             range_clean_path_efficiency: 1.0,
             range_chop_sign_flip_rate: 1.0,
             range_reversal_pressure: 1.0,
-            reversal_pressure_range_min: 1.0,
-            reversal_pressure_min: 1.0,
+            clean_path_directional_clip_multiplier: 1.0,
             reversal_pressure_clip_multiplier: 1.0,
             max_residual_shares: 120.0, // conservative for small capital; will be further limited by ladder logic
             min_clip_multiplier_to_emit: 0.18,
@@ -327,18 +325,41 @@ fn clip_multiplier(
 
     mult *= range_stress_multiplier(cfg, ctx, is_pair_fill);
     mult *= reversal_pressure_multiplier(cfg, ctx);
+    mult *= clean_path_directional_multiplier(cfg, ctx, is_pair_fill);
 
     mult.clamp(0.0, 2.8)
 }
 
+fn clean_path_directional_multiplier(
+    cfg: &BackToExploreConfig,
+    ctx: &Ctx,
+    is_pair_fill: bool,
+) -> f64 {
+    if is_pair_fill {
+        return 1.0;
+    }
+    if market_regime_cluster(ctx) == MarketRegimeCluster::CleanDirectionalPath {
+        return cfg.clean_path_directional_clip_multiplier.clamp(0.0, 1.8);
+    }
+    1.0
+}
+
 fn reversal_pressure_multiplier(cfg: &BackToExploreConfig, ctx: &Ctx) -> f64 {
-    if ctx.market_yes_range_so_far < cfg.reversal_pressure_range_min.max(0.0) {
-        return 1.0;
+    if market_regime_cluster(ctx) == MarketRegimeCluster::ExpandedReversalPressure {
+        return cfg.reversal_pressure_clip_multiplier.clamp(0.0, 1.0);
     }
-    if ctx.regime_reversal_pressure < cfg.reversal_pressure_min.max(0.0) {
-        return 1.0;
-    }
-    cfg.reversal_pressure_clip_multiplier.clamp(0.0, 1.0)
+    1.0
+}
+
+fn market_regime_cluster(ctx: &Ctx) -> MarketRegimeCluster {
+    classify_market_regime_cluster(
+        ctx.market_yes_range_so_far,
+        ctx.regime_path_efficiency,
+        ctx.regime_reversal_pressure,
+        ctx.regime_sign_flip_rate,
+        ctx.regime_realized_vol_180s_bps,
+        None,
+    )
 }
 
 fn range_stress_multiplier(cfg: &BackToExploreConfig, ctx: &Ctx, is_pair_fill: bool) -> f64 {
@@ -785,8 +806,6 @@ mod tests {
     #[test]
     fn reversal_pressure_multiplier_only_hits_expanded_reversal_pressure() {
         let cfg = BackToExploreConfig {
-            reversal_pressure_range_min: 0.20,
-            reversal_pressure_min: 0.30,
             reversal_pressure_clip_multiplier: 0.0,
             ..BackToExploreConfig::default()
         };
@@ -802,5 +821,28 @@ mod tests {
         c.market_yes_range_so_far = 0.25;
         c.regime_reversal_pressure = 0.20;
         assert_eq!(reversal_pressure_multiplier(&cfg, &c), 1.0);
+    }
+
+    #[test]
+    fn clean_path_directional_multiplier_only_boosts_clean_directional_fills() {
+        let cfg = BackToExploreConfig {
+            clean_path_directional_clip_multiplier: 1.25,
+            ..BackToExploreConfig::default()
+        };
+
+        let mut c = ctx(1_000_000_000_000);
+        c.market_yes_range_so_far = 0.08;
+        c.regime_path_efficiency = 0.50;
+        c.regime_sign_flip_rate = 0.20;
+        c.regime_reversal_pressure = 0.20;
+        assert_eq!(clean_path_directional_multiplier(&cfg, &c, false), 1.25);
+        assert_eq!(clean_path_directional_multiplier(&cfg, &c, true), 1.0);
+
+        c.regime_sign_flip_rate = 0.50;
+        assert_eq!(clean_path_directional_multiplier(&cfg, &c, false), 1.0);
+
+        c.regime_sign_flip_rate = 0.20;
+        c.regime_reversal_pressure = 0.30;
+        assert_eq!(clean_path_directional_multiplier(&cfg, &c, false), 1.0);
     }
 }

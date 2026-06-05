@@ -30,11 +30,13 @@ range_clean_path_efficiency = 0.78
 range_chop_sign_flip_rate = 0.35
 range_reversal_pressure = 0.45
 
+# Directional upside lane. The shared Rust regime classifier owns the bucket
+# thresholds; this profile only decides the policy action for that bucket.
+clean_path_directional_clip_multiplier = 1.25
+
 # Dedicated toxic-reversal throttle. The engine replay showed
 # expanded_reversal_pressure was a negative BTE bucket, while broad risk-off
 # accidentally removed profitable default/no_trade markets.
-reversal_pressure_range_min = 0.20
-reversal_pressure_min = 0.30
 reversal_pressure_clip_multiplier = 0.0
 
 # Execution shape and timing

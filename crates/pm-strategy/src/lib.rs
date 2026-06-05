@@ -78,6 +78,7 @@ pub struct Ctx {
     pub regime_path_efficiency: f32,
     pub regime_reversal_pressure: f32,
     pub regime_sign_flip_rate: f32,
+    pub regime_realized_vol_180s_bps: f32,
     /// Mean full-market YES-mid range over already closed prior BTC 5m markets.
     /// These fields are live-safe in portfolio replay because they never include
     /// the current market.

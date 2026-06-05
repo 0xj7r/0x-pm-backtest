@@ -773,6 +773,7 @@ pub fn run_backtest<S: Strategy>(
             regime_path_efficiency: whipsaw_snapshot.path_efficiency,
             regime_reversal_pressure: whipsaw_snapshot.reversal_pressure,
             regime_sign_flip_rate: whipsaw_snapshot.sign_flip_rate,
+            regime_realized_vol_180s_bps: whipsaw_snapshot.realized_vol_180s_bps,
             prior_market_range_1d: cfg.prior_market_range_1d,
             prior_market_range_3d: cfg.prior_market_range_3d,
             prior_market_range_7d: cfg.prior_market_range_7d,

@@ -460,8 +460,7 @@ pub struct BackToExploreProfile {
     pub range_clean_path_efficiency: Option<f32>,
     pub range_chop_sign_flip_rate: Option<f32>,
     pub range_reversal_pressure: Option<f32>,
-    pub reversal_pressure_range_min: Option<f32>,
-    pub reversal_pressure_min: Option<f32>,
+    pub clean_path_directional_clip_multiplier: Option<f64>,
     pub reversal_pressure_clip_multiplier: Option<f64>,
     pub max_residual_shares: Option<f64>,
     pub min_clip_multiplier_to_emit: Option<f64>,
@@ -535,10 +534,9 @@ impl BackToExploreProfile {
             back_to_explore_range_reversal_pressure
         );
         apply!(
-            reversal_pressure_range_min,
-            back_to_explore_reversal_pressure_range_min
+            clean_path_directional_clip_multiplier,
+            back_to_explore_clean_path_directional_clip_multiplier
         );
-        apply!(reversal_pressure_min, back_to_explore_reversal_pressure_min);
         apply!(
             reversal_pressure_clip_multiplier,
             back_to_explore_reversal_pressure_clip_multiplier
@@ -1045,8 +1043,7 @@ pub struct WalkForwardConfig {
     pub back_to_explore_range_clean_path_efficiency: f32,
     pub back_to_explore_range_chop_sign_flip_rate: f32,
     pub back_to_explore_range_reversal_pressure: f32,
-    pub back_to_explore_reversal_pressure_range_min: f32,
-    pub back_to_explore_reversal_pressure_min: f32,
+    pub back_to_explore_clean_path_directional_clip_multiplier: f64,
     pub back_to_explore_reversal_pressure_clip_multiplier: f64,
     pub back_to_explore_max_residual_shares: f64,
     pub back_to_explore_min_clip_multiplier_to_emit: f64,
@@ -1314,8 +1311,7 @@ impl Default for WalkForwardConfig {
             back_to_explore_range_clean_path_efficiency: 1.0,
             back_to_explore_range_chop_sign_flip_rate: 1.0,
             back_to_explore_range_reversal_pressure: 1.0,
-            back_to_explore_reversal_pressure_range_min: 1.0,
-            back_to_explore_reversal_pressure_min: 1.0,
+            back_to_explore_clean_path_directional_clip_multiplier: 1.0,
             back_to_explore_reversal_pressure_clip_multiplier: 1.0,
             back_to_explore_max_residual_shares: 120.0,
             back_to_explore_min_clip_multiplier_to_emit: 0.18,
@@ -1413,8 +1409,8 @@ impl WalkForwardConfig {
             range_clean_path_efficiency: self.back_to_explore_range_clean_path_efficiency,
             range_chop_sign_flip_rate: self.back_to_explore_range_chop_sign_flip_rate,
             range_reversal_pressure: self.back_to_explore_range_reversal_pressure,
-            reversal_pressure_range_min: self.back_to_explore_reversal_pressure_range_min,
-            reversal_pressure_min: self.back_to_explore_reversal_pressure_min,
+            clean_path_directional_clip_multiplier: self
+                .back_to_explore_clean_path_directional_clip_multiplier,
             reversal_pressure_clip_multiplier: self
                 .back_to_explore_reversal_pressure_clip_multiplier,
             max_residual_shares: self.back_to_explore_max_residual_shares,
@@ -2077,8 +2073,7 @@ pub struct BackToExploreSummaryConfig {
     pub range_clean_path_efficiency: f32,
     pub range_chop_sign_flip_rate: f32,
     pub range_reversal_pressure: f32,
-    pub reversal_pressure_range_min: f32,
-    pub reversal_pressure_min: f32,
+    pub clean_path_directional_clip_multiplier: f64,
     pub reversal_pressure_clip_multiplier: f64,
     pub max_residual_shares: f64,
     pub min_clip_multiplier_to_emit: f64,
@@ -2116,8 +2111,8 @@ impl From<&WalkForwardConfig> for BackToExploreSummaryConfig {
             range_clean_path_efficiency: cfg.back_to_explore_range_clean_path_efficiency,
             range_chop_sign_flip_rate: cfg.back_to_explore_range_chop_sign_flip_rate,
             range_reversal_pressure: cfg.back_to_explore_range_reversal_pressure,
-            reversal_pressure_range_min: cfg.back_to_explore_reversal_pressure_range_min,
-            reversal_pressure_min: cfg.back_to_explore_reversal_pressure_min,
+            clean_path_directional_clip_multiplier: cfg
+                .back_to_explore_clean_path_directional_clip_multiplier,
             reversal_pressure_clip_multiplier: cfg
                 .back_to_explore_reversal_pressure_clip_multiplier,
             max_residual_shares: cfg.back_to_explore_max_residual_shares,
@@ -5917,8 +5912,7 @@ range_min_clip_multiplier = 0.20
 range_repair_min_clip_multiplier = 0.70
 range_chop_min_range = 0.20
 range_clean_path_efficiency = 0.78
-reversal_pressure_range_min = 0.20
-reversal_pressure_min = 0.30
+clean_path_directional_clip_multiplier = 1.25
 reversal_pressure_clip_multiplier = 0.0
 policy_scales_jsonl = "data/runs/regime_clusters/bte_scales.jsonl"
 debug_signals = true
@@ -5951,8 +5945,10 @@ debug_signals = true
         assert!((cfg.back_to_explore_range_repair_min_clip_multiplier - 0.70).abs() < f64::EPSILON);
         assert!((cfg.back_to_explore_range_chop_min_range - 0.20).abs() < f32::EPSILON);
         assert!((cfg.back_to_explore_range_clean_path_efficiency - 0.78).abs() < f32::EPSILON);
-        assert!((cfg.back_to_explore_reversal_pressure_range_min - 0.20).abs() < f32::EPSILON);
-        assert!((cfg.back_to_explore_reversal_pressure_min - 0.30).abs() < f32::EPSILON);
+        assert!(
+            (cfg.back_to_explore_clean_path_directional_clip_multiplier - 1.25).abs()
+                < f64::EPSILON
+        );
         assert!((cfg.back_to_explore_reversal_pressure_clip_multiplier - 0.0).abs() < f64::EPSILON);
         assert_eq!(
             cfg.back_to_explore_policy_scales_jsonl.as_deref(),
@@ -5973,8 +5969,7 @@ debug_signals = true
         cfg.back_to_explore_range_min_clip_multiplier = 0.25;
         cfg.back_to_explore_range_repair_min_clip_multiplier = 0.75;
         cfg.back_to_explore_range_chop_min_range = 0.22;
-        cfg.back_to_explore_reversal_pressure_range_min = 0.21;
-        cfg.back_to_explore_reversal_pressure_min = 0.31;
+        cfg.back_to_explore_clean_path_directional_clip_multiplier = 1.20;
         cfg.back_to_explore_reversal_pressure_clip_multiplier = 0.15;
 
         let bte_cfg = cfg.build_back_to_explore_config(6.0, 123_456_789, 0.25);
@@ -5986,8 +5981,7 @@ debug_signals = true
         assert!((bte_cfg.range_min_clip_multiplier - 0.25).abs() < f64::EPSILON);
         assert!((bte_cfg.range_repair_min_clip_multiplier - 0.75).abs() < f64::EPSILON);
         assert!((bte_cfg.range_chop_min_range - 0.22).abs() < f32::EPSILON);
-        assert!((bte_cfg.reversal_pressure_range_min - 0.21).abs() < f32::EPSILON);
-        assert!((bte_cfg.reversal_pressure_min - 0.31).abs() < f32::EPSILON);
+        assert!((bte_cfg.clean_path_directional_clip_multiplier - 1.20).abs() < f64::EPSILON);
         assert!((bte_cfg.reversal_pressure_clip_multiplier - 0.15).abs() < f64::EPSILON);
         assert!((bte_cfg.external_risk_multiplier - 0.25).abs() < f64::EPSILON);
     }

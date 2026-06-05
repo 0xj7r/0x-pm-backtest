@@ -362,6 +362,20 @@ fn market_regime_cluster(ctx: &Ctx) -> MarketRegimeCluster {
     )
 }
 
+fn order_tag(cfg: &BackToExploreConfig, ctx: &Ctx, is_pair_fill: bool) -> &'static str {
+    match market_regime_cluster(ctx) {
+        MarketRegimeCluster::ExpandedReversalPressure => "back_to_explore_reversal_pressure",
+        MarketRegimeCluster::CleanDirectionalPath if !is_pair_fill => "back_to_explore_clean_path",
+        _ if range_stress_multiplier(cfg, ctx, is_pair_fill) < 0.999 && is_pair_fill => {
+            "back_to_explore_range_repair"
+        }
+        _ if range_stress_multiplier(cfg, ctx, is_pair_fill) < 0.999 => {
+            "back_to_explore_range_risk"
+        }
+        _ => "back_to_explore",
+    }
+}
+
 fn range_stress_multiplier(cfg: &BackToExploreConfig, ctx: &Ctx, is_pair_fill: bool) -> f64 {
     let observed_range = ctx.market_yes_range_so_far.max(0.0);
     let soft = cfg.range_soft_throttle.max(0.0);
@@ -653,7 +667,7 @@ impl Strategy for BackToExploreTaker {
             shares,
             max_depth: self.cfg.sweep_depth.max(1),
             limit_price: Some(self.cfg.max_entry_price.min(0.982)),
-            tag: "back_to_explore",
+            tag: order_tag(&self.cfg, ctx, is_pair_fill),
         })
     }
 }
@@ -844,5 +858,47 @@ mod tests {
         c.regime_sign_flip_rate = 0.20;
         c.regime_reversal_pressure = 0.30;
         assert_eq!(clean_path_directional_multiplier(&cfg, &c, false), 1.0);
+    }
+
+    #[test]
+    fn order_tag_exposes_bte_policy_lane() {
+        let cfg = BackToExploreConfig {
+            clean_path_directional_clip_multiplier: 1.25,
+            range_soft_throttle: 0.20,
+            range_hard_throttle: 0.40,
+            range_chop_min_range: 0.20,
+            range_clean_path_efficiency: 0.78,
+            range_chop_sign_flip_rate: 0.35,
+            range_reversal_pressure: 0.45,
+            range_min_clip_multiplier: 0.20,
+            range_repair_min_clip_multiplier: 0.70,
+            ..BackToExploreConfig::default()
+        };
+
+        let mut c = ctx(1_000_000_000_000);
+        c.market_yes_range_so_far = 0.08;
+        c.regime_path_efficiency = 0.50;
+        c.regime_sign_flip_rate = 0.20;
+        c.regime_reversal_pressure = 0.20;
+        assert_eq!(order_tag(&cfg, &c, false), "back_to_explore_clean_path");
+
+        c.market_yes_range_so_far = 0.25;
+        c.regime_path_efficiency = 0.30;
+        c.regime_reversal_pressure = 0.35;
+        assert_eq!(
+            order_tag(&cfg, &c, false),
+            "back_to_explore_reversal_pressure"
+        );
+
+        c.regime_reversal_pressure = 0.46;
+        assert_eq!(
+            order_tag(&cfg, &c, true),
+            "back_to_explore_reversal_pressure"
+        );
+
+        c.regime_reversal_pressure = 0.20;
+        c.regime_sign_flip_rate = 0.40;
+        assert_eq!(order_tag(&cfg, &c, true), "back_to_explore_range_repair");
+        assert_eq!(order_tag(&cfg, &c, false), "back_to_explore_range_risk");
     }
 }

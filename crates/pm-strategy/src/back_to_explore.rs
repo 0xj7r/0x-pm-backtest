@@ -77,6 +77,14 @@ pub struct BackToExploreConfig {
     pub clean_path_directional_clip_multiplier: f64,
     /// Clip multiplier used when the shared classifier reports expanded reversal pressure.
     pub reversal_pressure_clip_multiplier: f64,
+    /// Minimum same-side directional signal before an expanded-reversal market
+    /// can bypass the blunt reversal-pressure throttle.
+    pub reversal_pressure_directional_min_signal: f64,
+    /// Minimum estimated probability edge over side ask for that bypass.
+    pub reversal_pressure_directional_min_edge: f64,
+    /// Clip multiplier for the directional-reversal lane once the signal and
+    /// estimated edge checks pass.
+    pub reversal_pressure_directional_clip_multiplier: f64,
     /// Hard cap on same-side residual shares before we stop adding that side.
     pub max_residual_shares: f64,
     /// Do not emit if the final multiplier falls below this.
@@ -140,6 +148,9 @@ impl Default for BackToExploreConfig {
             range_reversal_pressure: 1.0,
             clean_path_directional_clip_multiplier: 1.0,
             reversal_pressure_clip_multiplier: 1.0,
+            reversal_pressure_directional_min_signal: 1.05,
+            reversal_pressure_directional_min_edge: 0.01,
+            reversal_pressure_directional_clip_multiplier: 0.85,
             max_residual_shares: 120.0, // conservative for small capital; will be further limited by ladder logic
             min_clip_multiplier_to_emit: 0.18,
             refresh_secs: 2.8,
@@ -291,6 +302,8 @@ fn clip_multiplier(
     window_progress: f32,
     time: &TimePrior,
     is_pair_fill: bool,
+    directional_signal: f64,
+    fill_px: f32,
 ) -> f64 {
     let mut mult = 1.0_f64;
 
@@ -324,7 +337,7 @@ fn clip_multiplier(
     }
 
     mult *= range_stress_multiplier(cfg, ctx, is_pair_fill);
-    mult *= reversal_pressure_multiplier(cfg, ctx);
+    mult *= reversal_pressure_multiplier(cfg, ctx, side, is_pair_fill, directional_signal, fill_px);
     mult *= clean_path_directional_multiplier(cfg, ctx, is_pair_fill);
 
     mult.clamp(0.0, 2.8)
@@ -344,11 +357,59 @@ fn clean_path_directional_multiplier(
     1.0
 }
 
-fn reversal_pressure_multiplier(cfg: &BackToExploreConfig, ctx: &Ctx) -> f64 {
+fn reversal_pressure_multiplier(
+    cfg: &BackToExploreConfig,
+    ctx: &Ctx,
+    side: Side,
+    is_pair_fill: bool,
+    directional_signal: f64,
+    fill_px: f32,
+) -> f64 {
     if market_regime_cluster(ctx) == MarketRegimeCluster::ExpandedReversalPressure {
-        return cfg.reversal_pressure_clip_multiplier.clamp(0.0, 1.0);
+        let base = cfg.reversal_pressure_clip_multiplier.clamp(0.0, 1.0);
+        if !is_pair_fill
+            && directional_reversal_edge(cfg, side, directional_signal, fill_px).is_some()
+        {
+            return base.max(
+                cfg.reversal_pressure_directional_clip_multiplier
+                    .clamp(0.0, 1.0),
+            );
+        }
+        return base;
     }
     1.0
+}
+
+fn directional_reversal_edge(
+    cfg: &BackToExploreConfig,
+    side: Side,
+    directional_signal: f64,
+    fill_px: f32,
+) -> Option<f64> {
+    let min_signal = cfg.reversal_pressure_directional_min_signal.max(0.0);
+    if !fill_px.is_finite() || !(0.0..=1.0).contains(&fill_px) {
+        return None;
+    }
+    let side_probability = match side {
+        Side::BuyYes if directional_signal >= min_signal => {
+            directional_signal_yes_probability(directional_signal)
+        }
+        Side::BuyNo if directional_signal <= -min_signal => {
+            1.0 - directional_signal_yes_probability(directional_signal)
+        }
+        _ => return None,
+    };
+    let edge = side_probability - fill_px as f64;
+    if edge >= cfg.reversal_pressure_directional_min_edge.max(0.0) {
+        Some(edge)
+    } else {
+        None
+    }
+}
+
+fn directional_signal_yes_probability(directional_signal: f64) -> f64 {
+    let bounded = directional_signal.clamp(-1.8, 1.8);
+    1.0 / (1.0 + (-1.9 * bounded).exp())
 }
 
 fn market_regime_cluster(ctx: &Ctx) -> MarketRegimeCluster {
@@ -362,8 +423,21 @@ fn market_regime_cluster(ctx: &Ctx) -> MarketRegimeCluster {
     )
 }
 
-fn order_tag(cfg: &BackToExploreConfig, ctx: &Ctx, is_pair_fill: bool) -> &'static str {
+fn order_tag(
+    cfg: &BackToExploreConfig,
+    ctx: &Ctx,
+    is_pair_fill: bool,
+    side: Side,
+    directional_signal: f64,
+    fill_px: f32,
+) -> &'static str {
     match market_regime_cluster(ctx) {
+        MarketRegimeCluster::ExpandedReversalPressure
+            if !is_pair_fill
+                && directional_reversal_edge(cfg, side, directional_signal, fill_px).is_some() =>
+        {
+            "back_to_explore_reversal_directional"
+        }
         MarketRegimeCluster::ExpandedReversalPressure => "back_to_explore_reversal_pressure",
         MarketRegimeCluster::CleanDirectionalPath if !is_pair_fill => "back_to_explore_clean_path",
         _ if range_stress_multiplier(cfg, ctx, is_pair_fill) < 0.999 && is_pair_fill => {
@@ -580,6 +654,8 @@ impl Strategy for BackToExploreTaker {
             progress,
             &time,
             is_pair_fill,
+            sig,
+            fill_px,
         );
         let mut size_mult = mult * (0.82 + 0.48 * signal_strength_for_size.min(1.9)); // raised base to get median clip closer to real 7.24 (from profile on captured runs) while keeping equity risk control
 
@@ -667,7 +743,7 @@ impl Strategy for BackToExploreTaker {
             shares,
             max_depth: self.cfg.sweep_depth.max(1),
             limit_price: Some(self.cfg.max_entry_price.min(0.982)),
-            tag: order_tag(&self.cfg, ctx, is_pair_fill),
+            tag: order_tag(&self.cfg, ctx, is_pair_fill, side, sig, fill_px),
         })
     }
 }
@@ -827,14 +903,41 @@ mod tests {
         let mut c = ctx(1_000_000_000_000);
         c.market_yes_range_so_far = 0.25;
         c.regime_reversal_pressure = 0.35;
-        assert_eq!(reversal_pressure_multiplier(&cfg, &c), 0.0);
+        assert_eq!(
+            reversal_pressure_multiplier(&cfg, &c, Side::BuyYes, false, 0.40, 0.52),
+            0.0
+        );
+        assert_eq!(
+            reversal_pressure_multiplier(&cfg, &c, Side::BuyYes, true, 1.50, 0.52),
+            0.0
+        );
+        assert_eq!(
+            reversal_pressure_multiplier(&cfg, &c, Side::BuyYes, false, 1.50, 0.80),
+            cfg.reversal_pressure_directional_clip_multiplier
+        );
 
         c.market_yes_range_so_far = 0.10;
-        assert_eq!(reversal_pressure_multiplier(&cfg, &c), 1.0);
+        assert_eq!(
+            reversal_pressure_multiplier(&cfg, &c, Side::BuyYes, false, 0.40, 0.52),
+            1.0
+        );
 
         c.market_yes_range_so_far = 0.25;
         c.regime_reversal_pressure = 0.20;
-        assert_eq!(reversal_pressure_multiplier(&cfg, &c), 1.0);
+        assert_eq!(
+            reversal_pressure_multiplier(&cfg, &c, Side::BuyYes, false, 0.40, 0.52),
+            1.0
+        );
+    }
+
+    #[test]
+    fn directional_reversal_edge_requires_matching_side_and_price_edge() {
+        let cfg = BackToExploreConfig::default();
+        assert!(directional_reversal_edge(&cfg, Side::BuyYes, 1.50, 0.80).is_some());
+        assert!(directional_reversal_edge(&cfg, Side::BuyNo, -1.50, 0.80).is_some());
+        assert!(directional_reversal_edge(&cfg, Side::BuyNo, 1.50, 0.20).is_none());
+        assert!(directional_reversal_edge(&cfg, Side::BuyYes, 1.50, 0.96).is_none());
+        assert!(directional_reversal_edge(&cfg, Side::BuyYes, 0.80, 0.60).is_none());
     }
 
     #[test]
@@ -880,25 +983,38 @@ mod tests {
         c.regime_path_efficiency = 0.50;
         c.regime_sign_flip_rate = 0.20;
         c.regime_reversal_pressure = 0.20;
-        assert_eq!(order_tag(&cfg, &c, false), "back_to_explore_clean_path");
+        assert_eq!(
+            order_tag(&cfg, &c, false, Side::BuyYes, 1.50, 0.80),
+            "back_to_explore_clean_path"
+        );
 
         c.market_yes_range_so_far = 0.25;
         c.regime_path_efficiency = 0.30;
         c.regime_reversal_pressure = 0.35;
         assert_eq!(
-            order_tag(&cfg, &c, false),
+            order_tag(&cfg, &c, false, Side::BuyYes, 0.40, 0.52),
             "back_to_explore_reversal_pressure"
+        );
+        assert_eq!(
+            order_tag(&cfg, &c, false, Side::BuyYes, 1.50, 0.80),
+            "back_to_explore_reversal_directional"
         );
 
         c.regime_reversal_pressure = 0.46;
         assert_eq!(
-            order_tag(&cfg, &c, true),
+            order_tag(&cfg, &c, true, Side::BuyYes, 1.50, 0.80),
             "back_to_explore_reversal_pressure"
         );
 
         c.regime_reversal_pressure = 0.20;
         c.regime_sign_flip_rate = 0.40;
-        assert_eq!(order_tag(&cfg, &c, true), "back_to_explore_range_repair");
-        assert_eq!(order_tag(&cfg, &c, false), "back_to_explore_range_risk");
+        assert_eq!(
+            order_tag(&cfg, &c, true, Side::BuyYes, 1.50, 0.80),
+            "back_to_explore_range_repair"
+        );
+        assert_eq!(
+            order_tag(&cfg, &c, false, Side::BuyYes, 1.50, 0.80),
+            "back_to_explore_range_risk"
+        );
     }
 }

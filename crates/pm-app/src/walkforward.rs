@@ -462,6 +462,9 @@ pub struct BackToExploreProfile {
     pub range_reversal_pressure: Option<f32>,
     pub clean_path_directional_clip_multiplier: Option<f64>,
     pub reversal_pressure_clip_multiplier: Option<f64>,
+    pub reversal_pressure_directional_min_signal: Option<f64>,
+    pub reversal_pressure_directional_min_edge: Option<f64>,
+    pub reversal_pressure_directional_clip_multiplier: Option<f64>,
     pub max_residual_shares: Option<f64>,
     pub min_clip_multiplier_to_emit: Option<f64>,
     pub refresh_secs: Option<f64>,
@@ -540,6 +543,18 @@ impl BackToExploreProfile {
         apply!(
             reversal_pressure_clip_multiplier,
             back_to_explore_reversal_pressure_clip_multiplier
+        );
+        apply!(
+            reversal_pressure_directional_min_signal,
+            back_to_explore_reversal_pressure_directional_min_signal
+        );
+        apply!(
+            reversal_pressure_directional_min_edge,
+            back_to_explore_reversal_pressure_directional_min_edge
+        );
+        apply!(
+            reversal_pressure_directional_clip_multiplier,
+            back_to_explore_reversal_pressure_directional_clip_multiplier
         );
         apply!(max_residual_shares, back_to_explore_max_residual_shares);
         apply!(
@@ -1045,6 +1060,9 @@ pub struct WalkForwardConfig {
     pub back_to_explore_range_reversal_pressure: f32,
     pub back_to_explore_clean_path_directional_clip_multiplier: f64,
     pub back_to_explore_reversal_pressure_clip_multiplier: f64,
+    pub back_to_explore_reversal_pressure_directional_min_signal: f64,
+    pub back_to_explore_reversal_pressure_directional_min_edge: f64,
+    pub back_to_explore_reversal_pressure_directional_clip_multiplier: f64,
     pub back_to_explore_max_residual_shares: f64,
     pub back_to_explore_min_clip_multiplier_to_emit: f64,
     pub back_to_explore_refresh_secs: f64,
@@ -1313,6 +1331,9 @@ impl Default for WalkForwardConfig {
             back_to_explore_range_reversal_pressure: 1.0,
             back_to_explore_clean_path_directional_clip_multiplier: 1.0,
             back_to_explore_reversal_pressure_clip_multiplier: 1.0,
+            back_to_explore_reversal_pressure_directional_min_signal: 1.05,
+            back_to_explore_reversal_pressure_directional_min_edge: 0.01,
+            back_to_explore_reversal_pressure_directional_clip_multiplier: 0.85,
             back_to_explore_max_residual_shares: 120.0,
             back_to_explore_min_clip_multiplier_to_emit: 0.18,
             back_to_explore_refresh_secs: 2.8,
@@ -1413,6 +1434,12 @@ impl WalkForwardConfig {
                 .back_to_explore_clean_path_directional_clip_multiplier,
             reversal_pressure_clip_multiplier: self
                 .back_to_explore_reversal_pressure_clip_multiplier,
+            reversal_pressure_directional_min_signal: self
+                .back_to_explore_reversal_pressure_directional_min_signal,
+            reversal_pressure_directional_min_edge: self
+                .back_to_explore_reversal_pressure_directional_min_edge,
+            reversal_pressure_directional_clip_multiplier: self
+                .back_to_explore_reversal_pressure_directional_clip_multiplier,
             max_residual_shares: self.back_to_explore_max_residual_shares,
             min_clip_multiplier_to_emit: self.back_to_explore_min_clip_multiplier_to_emit,
             refresh_secs: self.back_to_explore_refresh_secs,
@@ -2075,6 +2102,9 @@ pub struct BackToExploreSummaryConfig {
     pub range_reversal_pressure: f32,
     pub clean_path_directional_clip_multiplier: f64,
     pub reversal_pressure_clip_multiplier: f64,
+    pub reversal_pressure_directional_min_signal: f64,
+    pub reversal_pressure_directional_min_edge: f64,
+    pub reversal_pressure_directional_clip_multiplier: f64,
     pub max_residual_shares: f64,
     pub min_clip_multiplier_to_emit: f64,
     pub refresh_secs: f64,
@@ -2115,6 +2145,12 @@ impl From<&WalkForwardConfig> for BackToExploreSummaryConfig {
                 .back_to_explore_clean_path_directional_clip_multiplier,
             reversal_pressure_clip_multiplier: cfg
                 .back_to_explore_reversal_pressure_clip_multiplier,
+            reversal_pressure_directional_min_signal: cfg
+                .back_to_explore_reversal_pressure_directional_min_signal,
+            reversal_pressure_directional_min_edge: cfg
+                .back_to_explore_reversal_pressure_directional_min_edge,
+            reversal_pressure_directional_clip_multiplier: cfg
+                .back_to_explore_reversal_pressure_directional_clip_multiplier,
             max_residual_shares: cfg.back_to_explore_max_residual_shares,
             min_clip_multiplier_to_emit: cfg.back_to_explore_min_clip_multiplier_to_emit,
             refresh_secs: cfg.back_to_explore_refresh_secs,

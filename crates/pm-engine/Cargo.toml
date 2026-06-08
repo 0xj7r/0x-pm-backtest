@@ -1,17 +1,17 @@
 [package]
 name = "pm-engine"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition = "2021" # intentional: engine core stays on 2021
+rust-version.workspace = true
+license.workspace = true
+publish = false
 
 [features]
 # Exposes the in-memory mock seams to downstream crates (drivers' tests).
 testkit = []
 
 [dependencies]
-pm-types    = { path = "../pm-types" }
-pm-strategy = { path = "../pm-strategy" }
-pm-risk     = { path = "../pm-risk" }
-pm-model    = { path = "../pm-model" }
-
-[dev-dependencies]
-pm-strategy = { path = "../pm-strategy" }
+pm-types    = { workspace = true }
+pm-strategy = { workspace = true }
+pm-risk     = { workspace = true }
+pm-model    = { workspace = true }

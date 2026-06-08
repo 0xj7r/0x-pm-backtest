@@ -7,6 +7,7 @@ members = [
     "crates/pm-strategy",
     "crates/pm-risk",
     "crates/pm-app",
+    "crates/pm-copytrade",
 ]
 
 [workspace.package]
@@ -53,7 +54,8 @@ rust_decimal  = "1"
 
 # Concurrency
 rayon         = "1"
-tokio         = { version = "1", features = ["rt-multi-thread", "macros", "signal", "fs"] }
+tokio         = { version = "1", features = ["rt-multi-thread", "macros", "signal", "fs", "time"] }
+async-trait   = "0.1"
 
 # Errors & logging
 anyhow        = "1"

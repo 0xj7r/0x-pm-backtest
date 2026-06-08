@@ -1801,12 +1801,17 @@ async fn main() -> Result<()> {
                 leader_seed_usdc: a.leader_seed_usdc, concurrency: a.concurrency,
             };
             let (report, ledgers) = pm_copytrade::run_historical(&fills_src, &price_src, &res_src, &cfg).await?;
+            println!("fills: {} total, {} in common set across all latencies", report.fills, report.common_fills);
             for run in &report.runs {
                 let p = std::path::PathBuf::from(format!("{}-L{}.jsonl", a.out_prefix, run.latency_s));
                 pm_copytrade::summary::write_ledger_jsonl(&p, &ledgers[&((run.latency_s * 1000.0).round() as i64)])?;
-                println!("latency {:>4}s | trades {:>5} | win {:>5.1}% | ROI {:>6.2}% | maxDD {:>5.1}% | endEq {:.2} | open {}",
+                let pf_str: String = run.priced_from.iter()
+                    .map(|(k, v)| format!("{k}:{v}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                println!("latency {:>4}s | trades {:>5} | win {:>5.1}% | ROI {:>6.2}% | maxDD {:>5.1}% | endEq {:.2} | open {} | priced[{}]",
                     run.latency_s, run.summary.trades, run.summary.win_rate * 100.0,
-                    run.summary.roi * 100.0, run.summary.max_drawdown * 100.0, run.final_equity, run.open_unresolved);
+                    run.summary.roi * 100.0, run.summary.max_drawdown * 100.0, run.final_equity, run.open_unresolved, pf_str);
             }
             pm_copytrade::summary::write_summary_json(&std::path::PathBuf::from(format!("{}-summary.json", a.out_prefix)), &report)?;
             Ok(())

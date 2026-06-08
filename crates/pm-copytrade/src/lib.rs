@@ -5,7 +5,7 @@ pub mod sizing;
 pub mod ledger;
 pub mod summary;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use anyhow::Result;
 use serde::Serialize;
 use futures::stream::{self, StreamExt};
@@ -36,12 +36,15 @@ pub struct LatencyRun {
     pub open_unresolved: usize,
     pub final_equity: f64,
     pub buckets: Vec<summary::Bucket>,
+    /// Count of entries by price source tag over the common-set trades for this latency.
+    pub priced_from: BTreeMap<String, usize>,
 }
 
 #[derive(Serialize)]
 pub struct HistoricalReport {
     pub wallet: String,
     pub fills: usize,
+    pub common_fills: usize,
     pub runs: Vec<LatencyRun>,
 }
 
@@ -73,10 +76,9 @@ pub async fn run_historical(
 
     let leader_eq = LeaderEquity::reconstruct(&fills, &res, cfg.leader_seed_usdc);
 
-    let mut runs = Vec::new();
-    let mut ledgers: HashMap<i64, Vec<CopyResult>> = HashMap::new();
+    // Price every fill for every latency upfront; keep only Some results.
+    let mut per_lat: Vec<(f64, HashMap<usize, (f64, PriceTag)>)> = Vec::new();
     for &lat in &cfg.latencies_s {
-        // Price every fill at ts + latency, bounded concurrency.
         let priced_vec: Vec<(usize, Option<(f64, PriceTag)>)> = stream::iter(fills.iter().enumerate())
             .map(|(i, f)| {
                 let target = f.ts + lat as i64;
@@ -86,15 +88,50 @@ pub async fn run_historical(
             .collect().await;
         let priced: HashMap<usize, (f64, PriceTag)> = priced_vec.into_iter()
             .filter_map(|(i, p)| p.map(|p| (i, p))).collect();
+        per_lat.push((lat, priced));
+    }
+
+    // Common set: fill indices that are priced at every latency.
+    let common: HashSet<usize> = if per_lat.is_empty() {
+        HashSet::new()
+    } else {
+        let mut s: HashSet<usize> = per_lat[0].1.keys().copied().collect();
+        for (_, map) in &per_lat[1..] {
+            s.retain(|k| map.contains_key(k));
+        }
+        s
+    };
+    let common_fills = common.len();
+
+    let mut runs = Vec::new();
+    let mut ledgers: HashMap<i64, Vec<CopyResult>> = HashMap::new();
+    for (lat, full_priced) in per_lat {
+        // Restrict to common set.
+        let priced: HashMap<usize, (f64, PriceTag)> = full_priced.into_iter()
+            .filter(|(i, _)| common.contains(i))
+            .collect();
+
+        // Count priced_from tags over the common-set entries.
+        let mut pf_counts: BTreeMap<String, usize> = BTreeMap::new();
+        for (_, tag) in priced.values() {
+            *pf_counts.entry(format!("{:?}", tag)).or_insert(0) += 1;
+        }
 
         let lcfg = LedgerConfig { our_bankroll: cfg.our_bankroll, max_clip_usdc: cfg.max_clip_usdc, latency_s: lat };
         let out = run_ledger(&fills, &leader_eq, &res, &priced, &lcfg);
         let summary = summarize(&out.results, cfg.our_bankroll);
         let buckets = summary::breakdown(&out.results);
-        runs.push(LatencyRun { latency_s: lat, summary, open_unresolved: out.open_unresolved, final_equity: out.final_equity, buckets });
+        runs.push(LatencyRun {
+            latency_s: lat,
+            summary,
+            open_unresolved: out.open_unresolved,
+            final_equity: out.final_equity,
+            buckets,
+            priced_from: pf_counts,
+        });
         ledgers.insert(lat_key(lat), out.results);
     }
-    Ok((HistoricalReport { wallet: cfg.wallet.clone(), fills: fills.len(), runs }, ledgers))
+    Ok((HistoricalReport { wallet: cfg.wallet.clone(), fills: fills.len(), common_fills, runs }, ledgers))
 }
 
 #[cfg(test)]
@@ -133,9 +170,12 @@ mod tests {
             leader_seed_usdc: 1000.0, concurrency: 4 };
         let (report, ledgers) = run_historical(&FakeFills(fills), &FakePrice, &FakeRes, &cfg).await.unwrap();
         assert_eq!(report.fills, 1);
+        assert_eq!(report.common_fills, 1);
         assert_eq!(report.runs.len(), 2);
         // 5% of 100 = 5 stake, entry 0.40 -> 12.5 shares, win -> +7.5
         assert!((report.runs[0].final_equity - 107.5).abs() < 1e-6);
         assert_eq!(ledgers[&lat_key(0.0)].len(), 1);
+        // priced_from should report MarketPrint for the single common-set fill.
+        assert_eq!(report.runs[0].priced_from.get("MarketPrint").copied().unwrap_or(0), 1);
     }
 }

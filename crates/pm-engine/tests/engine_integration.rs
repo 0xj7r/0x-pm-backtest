@@ -165,7 +165,7 @@ fn interleaves_two_markets_in_ts_order_sharing_capital() {
     let mut ex = InstantExchange::new(0.50, 0.0);
     let clock = SimClock { ts: clock_cell };
     let mut engine = Engine::new(
-        BuyOnceEach::default(),
+        BuyOnceEach,
         Portfolio::new(1_000.0),
         RiskGate { limits: limits() },
         |_m| (Token::Btc, 0),

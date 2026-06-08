@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 /// Compact opaque market identifier. Mapping (slug ↔ id) lives in the
 /// manifest alongside prepared tapes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[repr(transparent)]
 pub struct MarketId(pub u32);
 

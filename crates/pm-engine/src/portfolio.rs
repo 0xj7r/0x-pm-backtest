@@ -1,7 +1,7 @@
 use crate::seams::FillReport;
 use pm_strategy::Side;
 use pm_types::MarketId;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Position {
@@ -25,7 +25,7 @@ pub struct Position {
 pub struct Portfolio {
     cash_usd: f64,
     realized_pnl_usd: f64,
-    positions: HashMap<MarketId, Position>,
+    positions: BTreeMap<MarketId, Position>,
     open_orders_per_market: HashMap<MarketId, usize>,
 }
 
@@ -34,7 +34,7 @@ impl Portfolio {
         Self {
             cash_usd: starting_cash_usd,
             realized_pnl_usd: 0.0,
-            positions: HashMap::new(),
+            positions: BTreeMap::new(),
             open_orders_per_market: HashMap::new(),
         }
     }
@@ -116,7 +116,6 @@ impl Portfolio {
                 self.realized_pnl_usd += realized;
                 if pos.yes_shares.abs() <= 1e-9 && pos.no_shares.abs() <= 1e-9 {
                     self.positions.remove(&f.market);
-                    return;
                 }
             }
             Side::BuyNo => {
@@ -138,7 +137,6 @@ impl Portfolio {
                 self.realized_pnl_usd += realized;
                 if pos.yes_shares.abs() <= 1e-9 && pos.no_shares.abs() <= 1e-9 {
                     self.positions.remove(&f.market);
-                    return;
                 }
             }
         }

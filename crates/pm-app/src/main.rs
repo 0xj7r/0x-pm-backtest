@@ -1021,6 +1021,24 @@ enum Cmd {
         #[arg(long)]
         local_cache_dir: Option<PathBuf>,
     },
+    /// Backtest copying a specific wallet's trades under modelled latency.
+    CopyTrade(CopyTradeArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct CopyTradeArgs {
+    #[arg(long)] pub wallet: String,
+    #[arg(long, default_value_t = 0)] pub start_ts: i64,
+    #[arg(long, default_value_t = 0)] pub end_ts: i64,
+    #[arg(long, value_delimiter = ',', default_value = "0,2,5,15")] pub latency_s: Vec<f64>,
+    #[arg(long, default_value_t = 100.0)] pub our_bankroll: f64,
+    #[arg(long, default_value_t = 5.0)] pub max_clip_usdc: f64,
+    #[arg(long, default_value_t = 1000.0)] pub leader_seed_usdc: f64,
+    #[arg(long, default_value_t = 16)] pub concurrency: usize,
+    #[arg(long, default_value = "https://data-api.polymarket.com")] pub data_base: String,
+    #[arg(long, default_value = "https://clob.polymarket.com")] pub clob_base: String,
+    #[arg(long, default_value = "https://gamma-api.polymarket.com")] pub gamma_base: String,
+    #[arg(long, default_value = "/tmp/copytrade-ledger")] pub out_prefix: String,
 }
 
 fn init_tracing() {
@@ -1764,6 +1782,34 @@ async fn main() -> Result<()> {
                 MarketRunMode::Live,
             )
             .await
+        }
+        Cmd::CopyTrade(a) => {
+            use pm_copytrade::sources::activity::HttpFillSource;
+            use pm_copytrade::sources::prices::HttpPriceSource;
+            use pm_copytrade::sources::resolution::HttpResolutionSource;
+            let client = reqwest::Client::builder()
+                .user_agent("pm-copytrade/0.1")
+                .build()?;
+            let end_ts = if a.end_ts == 0 { chrono::Utc::now().timestamp() } else { a.end_ts };
+            let start_ts = if a.start_ts == 0 { end_ts - 60 * 24 * 3600 } else { a.start_ts };
+            let fills_src = HttpFillSource { client: client.clone(), base: a.data_base.clone(), bucket_seconds: 3600 };
+            let price_src = HttpPriceSource::new(client.clone(), a.data_base.clone(), a.clob_base.clone(), 90);
+            let res_src = HttpResolutionSource::new(client.clone(), a.gamma_base.clone());
+            let cfg = pm_copytrade::RunConfig {
+                wallet: a.wallet.clone(), start_ts, end_ts, latencies_s: a.latency_s.clone(),
+                our_bankroll: a.our_bankroll, max_clip_usdc: a.max_clip_usdc,
+                leader_seed_usdc: a.leader_seed_usdc, concurrency: a.concurrency,
+            };
+            let (report, ledgers) = pm_copytrade::run_historical(&fills_src, &price_src, &res_src, &cfg).await?;
+            for run in &report.runs {
+                let p = std::path::PathBuf::from(format!("{}-L{}.jsonl", a.out_prefix, run.latency_s));
+                pm_copytrade::summary::write_ledger_jsonl(&p, &ledgers[&((run.latency_s * 1000.0).round() as i64)])?;
+                println!("latency {:>4}s | trades {:>5} | win {:>5.1}% | ROI {:>6.2}% | maxDD {:>5.1}% | endEq {:.2} | open {}",
+                    run.latency_s, run.summary.trades, run.summary.win_rate * 100.0,
+                    run.summary.roi * 100.0, run.summary.max_drawdown * 100.0, run.final_equity, run.open_unresolved);
+            }
+            pm_copytrade::summary::write_summary_json(&std::path::PathBuf::from(format!("{}-summary.json", a.out_prefix)), &report)?;
+            Ok(())
         }
     }
 }

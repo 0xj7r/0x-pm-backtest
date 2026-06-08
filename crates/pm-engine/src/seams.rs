@@ -5,6 +5,15 @@ use pm_types::MarketId;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct OrderId(pub u64);
 
+/// Whether an order opens a new position or closes/rescues an existing one.
+/// The risk gate bypasses entry caps for `Close` intents, mirroring the live
+/// `RiskEngine::evaluate` rescue branch (core/risk.rs:186).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntentKind {
+    Entry,
+    Close,
+}
+
 /// An order accepted by the risk gate, handed to the Exchange.
 #[derive(Debug, Clone, Copy)]
 pub struct OrderIntent {
@@ -16,6 +25,8 @@ pub struct OrderIntent {
     /// `None` = taker (sweep opposing book); `Some(p)` = maker limit (YES terms).
     pub limit_price: Option<f32>,
     pub tag: &'static str,
+    /// Entry intents get all caps; Close intents bypass entry caps.
+    pub kind: IntentKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

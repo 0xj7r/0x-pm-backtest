@@ -57,6 +57,11 @@ impl Portfolio {
         self.open_orders_per_market.get(&m).copied().unwrap_or(0)
     }
 
+    /// Total open orders across all markets.
+    pub fn total_open_orders(&self) -> usize {
+        self.open_orders_per_market.values().sum()
+    }
+
     /// Sum of |notional| across all positions at current marks.
     /// Formula matches InventoryState::gross_exposure_usd:
     ///   Σ position.quantity.abs() * mark_or_cost()

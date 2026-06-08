@@ -3,7 +3,7 @@ use pm_engine::event::{EngineEvent, Token};
 use pm_engine::portfolio::Portfolio;
 use pm_engine::risk::{RiskGate, RiskLimits};
 use pm_engine::testkit::{InstantExchange, ScriptedFeed, SimClock};
-use pm_strategy::{Ctx, OrderRequest, Side, Strategy, StrategyOutput};
+use pm_strategy::{BonereaperV2, BonereaperV2Config, Ctx, OrderRequest, Side, Strategy, StrategyOutput};
 use pm_types::{MarketId, NoBook, ReplayEvent, ReplayFlags, SpotHistory, TradeHistory};
 use std::cell::Cell;
 use std::rc::Rc;
@@ -96,4 +96,61 @@ fn engine_buys_once_then_settles_yes() {
         "expected cash ~1040, got {}",
         engine.portfolio.free_cash_usd()
     );
+}
+
+fn run_once() -> Vec<(i64, &'static str, MarketId, f64)> {
+    let m = MarketId(0);
+    let clock_cell = Rc::new(Cell::new(0i64));
+    let mut feed = ScriptedFeed::new(
+        vec![ev(10, m, false), ev(20, m, false), ev(30, m, true)],
+        clock_cell.clone(),
+    );
+    let mut ex = InstantExchange::new(0.60, 0.0);
+    let clock = SimClock { ts: clock_cell };
+    let mut engine = Engine::new(
+        BuyOnce { fired: false },
+        Portfolio::new(1_000.0),
+        RiskGate { limits: limits() },
+        |_m| (Token::Btc, 0),
+    );
+    engine.run(&mut feed, &mut ex, &clock);
+    engine.trace
+}
+
+#[test]
+fn golden_trace_is_deterministic() {
+    assert_eq!(run_once(), run_once());
+}
+
+// Task 12 placeholder (BuyOnceEach + interleaves test added in next commit)
+
+/// Buy 100 YES the first time the engine sees each market (when position is flat).
+#[derive(Default)]
+struct BuyOnceEach;
+
+impl Strategy for BuyOnceEach {
+    fn on_event(
+        &mut self,
+        _e: &ReplayEvent,
+        c: &Ctx,
+        _s: &SpotHistory,
+        _t: &TradeHistory,
+    ) -> StrategyOutput {
+        if c.yes_shares == 0.0 && c.no_shares == 0.0 {
+            StrategyOutput::one(OrderRequest {
+                side: Side::BuyYes,
+                shares: 100.0,
+                max_depth: 1,
+                limit_price: None,
+                tag: "buy_each",
+            })
+        } else {
+            StrategyOutput::hold()
+        }
+    }
+}
+
+// Keep BonereaperV2 import alive for Task 13 (added in its own commit).
+fn _br2_import_check() {
+    let _: BonereaperV2 = BonereaperV2::new(BonereaperV2Config::default());
 }

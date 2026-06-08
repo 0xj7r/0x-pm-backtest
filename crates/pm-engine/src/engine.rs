@@ -26,6 +26,8 @@ pub struct Engine<S: Strategy> {
     marks: HashMap<MarketId, f32>,
     /// Maps a market to its (token, window) for exposure keying.
     classify: fn(MarketId) -> (Token, i64),
+    /// Order/fill trace for determinism testing and diagnostics.
+    pub trace: Vec<(i64, &'static str, MarketId, f64)>,
 }
 
 impl<S: Strategy> Engine<S> {
@@ -46,6 +48,7 @@ impl<S: Strategy> Engine<S> {
             trades: TradeHistory::default(),
             marks: HashMap::new(),
             classify,
+            trace: Vec::new(),
         }
     }
 
@@ -57,6 +60,7 @@ impl<S: Strategy> Engine<S> {
                 }
             }
             for fill in ex.poll_fills(clock.now()) {
+                self.trace.push((fill.ts, "fill", fill.market, fill.shares));
                 self.portfolio.apply_fill(&fill);
                 let (token, window) = (self.classify)(fill.market);
                 let signed = signed_shares(fill.side, fill.shares);
@@ -129,6 +133,7 @@ impl<S: Strategy> Engine<S> {
             if self.risk.check(&intent, &self.portfolio, &self.marks, &self.exposure, market_key, signed)
                 == RiskDecision::Approve
             {
+                self.trace.push((clock.now(), "submit", intent.market, intent.shares));
                 ex.submit(intent, clock.now());
             }
         }

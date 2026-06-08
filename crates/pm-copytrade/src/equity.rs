@@ -2,6 +2,7 @@ use crate::model::{LeaderFill, Resolution};
 use std::collections::HashMap;
 
 pub struct LeaderEquity {
+    seed: f64,
     points: Vec<(i64, f64)>,
 }
 
@@ -23,13 +24,14 @@ impl LeaderEquity {
             equity += delta;
             points.push((ts, equity));
         }
-        if points.is_empty() { points.push((0, seed_usdc)); }
-        LeaderEquity { points }
+        LeaderEquity { seed: seed_usdc, points }
     }
 
+    /// Equity just before `ts`: last recorded point strictly before ts,
+    /// or seed if ts is at or before the first event.
     pub fn equity_at(&self, ts: i64) -> f64 {
-        match self.points.partition_point(|(t, _)| *t <= ts) {
-            0 => self.points.first().map(|(_, e)| *e).unwrap_or(0.0),
+        match self.points.partition_point(|(t, _)| *t < ts) {
+            0 => self.seed,
             i => self.points[i - 1].1,
         }
     }

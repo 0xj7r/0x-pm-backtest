@@ -181,7 +181,29 @@ fn interleaves_two_markets_in_ts_order_sharing_capital() {
     );
 }
 
-// Keep BonereaperV2 import alive for Task 13 (added in its own commit).
-fn _br2_import_check() {
-    let _: BonereaperV2 = BonereaperV2::new(BonereaperV2Config::default());
+#[test]
+fn hosts_real_br2_deterministically() {
+    let m = MarketId(0);
+    let make = || {
+        let clock_cell = Rc::new(Cell::new(0i64));
+        // 50 book updates then a close; br2 is selective and may not trade on flat
+        // synthetic data — we assert determinism + no panic, not a fill.
+        let evs: Vec<EngineEvent> = (0..50i64)
+            .map(|i| ev(1_000 + i * 1_000, m, false))
+            .chain(std::iter::once(ev(1_000 + 50 * 1_000, m, true)))
+            .collect();
+        let mut feed = ScriptedFeed::new(evs, clock_cell.clone());
+        let mut ex = InstantExchange::new(0.50, 0.0);
+        let clock = SimClock { ts: clock_cell };
+        let strat = BonereaperV2::new(BonereaperV2Config::default());
+        let mut engine = Engine::new(
+            strat,
+            Portfolio::new(1_000.0),
+            RiskGate { limits: limits() },
+            |_m| (Token::Btc, 0),
+        );
+        engine.run(&mut feed, &mut ex, &clock);
+        engine.trace
+    };
+    assert_eq!(make(), make());
 }

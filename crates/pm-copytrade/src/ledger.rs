@@ -51,6 +51,7 @@ pub fn run_ledger(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Side;
     fn fill(ts: i64, cond: &str, oi: u8, usdc: f64) -> LeaderFill {
         LeaderFill { ts, token_id: format!("{cond}-{oi}"), condition_id: cond.into(),
             slug: "s".into(), outcome: "x".into(), outcome_index: oi, side: Side::Buy,

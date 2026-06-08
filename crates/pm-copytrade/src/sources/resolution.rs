@@ -71,14 +71,29 @@ impl ResolutionSource for HttpResolutionSource {
         if let Some(r) = self.cache.lock().await.get(condition_id) {
             if r.resolved { return Ok(Some(r.clone())); }
         }
-        let url = format!("{}/markets?condition_ids={}", self.gamma_base, condition_id);
-        let rows: Vec<Value> = self.client.get(&url).send().await
-            .with_context(|| format!("gamma GET {url}"))?
+        // Try open markets first (condition_ids plural works for active markets).
+        let open_url = format!("{}/markets?condition_ids={}", self.gamma_base, condition_id);
+        let rows: Vec<Value> = self.client.get(&open_url).send().await
+            .with_context(|| format!("gamma GET {open_url}"))?
             .error_for_status()?.json().await.context("decode gamma markets")?;
-        let res = rows.first().and_then(parse_gamma_market);
-        if let Some(r) = &res {
+        let res = rows.into_iter().find(|r| r.get("conditionId").and_then(Value::as_str) == Some(condition_id))
+            .and_then(|r| parse_gamma_market(&r));
+        if let Some(ref r) = res {
+            if r.resolved {
+                self.cache.lock().await.insert(condition_id.to_string(), r.clone());
+                return Ok(Some(r.clone()));
+            }
+        }
+        // Fall back to closed market query.
+        let closed_url = format!("{}/markets?closed=true&condition_ids={}", self.gamma_base, condition_id);
+        let rows2: Vec<Value> = self.client.get(&closed_url).send().await
+            .with_context(|| format!("gamma GET {closed_url}"))?
+            .error_for_status()?.json().await.context("decode gamma closed markets")?;
+        let res2 = rows2.into_iter().find(|r| r.get("conditionId").and_then(Value::as_str) == Some(condition_id))
+            .and_then(|r| parse_gamma_market(&r));
+        if let Some(ref r) = res2 {
             if r.resolved { self.cache.lock().await.insert(condition_id.to_string(), r.clone()); }
         }
-        Ok(res)
+        Ok(res2.or(res))
     }
 }

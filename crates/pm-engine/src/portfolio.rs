@@ -151,17 +151,23 @@ impl Portfolio {
     }
 
     /// Settle a resolved market: winning shares pay 1.0, losing pay 0.0.
-    /// Mirrors InventoryState::apply_settlement at payout_price = 1.0.
+    /// Both legs are realized separately, matching InventoryState::apply_settlement
+    /// which settles each instrument (YES and NO) independently.
     pub fn settle(&mut self, m: MarketId, resolved_yes: bool) {
         if let Some(pos) = self.positions.remove(&m) {
-            let payout = if resolved_yes { pos.yes_shares } else { pos.no_shares };
-            let cost_basis = if resolved_yes {
-                pos.avg_yes_price * pos.yes_shares
+            let (winning_shares, winning_cost) = if resolved_yes {
+                (pos.yes_shares, pos.avg_yes_price * pos.yes_shares)
             } else {
-                pos.avg_no_price * pos.no_shares
+                (pos.no_shares, pos.avg_no_price * pos.no_shares)
             };
-            self.cash_usd += payout;
-            self.realized_pnl_usd += payout - cost_basis;
+            let losing_cost = if resolved_yes {
+                pos.avg_no_price * pos.no_shares
+            } else {
+                pos.avg_yes_price * pos.yes_shares
+            };
+
+            self.cash_usd += winning_shares;
+            self.realized_pnl_usd += (winning_shares - winning_cost) + (0.0 - losing_cost);
         }
     }
 
@@ -249,6 +255,42 @@ mod tests {
         let marks: HashMap<MarketId, f32> = [(m, 0.50f32)].into_iter().collect();
         // net = 100*0.50 - 50*(1-0.50) = 50 - 25 = 25
         assert!((pf.net_exposure_for_market_usd(m, &marks) - 25.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn settle_realizes_both_legs_pnl() {
+        let m = MarketId(0);
+        let mut pf = Portfolio::new(1_000.0);
+        // Buy 100 YES @ 0.40 (cost 40) and 50 NO @ 0.30 (cost 15).
+        pf.apply_fill(&buy_yes(m, 100.0, 0.40));
+        pf.apply_fill(&FillReport {
+            order: OrderId(2),
+            market: m,
+            side: Side::BuyNo,
+            shares: 50.0,
+            price: 0.30,
+            fee_usd: 0.0,
+            liquidity: FillLiquidity::Taker,
+            ts: 0,
+        });
+        // cash should be 1000 - 40 - 15 = 945
+        assert!((pf.free_cash_usd() - 945.0).abs() < 1e-4);
+
+        // Settle YES wins: YES pays 100, NO pays 0.
+        pf.settle(m, true);
+
+        // cash: 945 + 100 = 1045
+        assert!(
+            (pf.free_cash_usd() - 1_045.0).abs() < 1e-4,
+            "cash expected 1045, got {}",
+            pf.free_cash_usd()
+        );
+        // realized: (100 - 40) + (0 - 15) = 60 - 15 = 45
+        assert!(
+            (pf.realized_pnl_usd() - 45.0).abs() < 1e-4,
+            "realized_pnl expected 45, got {}",
+            pf.realized_pnl_usd()
+        );
     }
 
     /// Cash reservation lifecycle (reserve on submit, release on fill/cancel)

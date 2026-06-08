@@ -4,27 +4,48 @@ use anyhow::Result;
 #[derive(Clone, Copy, Debug)]
 pub struct PricePoint { pub ts: i64, pub price: f64 }
 
-/// Pick the print closest in time to `target_ts`. Returns None on empty input.
-pub fn nearest_price(points: &[PricePoint], target_ts: i64) -> Option<PricePoint> {
-    points.iter().copied().min_by_key(|p| (p.ts - target_ts).abs())
+/// Among points with `target_ts <= p.ts <= target_ts + max_wait_s`, return
+/// the one with the smallest ts (earliest forward print). None if none qualify.
+pub fn first_forward_price(points: &[PricePoint], target_ts: i64, max_wait_s: i64) -> Option<PricePoint> {
+    points.iter().copied()
+        .filter(|p| p.ts >= target_ts && p.ts <= target_ts + max_wait_s)
+        .min_by_key(|p| p.ts)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
-    fn picks_closest_in_time() {
+    fn forward_returns_earliest_qualifying() {
         let pts = vec![
-            PricePoint { ts: 100, price: 0.50 },
-            PricePoint { ts: 105, price: 0.60 },
-            PricePoint { ts: 130, price: 0.90 },
+            PricePoint { ts: 98,  price: 0.30 },
+            PricePoint { ts: 104, price: 0.55 },
+            PricePoint { ts: 140, price: 0.80 },
         ];
-        // target 104 -> closest is ts=105
-        assert!((nearest_price(&pts, 104).unwrap().price - 0.60).abs() < 1e-9);
+        // target=100, max_wait=60 -> window [100,160]; qualifying: ts=104,140; earliest is 104
+        let p = first_forward_price(&pts, 100, 60).unwrap();
+        assert_eq!(p.ts, 104);
+        assert!((p.price - 0.55).abs() < 1e-9);
     }
+
     #[test]
-    fn empty_returns_none() {
-        assert!(nearest_price(&[], 10).is_none());
+    fn forward_excludes_past_prints() {
+        let pts = vec![PricePoint { ts: 90, price: 0.50 }];
+        // target=100 -> ts=90 is before target, must be excluded
+        assert!(first_forward_price(&pts, 100, 60).is_none());
+    }
+
+    #[test]
+    fn forward_excludes_prints_beyond_max_wait() {
+        let pts = vec![PricePoint { ts: 200, price: 0.50 }];
+        // target=100, max_wait=60 -> window [100,160]; ts=200 is outside
+        assert!(first_forward_price(&pts, 100, 60).is_none());
+    }
+
+    #[test]
+    fn forward_empty_returns_none() {
+        assert!(first_forward_price(&[], 100, 60).is_none());
     }
 }
 
@@ -33,7 +54,7 @@ use anyhow::Context;
 
 #[async_trait::async_trait]
 pub trait PriceSource: Send + Sync {
-    /// Price of `token_id` nearest to `target_ts`, with provenance tag.
+    /// Price of `token_id` at or after `target_ts` within `window_s` seconds, with provenance tag.
     async fn price_at(&self, token_id: &str, condition_id: &str, target_ts: i64)
         -> Result<Option<(f64, PriceTag)>>;
 }
@@ -42,6 +63,7 @@ pub struct HttpPriceSource {
     pub client: reqwest::Client,
     pub data_base: String,
     pub clob_base: String,
+    /// Max seconds to wait for a forward trade print at or after the copy timestamp.
     pub window_s: i64,
     cache: tokio::sync::Mutex<std::collections::HashMap<String, Vec<PricePoint>>>,
 }
@@ -83,35 +105,14 @@ impl HttpPriceSource {
         self.cache.lock().await.insert(condition_id.to_string(), pts.clone());
         Ok(pts)
     }
-
-    async fn prices_history(&self, token_id: &str, target_ts: i64) -> Result<Vec<PricePoint>> {
-        let url = format!("{}/prices-history?market={}&startTs={}&endTs={}&fidelity=1",
-            self.clob_base, token_id, target_ts - self.window_s, target_ts + self.window_s);
-        let body: Value = self.client.get(&url).send().await
-            .with_context(|| format!("prices-history GET {url}"))?
-            .error_for_status()?.json().await.context("decode prices-history")?;
-        let hist = body.get("history").and_then(Value::as_array).cloned().unwrap_or_default();
-        Ok(hist.iter().filter_map(|h| Some(PricePoint {
-            ts: h.get("t")?.as_f64()? as i64,
-            price: h.get("p")?.as_f64()?,
-        })).collect())
-    }
 }
 
 #[async_trait::async_trait]
 impl PriceSource for HttpPriceSource {
     async fn price_at(&self, token_id: &str, condition_id: &str, target_ts: i64)
         -> Result<Option<(f64, PriceTag)>> {
-        let prints = self.market_prints(token_id, condition_id).await.unwrap_or_default();
-        let in_window: Vec<_> = prints.iter().copied()
-            .filter(|p| (p.ts - target_ts).abs() <= self.window_s).collect();
-        if let Some(p) = nearest_price(&in_window, target_ts) {
-            return Ok(Some((p.price, PriceTag::MarketPrint)));
-        }
-        let hist = self.prices_history(token_id, target_ts).await.unwrap_or_default();
-        if let Some(p) = nearest_price(&hist, target_ts) {
-            return Ok(Some((p.price, PriceTag::PricesHistory)));
-        }
-        Ok(None) // caller falls back to leader fill price, tagged LeaderFill
+        let prints = self.market_prints(token_id, condition_id).await?;
+        Ok(first_forward_price(&prints, target_ts, self.window_s)
+            .map(|p| (p.price, PriceTag::MarketPrint)))
     }
 }

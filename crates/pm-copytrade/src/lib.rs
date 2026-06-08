@@ -62,17 +62,20 @@ pub async fn run_historical(
 ) -> Result<(HistoricalReport, HashMap<i64, Vec<CopyResult>>)> {
     let fills = fills_src.fetch_fills(&cfg.wallet, cfg.start_ts, cfg.end_ts).await?;
 
-    // Resolutions: one lookup per distinct condition_id, bounded concurrency.
+    // Resolutions: chunked batch calls with bounded concurrency.
     let conds: Vec<String> = {
         let mut s: Vec<String> = fills.iter().map(|f| f.condition_id.clone()).collect();
         s.sort(); s.dedup(); s
     };
-    let res_pairs: Vec<(String, Option<Resolution>)> = stream::iter(conds)
-        .map(|c| async move { (c.clone(), res_src.resolution(&c).await.ok().flatten()) })
+    const CHUNK_SIZE: usize = 25;
+    let chunks: Vec<Vec<String>> = conds.chunks(CHUNK_SIZE).map(|c| c.to_vec()).collect();
+    let res: HashMap<String, Resolution> = stream::iter(chunks)
+        .map(|chunk| async move {
+            res_src.resolutions_batch(&chunk).await.unwrap_or_default()
+        })
         .buffer_unordered(cfg.concurrency)
-        .collect().await;
-    let res: HashMap<String, Resolution> =
-        res_pairs.into_iter().filter_map(|(_, r)| r.map(|r| (r.condition_id.clone(), r))).collect();
+        .fold(HashMap::new(), |mut acc, map| async move { acc.extend(map); acc })
+        .await;
 
     let leader_eq = LeaderEquity::reconstruct(&fills, &res, cfg.leader_seed_usdc);
 

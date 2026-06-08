@@ -46,3 +46,34 @@ pub struct ReplayEvent {
 const _: () = {
     assert!(std::mem::size_of::<ReplayEvent>() <= 128);
 };
+
+/// Real NO-side ladder, carried alongside a `ReplayEvent` for fill simulation.
+/// Kept separate so the strategy-facing `ReplayEvent` stays YES-centric and the
+/// sim Exchange prices the NO leg from real depth instead of `1 - yes`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[repr(C)]
+pub struct NoBook {
+    pub bids: [BookLevel; TAPE_DEPTH],
+    pub asks: [BookLevel; TAPE_DEPTH],
+}
+
+#[cfg(test)]
+mod no_book_tests {
+    use super::*;
+
+    #[test]
+    fn no_book_defaults_to_empty_levels() {
+        let nb = NoBook::default();
+        assert_eq!(nb.bids[0], BookLevel::default());
+        assert_eq!(nb.asks[0], BookLevel::default());
+    }
+
+    #[test]
+    fn no_book_roundtrips_serde() {
+        let mut nb = NoBook::default();
+        nb.asks[0] = BookLevel { price: 0.42, size: 100.0 };
+        let json = serde_json::to_string(&nb).unwrap();
+        let back: NoBook = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.asks[0].price, 0.42);
+    }
+}

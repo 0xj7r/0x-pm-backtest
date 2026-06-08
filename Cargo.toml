@@ -6,6 +6,7 @@ members = [
     "crates/pm-model",
     "crates/pm-strategy",
     "crates/pm-risk",
+    "crates/pm-engine",
     "crates/pm-app",
     "crates/pm-copytrade",
 ]
@@ -75,6 +76,7 @@ pm-telonex-loader   = { path = "crates/pm-telonex-loader" }
 pm-model            = { path = "crates/pm-model" }
 pm-strategy        = { path = "crates/pm-strategy" }
 pm-risk             = { path = "crates/pm-risk" }
+pm-engine           = { path = "crates/pm-engine" }
 
 [profile.release]
 opt-level = 3

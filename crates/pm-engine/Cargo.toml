@@ -1,0 +1,17 @@
+[package]
+name = "pm-engine"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+# Exposes the in-memory mock seams to downstream crates (drivers' tests).
+testkit = []
+
+[dependencies]
+pm-types    = { path = "../pm-types" }
+pm-strategy = { path = "../pm-strategy" }
+pm-risk     = { path = "../pm-risk" }
+pm-model    = { path = "../pm-model" }
+
+[dev-dependencies]
+pm-strategy = { path = "../pm-strategy" }

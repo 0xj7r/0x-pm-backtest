@@ -8,12 +8,9 @@ use pm_strategy::{Side, Strategy};
 use pm_types::{MarketId, ReplayEvent, ReplayFlags, SpotHistory, TradeHistory};
 use std::collections::HashMap;
 
-#[allow(dead_code)]
 struct MarketCtx {
     close_ns: i64,
     events_seen: u64,
-    token: Token,
-    window: i64,
 }
 
 pub struct Engine<S: Strategy> {
@@ -76,8 +73,6 @@ impl<S: Strategy> Engine<S> {
         let mc = self.markets.entry(e.market_id).or_insert(MarketCtx {
             close_ns: e.ts_ns,
             events_seen: 0,
-            token,
-            window,
         });
 
         if e.flags.contains(ReplayFlags::MARKET_CLOSE) {
@@ -106,12 +101,13 @@ impl<S: Strategy> Engine<S> {
 
         let (out, _model) = self.strategy.on_event_scored(e, &ctx, &self.spot, &self.trades);
 
+        let market_key = ExposureKey { token, window };
         for req in out.orders {
             let id = OrderId(self.next_order_id);
             self.next_order_id += 1;
 
             let signed = signed_shares(req.side, req.shares);
-            let current_net = self.exposure.net(ExposureKey { token, window });
+            let current_net = self.exposure.net(market_key);
             // Close if the delta reduces |net exposure| (moves toward zero).
             let kind = if (current_net + signed).abs() < current_net.abs() {
                 IntentKind::Close
@@ -130,8 +126,7 @@ impl<S: Strategy> Engine<S> {
                 kind,
             };
 
-            let key = ExposureKey { token, window };
-            if self.risk.check(&intent, &self.portfolio, &self.marks, &self.exposure, key, signed)
+            if self.risk.check(&intent, &self.portfolio, &self.marks, &self.exposure, market_key, signed)
                 == RiskDecision::Approve
             {
                 ex.submit(intent, clock.now());

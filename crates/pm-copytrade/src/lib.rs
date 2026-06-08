@@ -10,7 +10,7 @@ use anyhow::Result;
 use serde::Serialize;
 use futures::stream::{self, StreamExt};
 
-use crate::model::{CopyResult, LeaderFill, PriceTag, Resolution};
+use crate::model::{CopyResult, PriceTag, Resolution};
 use crate::sources::activity::FillSource;
 use crate::sources::prices::PriceSource;
 use crate::sources::resolution::ResolutionSource;
@@ -100,7 +100,7 @@ pub async fn run_historical(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Side;
+    use crate::model::{LeaderFill, Side};
     use async_trait::async_trait;
 
     struct FakeFills(Vec<LeaderFill>);

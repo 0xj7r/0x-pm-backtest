@@ -40,13 +40,24 @@ pub trait PriceSource: Send + Sync {
 
 pub struct HttpPriceSource {
     pub client: reqwest::Client,
-    pub data_base: String,  // https://data-api.polymarket.com
-    pub clob_base: String,  // https://clob.polymarket.com
-    pub window_s: i64,      // search +/- this many seconds, e.g. 90
+    pub data_base: String,
+    pub clob_base: String,
+    pub window_s: i64,
+    cache: tokio::sync::Mutex<std::collections::HashMap<String, Vec<PricePoint>>>,
 }
 
 impl HttpPriceSource {
+    pub fn new(client: reqwest::Client, data_base: String, clob_base: String, window_s: i64) -> Self {
+        Self { client, data_base, clob_base, window_s, cache: tokio::sync::Mutex::new(std::collections::HashMap::new()) }
+    }
+
     async fn market_prints(&self, token_id: &str, condition_id: &str) -> Result<Vec<PricePoint>> {
+        {
+            let guard = self.cache.lock().await;
+            if let Some(pts) = guard.get(condition_id) {
+                return Ok(pts.clone());
+            }
+        }
         // /trades?market=<conditionId> returns all traders' prints for the market;
         // keep only the leader's outcome token, paginate up to the offset ceiling.
         let mut pts = Vec::new();
@@ -69,6 +80,7 @@ impl HttpPriceSource {
             if n < 500 || offset + 500 > 3000 { break; }
             offset += 500;
         }
+        self.cache.lock().await.insert(condition_id.to_string(), pts.clone());
         Ok(pts)
     }
 

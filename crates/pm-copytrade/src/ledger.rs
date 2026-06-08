@@ -1,4 +1,4 @@
-use crate::model::{CopyEntry, CopyResult, LeaderFill, PriceTag, Resolution, Side};
+use crate::model::{CopyEntry, CopyResult, LeaderFill, PriceTag, Resolution};
 use crate::equity::LeaderEquity;
 use crate::sizing::proportional_stake;
 use std::collections::HashMap;

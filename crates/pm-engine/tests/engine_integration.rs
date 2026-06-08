@@ -122,8 +122,6 @@ fn golden_trace_is_deterministic() {
     assert_eq!(run_once(), run_once());
 }
 
-// Task 12 placeholder (BuyOnceEach + interleaves test added in next commit)
-
 /// Buy 100 YES the first time the engine sees each market (when position is flat).
 #[derive(Default)]
 struct BuyOnceEach;
@@ -148,6 +146,39 @@ impl Strategy for BuyOnceEach {
             StrategyOutput::hold()
         }
     }
+}
+
+#[test]
+fn interleaves_two_markets_in_ts_order_sharing_capital() {
+    let m1 = MarketId(0);
+    let m2 = MarketId(1);
+    let clock_cell = Rc::new(Cell::new(0i64));
+    let mut feed = ScriptedFeed::new(
+        vec![
+            ev(10, m1, false),
+            ev(15, m2, false),
+            ev(30, m1, true),
+            ev(35, m2, true),
+        ],
+        clock_cell.clone(),
+    );
+    let mut ex = InstantExchange::new(0.50, 0.0);
+    let clock = SimClock { ts: clock_cell };
+    let mut engine = Engine::new(
+        BuyOnceEach::default(),
+        Portfolio::new(1_000.0),
+        RiskGate { limits: limits() },
+        |_m| (Token::Btc, 0),
+    );
+    engine.run(&mut feed, &mut ex, &clock);
+    // Both markets bought 100 @0.50 from the shared pool: 1000 - 50 - 50 = 900,
+    // then both resolve YES: +100 +100 => 1100.
+    assert_eq!(ex.submitted.len(), 2);
+    assert!(
+        (engine.portfolio.free_cash_usd() - 1_100.0).abs() < 1e-4,
+        "expected cash ~1100, got {}",
+        engine.portfolio.free_cash_usd()
+    );
 }
 
 // Keep BonereaperV2 import alive for Task 13 (added in its own commit).

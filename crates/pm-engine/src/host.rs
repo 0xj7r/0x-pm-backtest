@@ -17,8 +17,12 @@ pub fn build_ctx(
     btc_key: ExposureKey,
     eth_key: ExposureKey,
     exposure: &ExposureState,
+    no_book: &pm_types::NoBook,
 ) -> Ctx {
     let pos = portfolio.position(market);
+    let no_bid = no_book.bids[0].price;
+    let no_ask = no_book.asks[0].price;
+    let no_mid = if no_bid > 0.0 && no_ask > 0.0 { 0.5 * (no_bid + no_ask) } else { 0.0 };
     Ctx {
         events_seen,
         yes_shares: pos.yes_shares,
@@ -27,6 +31,9 @@ pub fn build_ctx(
         market_close_ns: close_ns,
         btc_net_exposure_shares: exposure.net(btc_key),
         eth_net_exposure_shares: exposure.net(eth_key),
+        no_bid,
+        no_ask,
+        no_mid,
         ..Ctx::default()
     }
 }
@@ -57,10 +64,27 @@ mod tests {
         let btc = ExposureKey { token: Token::Btc, window: 0 };
         let eth = ExposureKey { token: Token::Eth, window: 0 };
         exp.apply(btc, 100.0);
-        let ctx = build_ctx(&pf, m, 5, 1_700_000_000_000_000_000, btc, eth, &exp);
+        let nb = pm_types::NoBook::default();
+        let ctx = build_ctx(&pf, m, 5, 1_700_000_000_000_000_000, btc, eth, &exp, &nb);
         assert_eq!(ctx.yes_shares, 100.0);
         assert_eq!(ctx.btc_net_exposure_shares, 100.0);
         assert_eq!(ctx.eth_net_exposure_shares, 0.0);
         assert_eq!(ctx.events_seen, 5);
+    }
+
+    #[test]
+    fn ctx_carries_real_no_top_of_book() {
+        use pm_types::{BookLevel, NoBook};
+        let pf = Portfolio::new(1_000.0);
+        let exp = ExposureState::default();
+        let btc = ExposureKey { token: Token::Btc, window: 0 };
+        let eth = ExposureKey { token: Token::Eth, window: 0 };
+        let mut nb = NoBook::default();
+        nb.bids[0] = BookLevel { price: 0.18, size: 100.0 };
+        nb.asks[0] = BookLevel { price: 0.21, size: 100.0 };
+        let ctx = build_ctx(&pf, MarketId(0), 1, 0, btc, eth, &exp, &nb);
+        assert!((ctx.no_bid - 0.18).abs() < 1e-6);
+        assert!((ctx.no_ask - 0.21).abs() < 1e-6);
+        assert!((ctx.no_mid - 0.195).abs() < 1e-6);
     }
 }

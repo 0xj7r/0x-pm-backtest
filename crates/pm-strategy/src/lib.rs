@@ -97,6 +97,12 @@ pub struct Ctx {
     /// to compute time-to-close and gate early/mid/late behaviour.
     pub market_close_ns: i64,
 
+    /// Real NO-leg top of book (from the opposing ladder, NOT synthetic 1-yes).
+    /// 0.0 when no NO book is available (Phase-1 tests / pre-first-NO).
+    pub no_bid: f32,
+    pub no_ask: f32,
+    pub no_mid: f32,
+
     // === Cross-market ladder exposure (for BackToExplore and similar ladder strategies) ===
     // These are populated in portfolio replay so strategies can see net exposure
     // across all currently open windows for the same asset.

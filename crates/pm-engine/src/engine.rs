@@ -142,7 +142,7 @@ impl<S: Strategy + Clone> Engine<S> {
             match ev {
                 EngineEvent::Market { replay, no_book } => {
                     ex.on_book(replay.market_id, &replay, &no_book, clock.now());
-                    self.on_market(&replay, ex, clock);
+                    self.on_market(&replay, &no_book, ex, clock);
                 }
                 EngineEvent::Trade { market, tick } => {
                     ex.on_trade(market, &tick, clock.now());
@@ -159,7 +159,7 @@ impl<S: Strategy + Clone> Engine<S> {
         }
     }
 
-    fn on_market<X: Exchange, C: Clock>(&mut self, e: &ReplayEvent, ex: &mut X, clock: &C) {
+    fn on_market<X: Exchange, C: Clock>(&mut self, e: &ReplayEvent, no_book: &pm_types::NoBook, ex: &mut X, clock: &C) {
         let (token, window) = (self.classify)(e.market_id);
 
         self.marks.insert(e.market_id, e.yes_mid);
@@ -205,6 +205,7 @@ impl<S: Strategy + Clone> Engine<S> {
             btc_key,
             eth_key,
             &self.exposure,
+            no_book,
         );
         ctx.market_yes_range_so_far = market_yes_range_so_far;
 

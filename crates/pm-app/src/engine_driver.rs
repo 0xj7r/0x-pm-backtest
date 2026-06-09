@@ -694,4 +694,62 @@ mod tests {
         assert_eq!(y.outcome, "Up");
         assert_eq!(n.outcome, "Down");
     }
+
+    /// Determinism gate (golden trace on real data). Runs the engine backtest
+    /// twice over a small fixed BTC-5m slice and asserts the trace is identical.
+    ///
+    /// pm-app is a bin-only crate (no lib target), so this lives here as a unit
+    /// test rather than `tests/engine_btc5m_determinism.rs`. Gated on
+    /// `PM_ENGINE_BTC5M_FIXTURE` (the local cache dir, e.g. `data/cache`); it
+    /// skips with a reason when unset so it never silently passes without data.
+    #[tokio::test]
+    async fn engine_btc5m_determinism() {
+        let Ok(cache_dir) = std::env::var("PM_ENGINE_BTC5M_FIXTURE") else {
+            eprintln!(
+                "SKIP engine_btc5m_determinism: set PM_ENGINE_BTC5M_FIXTURE to the local \
+                 cache dir (e.g. data/cache) with 2026-05-21 BTC-5m both-leg book + spot"
+            );
+            return;
+        };
+        // `cargo test` runs with cwd = crate dir; resolve relative paths against
+        // the workspace root so `data/...` matches the real layout.
+        let ws_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let resolve = |p: &str| {
+            let pb = PathBuf::from(p);
+            if pb.is_absolute() { pb } else { ws_root.join(p) }
+        };
+        let snap = resolve("data/snap062901.json");
+        let cache = resolve(&cache_dir);
+        if !snap.exists() {
+            eprintln!("SKIP engine_btc5m_determinism: {} missing", snap.display());
+            return;
+        }
+        let mk = || EngineBacktestCfg {
+            cache_dir: cache.clone(),
+            start_date: "2026-05-21".into(),
+            end_date: "2026-05-21".into(),
+            slug_prefix: "btc-updown-5m".into(),
+            spot_symbol: "BTCUSDT".into(),
+            snapshot_path: snap.clone(),
+            starting_cash: 1000.0,
+            max_clip_usdc: 30.0,
+            taker_latency_ms: 500,
+            taker_fee_bps: 0.0,
+            maker_rebate_bps: 0.0,
+            replay_sample_ms: 1000,
+            max_markets: Some(40),
+        };
+        let r1 = run_engine_backtest(mk()).await.expect("engine run 1");
+        let r2 = run_engine_backtest(mk()).await.expect("engine run 2");
+        assert_eq!(r1.trace, r2.trace, "engine trace must be byte-identical across runs");
+        assert_eq!(
+            r1.final_equity_usd.to_bits(),
+            r2.final_equity_usd.to_bits(),
+            "final equity must match bit-for-bit"
+        );
+        eprintln!(
+            "determinism OK: markets_total={} markets_traded={} fills={} equity=${:.4}",
+            r1.markets_total, r1.markets_traded, r1.fills, r1.final_equity_usd
+        );
+    }
 }

@@ -1,8 +1,12 @@
 use crate::event::{EngineEvent, Ts};
-use crate::seams::{CancelAck, Clock, Exchange, Feed, FillReport, OrderId, OrderIntent, SubmitAck};
+use crate::seams::{CancelAck, Exchange, Feed, FillReport, OrderId, OrderIntent, SubmitAck};
 use std::cell::Cell;
 use std::collections::VecDeque;
 use std::rc::Rc;
+
+/// Re-exported so existing `pm_engine::testkit::SimClock` imports keep working;
+/// the canonical definition now lives in `seams` (non-`testkit`).
+pub use crate::seams::SimClock;
 
 /// Feed that replays a fixed, pre-sorted vector of events.
 pub struct ScriptedFeed {
@@ -22,16 +26,6 @@ impl Feed for ScriptedFeed {
         let ev = self.events.pop_front()?;
         self.clock.set(ev.ts()); // advance sim time to the event we hand out
         Some(ev)
-    }
-}
-
-/// Clock backed by a shared cell the feed advances.
-pub struct SimClock {
-    pub ts: Rc<Cell<Ts>>,
-}
-impl Clock for SimClock {
-    fn now(&self) -> Ts {
-        self.ts.get()
     }
 }
 

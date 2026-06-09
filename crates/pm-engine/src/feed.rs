@@ -1,18 +1,32 @@
-use crate::event::EngineEvent;
+use crate::event::{EngineEvent, Ts};
 use crate::seams::Feed;
+use std::cell::Cell;
+use std::rc::Rc;
 
 /// A `Feed` backed by a pre-loaded `Vec<EngineEvent>`, consumed in order.
 ///
 /// Used by the backtest driver (not gated behind `testkit`) so it is available
 /// in release builds. Tests that need a controllable feed also use this.
+///
+/// When constructed with [`SliceFeed::with_clock`], each `next()` advances the
+/// shared clock cell to the handed-out event's `ts` (the same pattern as
+/// `testkit::ScriptedFeed`) so a `SimClock` reflects sim time for fill latency
+/// and `poll_fills`.
 pub struct SliceFeed {
     events: Vec<EngineEvent>,
     cursor: usize,
+    clock: Option<Rc<Cell<Ts>>>,
 }
 
 impl SliceFeed {
     pub fn new(events: Vec<EngineEvent>) -> Self {
-        Self { events, cursor: 0 }
+        Self { events, cursor: 0, clock: None }
+    }
+
+    /// Like [`SliceFeed::new`] but advances `clock` to each event's `ts` as it is
+    /// emitted, driving sim time for a [`crate::seams::SimClock`] sharing the cell.
+    pub fn with_clock(events: Vec<EngineEvent>, clock: Rc<Cell<Ts>>) -> Self {
+        Self { events, cursor: 0, clock: Some(clock) }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -29,6 +43,9 @@ impl Feed for SliceFeed {
         if self.cursor < self.events.len() {
             let ev = self.events[self.cursor];
             self.cursor += 1;
+            if let Some(clock) = &self.clock {
+                clock.set(ev.ts());
+            }
             Some(ev)
         } else {
             None

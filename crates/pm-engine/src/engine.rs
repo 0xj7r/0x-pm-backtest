@@ -9,7 +9,19 @@ use pm_strategy::{Side, Strategy};
 use pm_types::{MarketId, ReplayEvent, ReplayFlags, SpotHistory, TradeHistory};
 use std::collections::HashMap;
 
+/// Per-market open/close/resolution supplied by the driver from discovery
+/// metadata. Empty in Phase-1 tests, where the engine falls back to the
+/// first-seen ts for timing and `yes_mid >= 0.5` for resolution.
+#[derive(Debug, Clone, Copy)]
+pub struct MarketMeta {
+    pub open_ns: i64,
+    pub close_ns: i64,
+    /// Real resolved outcome from discovery; `None` falls back to `yes_mid >= 0.5`.
+    pub resolved_yes: Option<bool>,
+}
+
 struct MarketCtx {
+    open_ns: i64,
     close_ns: i64,
     events_seen: u64,
 }
@@ -20,6 +32,8 @@ pub struct Engine<S: Strategy> {
     pub exposure: ExposureState,
     risk: RiskGate,
     markets: HashMap<MarketId, MarketCtx>,
+    /// Driver-supplied open/close/resolution per market. Empty → Phase-1 fallback.
+    market_meta: HashMap<MarketId, MarketMeta>,
     next_order_id: u64,
     /// Empty histories in Phase 1; Phase 2 maintains rolling windows.
     spot: SpotHistory,
@@ -49,6 +63,7 @@ impl<S: Strategy> Engine<S> {
             exposure: ExposureState::default(),
             risk,
             markets: HashMap::new(),
+            market_meta: HashMap::new(),
             next_order_id: 1,
             spot: SpotHistory::default(),
             trades: TradeHistory::default(),
@@ -80,13 +95,23 @@ impl<S: Strategy> Engine<S> {
         self
     }
 
+    /// Attach real per-market open/close/resolution from discovery metadata.
+    /// Without it the engine uses the first-seen ts for timing and infers
+    /// resolution from `yes_mid` (the Phase-1 behavior).
+    pub fn with_market_meta(mut self, meta: HashMap<MarketId, MarketMeta>) -> Self {
+        self.market_meta = meta;
+        self
+    }
+
     pub fn run<F: Feed, X: Exchange, C: Clock>(&mut self, feed: &mut F, ex: &mut X, clock: &C) {
         while let Some(ev) = feed.next() {
             match ev {
                 EngineEvent::Market { replay, no_book } => {
                     ex.on_book(replay.market_id, &replay, &no_book, clock.now());
-                    // Task 7 wires trades via on_trade when a Trade EngineEvent variant is added.
                     self.on_market(&replay, ex, clock);
+                }
+                EngineEvent::Trade { market, tick } => {
+                    ex.on_trade(market, &tick, clock.now());
                 }
             }
             for fill in ex.poll_fills(clock.now()) {
@@ -104,20 +129,24 @@ impl<S: Strategy> Engine<S> {
 
         self.marks.insert(e.market_id, e.yes_mid);
 
-        let mc = self.markets.entry(e.market_id).or_insert(MarketCtx {
-            close_ns: e.ts_ns,
+        let meta = self.market_meta.get(&e.market_id).copied();
+        let mc = self.markets.entry(e.market_id).or_insert_with(|| MarketCtx {
+            open_ns: meta.map(|m| m.open_ns).unwrap_or(e.ts_ns),
+            close_ns: meta.map(|m| m.close_ns).unwrap_or(e.ts_ns),
             events_seen: 0,
         });
 
         if e.flags.contains(ReplayFlags::MARKET_CLOSE) {
-            // Phase 1: infer resolution from yes_mid. Phase 2 supplies an explicit event.
-            let resolved_yes = e.yes_mid >= 0.5;
+            // Real resolution from discovery metadata; fall back to yes_mid inference
+            // when no metadata was supplied (Phase-1 tests).
+            let resolved_yes = meta.and_then(|m| m.resolved_yes).unwrap_or(e.yes_mid >= 0.5);
             self.portfolio.settle(e.market_id, resolved_yes);
             self.strategy.on_market_resolved(e.yes_mid, resolved_yes);
             return;
         }
 
         mc.events_seen += 1;
+        let open_ns = mc.open_ns;
         let close_ns = mc.close_ns;
         let events_seen = mc.events_seen;
         let btc_key = ExposureKey { token: Token::Btc, window };
@@ -136,10 +165,9 @@ impl<S: Strategy> Engine<S> {
         if let Some(enricher) = &mut self.enricher {
             enricher.fill_regime(&mut ctx, e.ts_ns, &self.spot);
 
-            // Task 8: real open time wired via market metadata. For now use first-
-            // seen ts stored in close_ns as a proxy; Task 8 replaces this with
-            // the actual market open timestamp from the Polymarket metadata feed.
-            let secs_since_open = ((e.ts_ns - close_ns).max(0) as f64 / 1e9) as i64;
+            // Real market open time from discovery metadata (first-seen ts when
+            // no metadata supplied). For a 5m market the driver sets open = close - 300s.
+            let secs_since_open = ((e.ts_ns - open_ns).max(0) as f64 / 1e9) as i64;
             enricher.fill_model(&mut ctx, e, e.ts_ns, secs_since_open, &self.spot);
 
             enricher.fill_prior_range(&mut ctx, self.prior_ranges);

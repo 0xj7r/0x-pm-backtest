@@ -93,3 +93,16 @@ pub trait Exchange {
 pub trait Clock {
     fn now(&self) -> Ts;
 }
+
+/// Backtest clock backed by a shared cell that the `Feed` advances to each
+/// event's `ts` as it is handed out. Non-`testkit` so the backtest driver can
+/// use it in release builds; `testkit` re-exports it for the mock tests.
+pub struct SimClock {
+    pub ts: std::rc::Rc<std::cell::Cell<Ts>>,
+}
+
+impl Clock for SimClock {
+    fn now(&self) -> Ts {
+        self.ts.get()
+    }
+}

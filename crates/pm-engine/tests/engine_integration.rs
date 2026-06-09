@@ -183,6 +183,29 @@ fn interleaves_two_markets_in_ts_order_sharing_capital() {
     );
 }
 
+#[test]
+fn exposure_is_released_on_settlement() {
+    let m = MarketId(0);
+    let clock_cell = Rc::new(Cell::new(0i64));
+    let mut feed = ScriptedFeed::new(
+        vec![ev(10, m, false), ev(30, m, true)],
+        clock_cell.clone(),
+    );
+    let mut ex = InstantExchange::new(0.50, 0.0);
+    let clock = SimClock { ts: clock_cell };
+    let mut engine = Engine::new(
+        BuyOnce { fired: false },
+        Portfolio::new(1_000.0),
+        RiskGate { limits: limits() },
+        |_m| (Token::Btc, 0),
+    );
+    engine.run(&mut feed, &mut ex, &clock);
+    // BuyOnce bought 100 YES (+100 signed). After the market settles, the
+    // (Btc,0) exposure must be released back to ~0, not stuck at +100.
+    let net = engine.exposure.net(ExposureKey { token: Token::Btc, window: 0 });
+    assert!(net.abs() < 1e-9, "exposure must be released on settle, got {net}");
+}
+
 /// Fires at most twice, tracked in per-instance state. Used to prove the engine
 /// gives each market its own strategy instance (budgets are not shared).
 #[derive(Clone, Default)]

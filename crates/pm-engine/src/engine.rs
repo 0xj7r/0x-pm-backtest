@@ -58,6 +58,9 @@ pub struct Engine<S: Strategy + Clone> {
     /// Per-market PM trade tape passed to the strategy (br2 reads it for
     /// trade-flow). Empty → use `trades`.
     trades_by_market: HashMap<MarketId, TradeHistory>,
+    /// Cumulative signed exposure contributed by each market, so it can be
+    /// released on settlement (ExposureState aggregates by (token,window) only).
+    market_signed_exposure: HashMap<MarketId, f64>,
     /// Order/fill trace for determinism testing and diagnostics.
     pub trace: Vec<(i64, &'static str, MarketId, f64)>,
 }
@@ -86,6 +89,7 @@ impl<S: Strategy + Clone> Engine<S> {
             prior_ranges: PriorRanges::default(),
             prior_ranges_by_market: HashMap::new(),
             trades_by_market: HashMap::new(),
+            market_signed_exposure: HashMap::new(),
             trace: Vec::new(),
         }
     }
@@ -150,6 +154,7 @@ impl<S: Strategy + Clone> Engine<S> {
                 let (token, window) = (self.classify)(fill.market);
                 let signed = signed_shares(fill.side, fill.shares);
                 self.exposure.apply(ExposureKey { token, window }, signed);
+                *self.market_signed_exposure.entry(fill.market).or_insert(0.0) += signed;
             }
         }
     }
@@ -172,6 +177,9 @@ impl<S: Strategy + Clone> Engine<S> {
             // Real resolution from discovery metadata; fall back to yes_mid inference
             // when no metadata was supplied (Phase-1 tests).
             let resolved_yes = meta.and_then(|m| m.resolved_yes).unwrap_or(e.yes_mid >= 0.5);
+            if let Some(net) = self.market_signed_exposure.remove(&e.market_id) {
+                self.exposure.apply(ExposureKey { token, window }, -net);
+            }
             self.portfolio.settle(e.market_id, resolved_yes);
             if let Some(mut strat) = self.strategies.remove(&e.market_id) {
                 strat.on_market_resolved(e.yes_mid, resolved_yes);

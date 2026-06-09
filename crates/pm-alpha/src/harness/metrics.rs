@@ -176,6 +176,7 @@ mod tests {
                 mid_at_decision: p_book,
                 pnl,
                 won,
+                exit_price: None,
                 mark_60s: None,
             }],
             samples: vec![ProbSample {

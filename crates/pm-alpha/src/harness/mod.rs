@@ -223,6 +223,109 @@ mod tests {
     }
 
     #[test]
+    fn exit_rule_caps_losses_at_spread_not_binary() {
+        // Book never reprices (0.50/0.52), belief is wrong-confident after a
+        // spot jump the book ignores, market resolves AGAINST the position.
+        let spot = spot_with_jump(2400, 2050);
+        let open_s = 2000_i64;
+        let close_s = 2300_i64;
+        let ticks = (open_s..close_s).map(|s| book_tick(s, 0.50, 0.52)).collect();
+        let series = MarketSeries {
+            meta: MarketMeta {
+                token: Token::Btc,
+                window_secs: 300,
+                open_ts_ns: open_s * 1_000_000_000,
+                close_ts_ns: close_s * 1_000_000_000,
+                strike: 100_000.0,
+            },
+            resolved_yes: false, // position will be YES and lose at resolution
+            ticks,
+            date: "2026-05-01".into(),
+        };
+        let hold = run_market(
+            &series,
+            &spot,
+            &AlphaModel::default(),
+            &HarnessConfig {
+                latency_ms: 0,
+                ..HarnessConfig::default()
+            },
+        );
+        let exit = run_market(
+            &series,
+            &spot,
+            &AlphaModel::default(),
+            &HarnessConfig {
+                latency_ms: 0,
+                exit_after_s: 30,
+                ..HarnessConfig::default()
+            },
+        );
+        let hold_pnl = hold.trades[0].pnl;
+        let exit_pnl = exit.trades[0].pnl;
+        // Hold loses the full stake; exit loses only the spread.
+        assert!(hold_pnl < -40.0, "hold should lose ~full stake: {hold_pnl}");
+        assert!(
+            exit_pnl > -5.0 && exit_pnl < 0.0,
+            "exit should lose ~the spread: {exit_pnl}"
+        );
+        assert!(exit.trades[0].exit_price.is_some());
+    }
+
+    #[test]
+    fn skip_calm_blocks_entries_on_flat_tape() {
+        // Genuinely quiet tape (sub-bp wiggle) => calm_low_vol regime;
+        // threshold -1 would otherwise always enter.
+        let spot = SpotHistory::new(
+            (0..2400)
+                .map(|s| {
+                    let wave = if s % 2 == 0 { 1.000_000_5 } else { 0.999_999_5 };
+                    tick_spot(s, 100_000.0 * wave)
+                })
+                .collect(),
+        );
+        let open_s = 2000_i64;
+        let close_s = 2300_i64;
+        let ticks = (open_s..close_s).map(|s| book_tick(s, 0.50, 0.52)).collect();
+        let series = MarketSeries {
+            meta: MarketMeta {
+                token: Token::Btc,
+                window_secs: 300,
+                open_ts_ns: open_s * 1_000_000_000,
+                close_ts_ns: close_s * 1_000_000_000,
+                strike: 100_000.0,
+            },
+            resolved_yes: true,
+            ticks,
+            date: "2026-05-01".into(),
+        };
+        let blocked = run_market(
+            &series,
+            &spot,
+            &AlphaModel::default(),
+            &HarnessConfig {
+                edge_threshold: -1.0,
+                skip_calm: true,
+                latency_ms: 0,
+                ..HarnessConfig::default()
+            },
+        );
+        let open = run_market(
+            &series,
+            &spot,
+            &AlphaModel::default(),
+            &HarnessConfig {
+                edge_threshold: -1.0,
+                skip_calm: false,
+                latency_ms: 0,
+                ..HarnessConfig::default()
+            },
+        );
+        assert!(blocked.trades.is_empty());
+        assert!(!open.trades.is_empty());
+    }
+
+    #[test]
     fn no_entries_inside_stop_window() {
         let (mut series, spot) = dislocation_market(2053);
         // Keep only ticks in the final 10 seconds.

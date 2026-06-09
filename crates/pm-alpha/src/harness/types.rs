@@ -48,6 +48,13 @@ pub struct HarnessConfig {
     pub decision_dt_ms: u64,
     /// No entries within this many seconds of resolution.
     pub stop_before_close_s: u32,
+    /// Exit at the book this many seconds after fill (0 = hold to
+    /// resolution). Exits cross the spread and walk depth; unsold remainder
+    /// settles at resolution.
+    pub exit_after_s: u32,
+    /// Take no entries when the open-time regime is calm_low_vol (the cells
+    /// show ~no edge there; calm trades are variance without pay).
+    pub skip_calm: bool,
     /// Max laddered clip entries per market (1 = single entry).
     pub max_clips: u32,
     /// Minimum time between clip entries.
@@ -67,6 +74,8 @@ impl Default for HarnessConfig {
             notional_usdc: 50.0,
             decision_dt_ms: 1000,
             stop_before_close_s: 10,
+            exit_after_s: 0,
+            skip_calm: false,
             max_clips: 1,
             clip_cooldown_ms: 5000,
             collect_training: false,
@@ -94,9 +103,12 @@ pub struct TradeRecord {
     pub p_exo: f64,
     /// Book mid at decision time (diagnostic; not used in the belief).
     pub mid_at_decision: f64,
-    /// Net P&L at resolution: shares * (payout - avg_price) - fee.
+    /// Net P&L: exit proceeds (and any resolution remainder) minus cost and
+    /// fees. With `exit_after_s = 0` this is settlement at resolution.
     pub pnl: f64,
     pub won: bool,
+    /// Price achieved on the exited portion (None when held to resolution).
+    pub exit_price: Option<f64>,
     /// Side-oriented book mid 60s after the fill (diagnostic: did the book
     /// move toward the belief, or did we only "win" at resolution?).
     pub mark_60s: Option<f64>,

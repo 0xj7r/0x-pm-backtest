@@ -123,6 +123,15 @@ enum Cmd {
         /// Minimum ms between clip entries.
         #[arg(long, default_value = "5000")]
         clip_cooldown_ms: u64,
+        /// Exit at the book N seconds after fill (0 = hold to resolution).
+        #[arg(long, default_value = "0")]
+        exit_after_s: u32,
+        /// Skip entries in calm_low_vol regime.
+        #[arg(long)]
+        skip_calm: bool,
+        /// Infer missing outcome labels from the final tape mid.
+        #[arg(long)]
+        infer_outcome: bool,
         #[arg(long, default_value = "1800")]
         vol_lookback_s: u32,
         /// 0 disables the momentum drift term (base model).
@@ -1109,6 +1118,9 @@ async fn main() -> Result<()> {
             stop_before_close_s,
             max_clips,
             clip_cooldown_ms,
+            exit_after_s,
+            skip_calm,
+            infer_outcome,
             vol_lookback_s,
             momentum_lookback_s,
             momentum_weight,
@@ -1147,6 +1159,9 @@ async fn main() -> Result<()> {
                     stop_before_close_s,
                     max_clips,
                     clip_cooldown_ms,
+                    exit_after_s,
+                    skip_calm,
+                    infer_outcome,
                     vol_lookback_s,
                     momentum_lookback_s,
                     momentum_weight,

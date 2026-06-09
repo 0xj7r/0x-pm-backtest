@@ -180,13 +180,34 @@ fn execute(
         let Some((avg_price, shares)) = fill(fill_tick, side, cfg.notional_usdc) else {
             continue;
         };
-        let fee = avg_price * shares * cfg.taker_fee_bps / 10_000.0;
+        let entry_fee = avg_price * shares * cfg.taker_fee_bps / 10_000.0;
         let won = match side {
             Side::Yes => series.resolved_yes,
             Side::No => !series.resolved_yes,
         };
         let payout = if won { 1.0 } else { 0.0 };
-        let pnl = shares * (payout - avg_price) - fee;
+
+        // Optional early exit: cross the spread at the first tick past the
+        // horizon; any unsold remainder settles at resolution.
+        let mut exit_price = None;
+        let mut exit_fee = 0.0;
+        let mut proceeds_pnl = None;
+        if cfg.exit_after_s > 0 {
+            let exit_at_ns = fill_tick.ts_ns + cfg.exit_after_s as i64 * 1_000_000_000;
+            if let Some(exit_tick) = series.ticks[d.tick_idx..]
+                .iter()
+                .find(|t| t.ts_ns >= exit_at_ns && t.ts_ns <= close_ns)
+                && let Some((px, sold)) = sell_fill(exit_tick, side, shares)
+            {
+                exit_fee = px * sold * cfg.taker_fee_bps / 10_000.0;
+                let remainder = (shares - sold).max(0.0);
+                proceeds_pnl =
+                    Some(sold * (px - avg_price) + remainder * (payout - avg_price));
+                exit_price = Some(px);
+            }
+        }
+        let fee = entry_fee + exit_fee;
+        let pnl = proceeds_pnl.unwrap_or(shares * (payout - avg_price)) - fee;
         next_entry_ns = d.ts_ns + cooldown_ns;
         let mark_60s = series.ticks[d.tick_idx..]
             .iter()
@@ -206,12 +227,52 @@ fn execute(
             fee,
             p_exo: d.p_up,
             mid_at_decision: d.mid,
-            pnl,
-            won,
+            pnl: { pnl },
+            won: if exit_price.is_some() { pnl > 0.0 } else { won },
+            exit_price,
             mark_60s,
         });
     }
     trades
+}
+
+/// Sell `shares` by crossing the spread: selling YES walks the YES bids;
+/// selling NO (synthesized) means buying back YES, i.e. proceeds per share
+/// are `1 - ask` walking the YES asks. Returns (avg_proceeds_price, sold).
+fn sell_fill(tick: &BookTick, side: Side, shares: f64) -> Option<(f64, f64)> {
+    let levels: Vec<(f64, f64)> = match side {
+        Side::Yes => tick
+            .bids
+            .iter()
+            .filter(|l| valid(l))
+            .map(|l| (l.price as f64, l.size as f64))
+            .collect(),
+        Side::No => tick
+            .asks
+            .iter()
+            .filter(|l| valid(l))
+            .map(|l| (1.0 - l.price as f64, l.size as f64))
+            .collect(),
+    };
+    if levels.is_empty() {
+        return None;
+    }
+    let mut remaining = shares;
+    let mut proceeds = 0.0;
+    let mut sold = 0.0;
+    for (price, size) in levels {
+        if remaining <= 1e-9 {
+            break;
+        }
+        let qty = remaining.min(size);
+        proceeds += qty * price;
+        sold += qty;
+        remaining -= qty;
+    }
+    if sold <= 1e-9 {
+        return None;
+    }
+    Some((proceeds / sold, sold))
 }
 
 /// Run one market across a latency x threshold grid, computing the belief
@@ -233,6 +294,8 @@ pub fn run_market_grid(
     }
     let pass = belief_pass(series, spot, model, cfg);
     let regime = crate::regime::classify(spot, series.meta.open_ts_ns);
+    let calm_blocked =
+        cfg.skip_calm && regime == Some(crate::regime::Regime::CalmLowVol);
     let mut first = true;
     for &latency_ms in latencies_ms {
         for &threshold in edge_thresholds {
@@ -245,7 +308,11 @@ pub fn run_market_grid(
             };
             first = false;
             outputs.push(MarketRunOutput {
-                trades: execute(series, &pass, latency_ms, threshold, cfg),
+                trades: if calm_blocked {
+                    Vec::new()
+                } else {
+                    execute(series, &pass, latency_ms, threshold, cfg)
+                },
                 samples: pass.samples.clone(),
                 had_belief: pass.had_belief,
                 train_samples,

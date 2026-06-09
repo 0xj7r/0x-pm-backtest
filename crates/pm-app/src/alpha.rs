@@ -32,6 +32,11 @@ pub struct AlphaArgs {
     pub stop_before_close_s: u32,
     pub max_clips: u32,
     pub clip_cooldown_ms: u64,
+    pub exit_after_s: u32,
+    pub skip_calm: bool,
+    /// Use the final tape mid as the outcome when the manifest label is
+    /// missing/Unknown (skips markets whose final mid is ambiguous).
+    pub infer_outcome: bool,
     pub vol_lookback_s: u32,
     pub momentum_lookback_s: u32,
     pub momentum_weight: f64,
@@ -119,6 +124,7 @@ async fn process_markets(
     latencies_ms: &[u64],
     edge_thresholds: &[f64],
     replay_event_cache_dir: Option<&Path>,
+    infer_outcome: bool,
 ) -> Result<ProcessOutput> {
     let store_inner = store.store();
     let n_cells = latencies_ms.len() * edge_thresholds.len();
@@ -135,10 +141,11 @@ async fn process_markets(
     );
 
     for (idx, market) in markets.iter().enumerate() {
-        let Some(resolved_yes) = outcome_label_resolved_yes(&market.outcome) else {
+        let outcome_label = outcome_label_resolved_yes(&market.outcome);
+        if outcome_label.is_none() && !infer_outcome {
             *n_no_outcome += 1;
             continue;
-        };
+        }
         let Some(token) = Token::from_slug(&market.slug) else {
             *n_no_outcome += 1;
             continue;
@@ -214,6 +221,26 @@ async fn process_markets(
             continue;
         }
 
+        // Inferred label: final in-window mid, ambiguous finals skipped.
+        let resolved_yes = match outcome_label {
+            Some(v) => v,
+            None => {
+                let last_mid = ticks
+                    .iter()
+                    .rev()
+                    .find(|t| t.ts_ns <= close_ns)
+                    .and_then(|t| t.mid());
+                match last_mid {
+                    Some(m) if m >= 0.55 => true,
+                    Some(m) if m <= 0.45 => false,
+                    _ => {
+                        *n_no_outcome += 1;
+                        continue;
+                    }
+                }
+            }
+        };
+
         let series = MarketSeries {
             meta: MarketMeta {
                 token,
@@ -271,6 +298,8 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
         stop_before_close_s: args.stop_before_close_s,
         max_clips: args.max_clips,
         clip_cooldown_ms: args.clip_cooldown_ms,
+        exit_after_s: args.exit_after_s,
+        skip_calm: args.skip_calm,
         collect_training: false,
         train_sample_dt_s: 15,
     };
@@ -308,6 +337,7 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
             &[0],
             &[f64::INFINITY],
             args.replay_event_cache_dir.as_deref(),
+            args.infer_outcome,
         )
         .await?;
         let mut cal = ExoCalibrator::default();
@@ -350,6 +380,7 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
         &args.latencies_ms,
         &args.edge_thresholds,
         args.replay_event_cache_dir.as_deref(),
+        args.infer_outcome,
     )
     .await?;
     if let Some(path) = &args.trades_out {

@@ -280,6 +280,39 @@ enum Cmd {
         #[arg(long, default_value_t = true)]
         skip_existing: bool,
     },
+    /// Run the standalone pm-engine BTC-5m backtest (faithful both-book fill
+    /// model). `walk-forward` remains the default path; run both to measure the
+    /// both-book P&L delta. Discovers YES+NO leg pairs from the local book cache.
+    EngineBacktest {
+        #[arg(long)]
+        local_cache_dir: PathBuf,
+        #[arg(long)]
+        start_date: String,
+        #[arg(long)]
+        end_date: String,
+        #[arg(long, default_value = "btc-updown-5m")]
+        slug_prefix: String,
+        #[arg(long, default_value = "BTCUSDT")]
+        spot_symbol: String,
+        #[arg(long, default_value = "data/snap062901.json")]
+        meta_calibrator_snapshot_in: PathBuf,
+        #[arg(long, default_value_t = 1000.0)]
+        starting_cash: f64,
+        #[arg(long, default_value_t = 30.0)]
+        max_clip_usdc: f64,
+        #[arg(long, default_value_t = 500)]
+        taker_latency_ms: u64,
+        #[arg(long, default_value_t = 0.0)]
+        taker_fee_bps: f64,
+        #[arg(long, default_value_t = 0.0)]
+        maker_rebate_bps: f64,
+        /// Book-event thinning in ms (champion ran 1000). 0 = keep every event.
+        #[arg(long, default_value_t = 1000)]
+        replay_sample_ms: i64,
+        /// Cap on markets (for small fixed slices). Omit to use all discovered.
+        #[arg(long)]
+        max_markets: Option<usize>,
+    },
     /// Run a walk-forward backtest over many markets.
     WalkForward {
         /// JSONL of `MarketHandle` rows from `discover-day`.
@@ -1249,6 +1282,56 @@ async fn main() -> Result<()> {
                 skip_existing,
             )
             .await
+        }
+        Cmd::EngineBacktest {
+            local_cache_dir,
+            start_date,
+            end_date,
+            slug_prefix,
+            spot_symbol,
+            meta_calibrator_snapshot_in,
+            starting_cash,
+            max_clip_usdc,
+            taker_latency_ms,
+            taker_fee_bps,
+            maker_rebate_bps,
+            replay_sample_ms,
+            max_markets,
+        } => {
+            let report = engine_driver::run_engine_backtest(engine_driver::EngineBacktestCfg {
+                cache_dir: local_cache_dir,
+                start_date,
+                end_date,
+                slug_prefix,
+                spot_symbol,
+                snapshot_path: meta_calibrator_snapshot_in,
+                starting_cash,
+                max_clip_usdc,
+                taker_latency_ms,
+                taker_fee_bps,
+                maker_rebate_bps,
+                replay_sample_ms,
+                max_markets,
+            })
+            .await?;
+            let pnl = report.final_equity_usd - report.starting_cash_usd;
+            let pct = if report.starting_cash_usd != 0.0 {
+                (report.final_equity_usd / report.starting_cash_usd - 1.0) * 100.0
+            } else {
+                0.0
+            };
+            println!(
+                "engine backtest: markets_total={} markets_traded={} orders={} fills={} \
+                 start_cash=${:.2} final_equity=${:.2} pnl=${:.2} ({pct:+.2}%)",
+                report.markets_total,
+                report.markets_traded,
+                report.orders_submitted,
+                report.fills,
+                report.starting_cash_usd,
+                report.final_equity_usd,
+                pnl,
+            );
+            Ok(())
         }
         Cmd::WalkForward {
             markets,

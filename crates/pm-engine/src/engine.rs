@@ -29,8 +29,11 @@ struct MarketCtx {
     yes_max: f32,
 }
 
-pub struct Engine<S: Strategy> {
-    strategy: S,
+pub struct Engine<S: Strategy + Clone> {
+    /// Template cloned to create each market's isolated strategy instance.
+    strategy_template: S,
+    /// Per-market strategy instances (isolated mutable state). Dropped on settle.
+    strategies: HashMap<MarketId, S>,
     pub portfolio: Portfolio,
     pub exposure: ExposureState,
     risk: RiskGate,
@@ -59,7 +62,7 @@ pub struct Engine<S: Strategy> {
     pub trace: Vec<(i64, &'static str, MarketId, f64)>,
 }
 
-impl<S: Strategy> Engine<S> {
+impl<S: Strategy + Clone> Engine<S> {
     pub fn new(
         strategy: S,
         portfolio: Portfolio,
@@ -67,7 +70,8 @@ impl<S: Strategy> Engine<S> {
         classify: fn(MarketId) -> (Token, i64),
     ) -> Self {
         Self {
-            strategy,
+            strategy_template: strategy,
+            strategies: HashMap::new(),
             portfolio,
             exposure: ExposureState::default(),
             risk,
@@ -169,7 +173,9 @@ impl<S: Strategy> Engine<S> {
             // when no metadata was supplied (Phase-1 tests).
             let resolved_yes = meta.and_then(|m| m.resolved_yes).unwrap_or(e.yes_mid >= 0.5);
             self.portfolio.settle(e.market_id, resolved_yes);
-            self.strategy.on_market_resolved(e.yes_mid, resolved_yes);
+            if let Some(mut strat) = self.strategies.remove(&e.market_id) {
+                strat.on_market_resolved(e.yes_mid, resolved_yes);
+            }
             return;
         }
 
@@ -212,7 +218,13 @@ impl<S: Strategy> Engine<S> {
         }
 
         let trades = self.trades_by_market.get(&e.market_id).unwrap_or(&self.trades);
-        let (out, _model) = self.strategy.on_event_scored(e, &ctx, &self.spot, trades);
+        if !self.strategies.contains_key(&e.market_id) {
+            let fresh = self.strategy_template.clone();
+            self.strategies.insert(e.market_id, fresh);
+        }
+        let strat = self.strategies.get_mut(&e.market_id).expect("just inserted");
+        let spot = &self.spot;
+        let (out, _model) = strat.on_event_scored(e, &ctx, spot, trades);
 
         let market_key = ExposureKey { token, window };
         for req in out.orders {

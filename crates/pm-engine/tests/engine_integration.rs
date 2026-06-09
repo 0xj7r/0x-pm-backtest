@@ -1,5 +1,6 @@
 use pm_engine::engine::Engine;
 use pm_engine::event::{EngineEvent, Token};
+use pm_engine::exposure::ExposureKey;
 use pm_engine::portfolio::Portfolio;
 use pm_engine::risk::{RiskGate, RiskLimits};
 use pm_engine::testkit::{InstantExchange, ScriptedFeed, SimClock};
@@ -9,6 +10,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 /// Test strategy: buy 100 YES on the first event it sees, then hold.
+#[derive(Clone)]
 struct BuyOnce {
     fired: bool,
 }
@@ -123,7 +125,7 @@ fn golden_trace_is_deterministic() {
 }
 
 /// Buy 100 YES the first time the engine sees each market (when position is flat).
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct BuyOnceEach;
 
 impl Strategy for BuyOnceEach {
@@ -179,6 +181,61 @@ fn interleaves_two_markets_in_ts_order_sharing_capital() {
         "expected cash ~1100, got {}",
         engine.portfolio.free_cash_usd()
     );
+}
+
+/// Fires at most twice, tracked in per-instance state. Used to prove the engine
+/// gives each market its own strategy instance (budgets are not shared).
+#[derive(Clone, Default)]
+struct FireTwice {
+    fires: u32,
+}
+impl Strategy for FireTwice {
+    fn on_event(
+        &mut self,
+        _e: &ReplayEvent,
+        _c: &Ctx,
+        _s: &SpotHistory,
+        _t: &TradeHistory,
+    ) -> StrategyOutput {
+        if self.fires >= 2 {
+            return StrategyOutput::hold();
+        }
+        self.fires += 1;
+        StrategyOutput::one(OrderRequest {
+            side: Side::BuyYes,
+            shares: 1.0,
+            max_depth: 1,
+            limit_price: None,
+            tag: "fire",
+        })
+    }
+}
+
+#[test]
+fn each_market_gets_its_own_strategy_instance() {
+    let m1 = MarketId(0);
+    let m2 = MarketId(1);
+    let clock_cell = Rc::new(Cell::new(0i64));
+    // 3 book events per market (so FireTwice could fire up to twice each) then close.
+    let mut feed = ScriptedFeed::new(
+        vec![
+            ev(10, m1, false), ev(11, m1, false), ev(12, m1, false),
+            ev(20, m2, false), ev(21, m2, false), ev(22, m2, false),
+            ev(30, m1, true), ev(31, m2, true),
+        ],
+        clock_cell.clone(),
+    );
+    let mut ex = InstantExchange::new(0.50, 0.0);
+    let clock = SimClock { ts: clock_cell };
+    let mut engine = Engine::new(
+        FireTwice::default(),
+        Portfolio::new(1_000_000.0),
+        RiskGate { limits: limits() },
+        |_m| (Token::Btc, 0),
+    );
+    engine.run(&mut feed, &mut ex, &clock);
+    // 2 fires per market * 2 markets = 4 submits. A single shared instance caps at 2.
+    assert_eq!(ex.submitted.len(), 4, "expected 2 fires per market (4 total)");
 }
 
 #[test]

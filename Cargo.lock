@@ -1834,6 +1834,8 @@ dependencies = [
  "futures",
  "object_store",
  "parquet",
+ "pm-copytrade",
+ "pm-engine",
  "pm-model",
  "pm-risk",
  "pm-strategy",
@@ -1847,6 +1849,35 @@ dependencies = [
  "toml 0.9.12+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "pm-copytrade"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "futures",
+ "pm-risk",
+ "pm-types",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "pm-engine"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "pm-model",
+ "pm-risk",
+ "pm-strategy",
+ "pm-types",
+ "serde_json",
 ]
 
 [[package]]

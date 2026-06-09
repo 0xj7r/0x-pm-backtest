@@ -28,6 +28,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 mod discovery;
+mod engine_driver;
 mod prep_cache;
 mod result_summary;
 mod runner;

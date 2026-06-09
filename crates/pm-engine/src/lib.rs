@@ -4,6 +4,7 @@ pub mod enrich;
 pub mod engine;
 pub mod event;
 pub mod exposure;
+pub mod feed;
 pub mod host;
 pub mod portfolio;
 pub mod risk;

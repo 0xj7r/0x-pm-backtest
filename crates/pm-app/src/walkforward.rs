@@ -13,24 +13,13 @@ use futures::StreamExt;
 use pm_model::{
     MarketAsset, MetaFeatureWeight, MetaTrainingConfig, MetaTrainingSample, MetaTrainingStats,
     ModelMarketContext, ModelState, OnlineMetaCalibrator, OnlineMetaCalibratorSnapshot,
-    SkewWinRateTable,
 };
 use pm_risk::PortfolioLimits;
 use pm_strategy::{
-    BonereaperLite, BonereaperV2, BuyYesAtOpen, DeltaNeutralMm, LateBigBet, LateConfirmation,
-    LateConvexTail, NoopStrategy, PairedMmDense, ReactiveDirectional, SpotMomentumFollower,
-    UnlawfulRecycler,
+    BonereaperV2, NoopStrategy, PairedMmDense,
     back_to_explore::{BackToExploreConfig, BackToExploreTaker},
-    bonereaper::BonereaperLiteConfig,
     bonereaper_v2::{BonereaperV2Config, BonereaperV2GateStats, ReversalScoreCoeffs},
-    delta_neutral_mm::DeltaNeutralMmConfig,
-    late_big_bet::LateBigBetConfig,
-    late_confirmation::LateConfirmationConfig,
-    late_convex_tail::LateConvexTailConfig,
     paired_mm::PairedMmDenseConfig,
-    reactive::ReactiveDirectionalConfig,
-    spot_follower::SpotMomentumFollowerConfig,
-    unlawful_recycler::UnlawfulRecyclerConfig,
 };
 use pm_telonex_loader::{
     Channel, TelonexStore, load_binance_agg_trades_async, load_book_snapshot_async,
@@ -759,18 +748,9 @@ impl From<BackToExploreProfile> for ResolvedStrategyProfile {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
 pub enum StratId {
-    BuyYesAtOpen,
-    ReactiveDirectional,
     PairedMm,
-    SpotMomentumFollower,
-    LateBigBet,
-    BonereaperLite,
     BonereaperV2,
-    DeltaNeutralMm,
-    LateConfirmation,
-    LateConvexTail,
     BackToExplore,
-    UnlawfulRecycler,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
@@ -791,65 +771,26 @@ impl VolatilityBand {
 impl StratId {
     pub const ACTIVE: [Self; 3] = [Self::BackToExplore, Self::PairedMm, Self::BonereaperV2];
 
-    pub const ARCHIVED: [Self; 9] = [
-        Self::BuyYesAtOpen,
-        Self::ReactiveDirectional,
-        Self::SpotMomentumFollower,
-        Self::LateBigBet,
-        Self::BonereaperLite,
-        Self::DeltaNeutralMm,
-        Self::LateConfirmation,
-        Self::LateConvexTail,
-        Self::UnlawfulRecycler,
-    ];
+    // Intentionally empty: all previously archived strategies have been removed.
+    // The --allow-legacy-strategies flag is kept to avoid breaking existing scripts.
+    pub const ARCHIVED: [Self; 0] = [];
 
-    pub const ALL: [Self; 12] = [
-        Self::BuyYesAtOpen,
-        Self::ReactiveDirectional,
-        Self::SpotMomentumFollower,
-        Self::LateBigBet,
-        Self::BonereaperLite,
-        Self::DeltaNeutralMm,
-        Self::LateConfirmation,
-        Self::LateConvexTail,
-        Self::UnlawfulRecycler,
-        Self::PairedMm,
-        Self::BackToExplore,
-        Self::BonereaperV2,
-    ];
+    pub const ALL: [Self; 3] = [Self::PairedMm, Self::BackToExplore, Self::BonereaperV2];
 
     pub fn from_name(value: &str) -> Option<Self> {
         match value {
-            "buy_yes_at_open" => Some(Self::BuyYesAtOpen),
-            "reactive_directional" => Some(Self::ReactiveDirectional),
             "paired_mm" => Some(Self::PairedMm),
-            "spot_momentum_follower" => Some(Self::SpotMomentumFollower),
-            "late_big_bet" => Some(Self::LateBigBet),
-            "bonereaper_lite" => Some(Self::BonereaperLite),
             "bonereaper_v2" => Some(Self::BonereaperV2),
-            "delta_neutral_mm" => Some(Self::DeltaNeutralMm),
-            "late_confirmation" => Some(Self::LateConfirmation),
-            "late_convex_tail" => Some(Self::LateConvexTail),
             "back_to_explore" => Some(Self::BackToExplore),
-            "unlawful_recycler" => Some(Self::UnlawfulRecycler),
             _ => None,
         }
     }
 
     pub fn name(self) -> &'static str {
         match self {
-            StratId::BuyYesAtOpen => "buy_yes_at_open",
-            StratId::ReactiveDirectional => "reactive_directional",
             StratId::PairedMm => "paired_mm",
-            StratId::SpotMomentumFollower => "spot_momentum_follower",
-            StratId::LateBigBet => "late_big_bet",
-            StratId::BonereaperLite => "bonereaper_lite",
             StratId::BonereaperV2 => "bonereaper_v2",
-            StratId::DeltaNeutralMm => "delta_neutral_mm",
-            StratId::LateConfirmation => "late_confirmation",
-            StratId::LateConvexTail => "late_convex_tail",
             StratId::BackToExplore => "back_to_explore",
-            StratId::UnlawfulRecycler => "unlawful_recycler",
         }
     }
 
@@ -4440,8 +4381,6 @@ async fn run_markets(
                     &market_runner_cfg,
                     cfg.starting_cash_usdc,
                     cfg.max_clip_usdc,
-                    None,
-                    None,
                     if strat == StratId::BackToExplore {
                         bte_policy_scale
                     } else {
@@ -4508,8 +4447,6 @@ async fn run_markets(
                         &runner_cfg,
                         cfg.starting_cash_usdc,
                         cfg.max_clip_usdc,
-                        None,
-                        None,
                         if strat == StratId::BackToExplore {
                             bte_policy_scale
                         } else {
@@ -4560,36 +4497,9 @@ fn run_one_strategy(
     runner_cfg: &RunnerConfig,
     bankroll: f64,
     clip: f64,
-    shared_skew_table: Option<Arc<Mutex<SkewWinRateTable>>>,
-    shared_model_state: Option<Arc<Mutex<ModelState>>>,
     bte_external_risk_multiplier: f64,
 ) -> Result<StrategyMarketResult> {
     let (report, bonereaper_v2_gate_stats) = match strat {
-        StratId::BuyYesAtOpen => {
-            let mut s = BuyYesAtOpen::new(10.0);
-            (
-                run_backtest(events, spot, trades, &mut s, runner_cfg)?,
-                None,
-            )
-        }
-        StratId::ReactiveDirectional => {
-            let mut s = ReactiveDirectional::new(ReactiveDirectionalConfig {
-                bankroll_usdc: bankroll,
-                kelly_fraction: cfg.kelly_fraction,
-                max_clip_usdc: clip,
-                early_pair_clip_usdc: 0.5,
-                conviction_threshold_yes: 0.68,
-                conviction_threshold_no: 0.68,
-                book_weight: 0.3,
-                spot_weight: 0.7,
-                shared_model_state,
-                shared_skew_table,
-            });
-            (
-                run_backtest(events, spot, trades, &mut s, runner_cfg)?,
-                None,
-            )
-        }
         StratId::PairedMm => {
             let mut s = PairedMmDense::new(PairedMmDenseConfig {
                 clip_shares: (clip * 0.3 / 5.0).max(0.05), // scale with clip
@@ -4598,70 +4508,6 @@ fn run_one_strategy(
                 max_leg_imbalance_shares: 0.6,
                 min_refresh_ns: 2_000_000_000,
                 ..PairedMmDenseConfig::default()
-            });
-            (
-                run_backtest(events, spot, trades, &mut s, runner_cfg)?,
-                None,
-            )
-        }
-        StratId::SpotMomentumFollower => {
-            let mut s = SpotMomentumFollower::new(SpotMomentumFollowerConfig {
-                clip_usdc: clip,
-                ..SpotMomentumFollowerConfig::default()
-            });
-            (
-                run_backtest(events, spot, trades, &mut s, runner_cfg)?,
-                None,
-            )
-        }
-        StratId::LateBigBet => {
-            let mut s = LateBigBet::new(LateBigBetConfig {
-                bankroll_usdc: bankroll,
-                kelly_fraction: 0.5,
-                max_clip_usdc: clip,
-                late_seconds: 60.0,
-                min_conviction: 0.15,
-                max_ask_yes: 0.94,
-                min_bid_yes: 0.06,
-            });
-            (
-                run_backtest(events, spot, trades, &mut s, runner_cfg)?,
-                None,
-            )
-        }
-        StratId::BonereaperLite => {
-            let mut s = BonereaperLite::new(BonereaperLiteConfig {
-                bankroll_usdc: bankroll,
-                max_clip_usdc: clip,
-                ..BonereaperLiteConfig::default()
-            });
-            (
-                run_backtest(events, spot, trades, &mut s, runner_cfg)?,
-                None,
-            )
-        }
-        StratId::DeltaNeutralMm => {
-            let mut s = DeltaNeutralMm::new(DeltaNeutralMmConfig {
-                clip_shares: (clip * 0.3).max(0.1),
-                max_pair_cost: 1.02,
-                max_inventory_delta_shares: 1.0,
-                ..DeltaNeutralMmConfig::default()
-            });
-            (
-                run_backtest(events, spot, trades, &mut s, runner_cfg)?,
-                None,
-            )
-        }
-        StratId::UnlawfulRecycler => {
-            let mut s = UnlawfulRecycler::new(UnlawfulRecyclerConfig {
-                clip_shares: (clip * 0.30).clamp(1.0, 25.0),
-                max_pair_cost: 0.99,
-                max_inventory_delta_shares: (clip * 0.80).clamp(10.0, 60.0),
-                repair_inventory_delta_shares: (clip * 0.20).clamp(3.0, 15.0),
-                min_refresh_ns: 250_000_000,
-                max_orders_per_leg: 500,
-                stop_secs_before_close: 20.0,
-                ..UnlawfulRecyclerConfig::default()
             });
             (
                 run_backtest(events, spot, trades, &mut s, runner_cfg)?,
@@ -4822,28 +4668,6 @@ fn run_one_strategy(
             let report = run_backtest(events, spot, trades, &mut s, runner_cfg)?;
             (report, Some(s.gate_stats()))
         }
-        StratId::LateConfirmation => {
-            let mut s = LateConfirmation::new(LateConfirmationConfig {
-                bankroll_usdc: bankroll,
-                max_clip_usdc: clip,
-                ..LateConfirmationConfig::default()
-            });
-            (
-                run_backtest(events, spot, trades, &mut s, runner_cfg)?,
-                None,
-            )
-        }
-        StratId::LateConvexTail => {
-            let mut s = LateConvexTail::new(LateConvexTailConfig {
-                bankroll_usdc: bankroll,
-                max_clip_usdc: clip * 0.2,
-                ..LateConvexTailConfig::default()
-            });
-            (
-                run_backtest(events, spot, trades, &mut s, runner_cfg)?,
-                None,
-            )
-        }
         StratId::BackToExplore => {
             let market_window_ns = runner_cfg
                 .market_close_ns
@@ -4948,26 +4772,14 @@ async fn run_portfolio(
         .iter()
         .map(|s| (s.name(), LossStreakCooldownState::default()))
         .collect();
-    let mut shared_skew_tables: HashMap<&'static str, Arc<Mutex<SkewWinRateTable>>> =
-        HashMap::new();
     let mut shared_model_states: HashMap<&'static str, Arc<Mutex<ModelState>>> = HashMap::new();
     for strat in &cfg.strategies {
-        if *strat == StratId::ReactiveDirectional {
-            shared_skew_tables.insert(strat.name(), Arc::new(Mutex::new(SkewWinRateTable::new())));
-            shared_model_states.insert(
-                strat.name(),
-                Arc::new(Mutex::new(model_state_with_snapshot(
-                    meta_calibrator_snapshot.as_ref(),
-                ))),
-            );
-        } else {
-            shared_model_states.insert(
-                strat.name(),
-                Arc::new(Mutex::new(model_state_with_snapshot(
-                    meta_calibrator_snapshot.as_ref(),
-                ))),
-            );
-        }
+        shared_model_states.insert(
+            strat.name(),
+            Arc::new(Mutex::new(model_state_with_snapshot(
+                meta_calibrator_snapshot.as_ref(),
+            ))),
+        );
     }
     let mut results: Vec<MarketResult> = Vec::with_capacity(markets.len());
     let mut oos_meta_samples: Vec<MetaTrainingSample> = Vec::with_capacity(markets.len());
@@ -5123,11 +4935,7 @@ async fn run_portfolio(
                 decision_log_jsonl: cfg.decision_log_jsonl.clone(),
                 decision_log_parquet: None,
                 strategy_name: strat.name().to_string(),
-                shared_model_state: if strat == StratId::ReactiveDirectional {
-                    None
-                } else {
-                    shared_model_states.get(strat.name()).cloned()
-                },
+                shared_model_state: shared_model_states.get(strat.name()).cloned(),
                 update_model_state_on_resolution: meta_calibrator_snapshot.is_none(),
                 meta_calibrator_snapshot: meta_calibrator_snapshot.clone(),
                 enable_meta_calibration: cfg.enable_meta_calibration,
@@ -5161,8 +4969,6 @@ async fn run_portfolio(
                 &runner_cfg,
                 bankroll,
                 clip,
-                shared_skew_tables.get(strat.name()).cloned(),
-                shared_model_states.get(strat.name()).cloned(),
                 if strat == StratId::BackToExplore {
                     bte_policy_scale
                 } else {
@@ -6093,7 +5899,7 @@ debug_signals = true
     fn aggregate_handles_per_strategy_metrics() {
         let mut result_reactive = HashMap::new();
         result_reactive.insert(
-            StratId::ReactiveDirectional.name(),
+            StratId::BackToExplore.name(),
             StrategyMarketResult {
                 orders_submitted: 10,
                 orders_filled: 6,
@@ -6126,7 +5932,7 @@ debug_signals = true
 
         let mut result_bonereaper = HashMap::new();
         result_bonereaper.insert(
-            StratId::BonereaperLite.name(),
+            StratId::BonereaperV2.name(),
             StrategyMarketResult {
                 orders_submitted: 3,
                 orders_filled: 1,
@@ -6223,8 +6029,8 @@ debug_signals = true
         let summary = aggregate(
             &results,
             &[
-                StratId::ReactiveDirectional,
-                StratId::BonereaperLite,
+                StratId::BackToExplore,
+                StratId::BonereaperV2,
                 StratId::PairedMm,
             ],
         );
@@ -6233,8 +6039,8 @@ debug_signals = true
 
         let reactive = summary
             .per_strategy
-            .get(StratId::ReactiveDirectional.name())
-            .expect("reactive missing");
+            .get(StratId::BackToExplore.name())
+            .expect("back_to_explore missing");
         assert_eq!(reactive.markets_with_orders, 1);
         assert_eq!(reactive.total_orders_filled, 6);
         assert_eq!(reactive.total_orders_filled_taker, 4);
@@ -6258,19 +6064,19 @@ debug_signals = true
             .by_volatility_band
             .get(&VolatilityBand::Low)
             .expect("low band missing");
-        let low_reactive = low
-            .get(StratId::ReactiveDirectional.name())
-            .expect("low reactive missing");
-        assert_eq!(low_reactive.total_pnl_usdc, 4.0);
+        let low_back_to_explore = low
+            .get(StratId::BackToExplore.name())
+            .expect("low back_to_explore missing");
+        assert_eq!(low_back_to_explore.total_pnl_usdc, 4.0);
 
         let high = summary
             .by_volatility_band
             .get(&VolatilityBand::High)
             .expect("high band missing");
-        let high_bonereaper = high
-            .get(StratId::BonereaperLite.name())
-            .expect("high bonereaper missing");
-        assert_eq!(high_bonereaper.total_pnl_usdc, -2.0);
+        let high_bonereaper_v2 = high
+            .get(StratId::BonereaperV2.name())
+            .expect("high bonereaper_v2 missing");
+        assert_eq!(high_bonereaper_v2.total_pnl_usdc, -2.0);
         assert_eq!(reactive.sharpe_ratio, 0.0);
     }
 

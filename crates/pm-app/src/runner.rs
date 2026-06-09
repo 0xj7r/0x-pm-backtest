@@ -2626,7 +2626,36 @@ pub fn pretty_print(rep: &BacktestReport) {
 mod tests {
     use super::*;
     use pm_model::ModelOutput;
-    use pm_strategy::{BuyYesAtOpen, OrderRequest, Side, Strategy, StrategyOutput};
+    use pm_strategy::{OrderRequest, Side, Strategy, StrategyOutput};
+
+    struct BuyOnFirstEvent {
+        shares: f64,
+        fired: bool,
+    }
+    impl BuyOnFirstEvent {
+        fn new(shares: f64) -> Self { Self { shares, fired: false } }
+    }
+    impl Strategy for BuyOnFirstEvent {
+        fn on_event(
+            &mut self,
+            _e: &ReplayEvent,
+            _ctx: &Ctx,
+            _spot: &SpotHistory,
+            _trades: &pm_types::TradeHistory,
+        ) -> StrategyOutput {
+            if self.fired || self.shares == 0.0 {
+                return StrategyOutput::hold();
+            }
+            self.fired = true;
+            StrategyOutput::one(OrderRequest {
+                side: Side::BuyYes,
+                shares: self.shares,
+                max_depth: 1,
+                limit_price: None,
+                tag: "test_buy",
+            })
+        }
+    }
     use pm_types::{BookLevel, MarketId, ReplayFlags, tape::TAPE_DEPTH};
 
     fn evt(ts_ns: i64, bid: f32, ask: f32, size: f32) -> ReplayEvent {
@@ -3020,7 +3049,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let mut strat = BuyYesAtOpen::new(10.0);
+        let mut strat = BuyOnFirstEvent::new(10.0);
         let spot = SpotHistory::default();
         let rep = run_backtest(
             &events,
@@ -3061,7 +3090,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let mut strat = BuyYesAtOpen::new(10.0);
+        let mut strat = BuyOnFirstEvent::new(10.0);
         let spot = SpotHistory::default();
         let rep = run_backtest(
             &events,
@@ -3566,7 +3595,7 @@ mod tests {
             portfolio_limits: PortfolioLimits::default(),
             ..Default::default()
         };
-        let mut strat = BuyYesAtOpen::new(10.0);
+        let mut strat = BuyOnFirstEvent::new(10.0);
         let spot = SpotHistory::default();
         let rep = run_backtest(
             &events,
@@ -3848,7 +3877,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut strat = BuyYesAtOpen::new(10.0);
+        let mut strat = BuyOnFirstEvent::new(10.0);
         let spot = SpotHistory::default();
         let rep = run_backtest(
             &events,
@@ -3897,7 +3926,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut strat = BuyYesAtOpen::new(0.0);
+        let mut strat = BuyOnFirstEvent::new(0.0);
         let rep = run_backtest(
             &events,
             &SpotHistory::default(),

@@ -8,29 +8,14 @@
 
 pub mod back_to_explore;
 pub mod convex;
-pub mod bonereaper;
 pub mod bonereaper_v2;
-#[path = "archive/delta_neutral_mm.rs"]
-pub mod delta_neutral_mm;
-#[path = "archive/late_big_bet.rs"]
-pub mod late_big_bet;
-#[path = "archive/late_confirmation.rs"]
-pub mod late_confirmation;
-#[path = "archive/late_convex_tail.rs"]
-pub mod late_convex_tail;
 pub mod paired_mm;
-#[path = "archive/reactive.rs"]
-pub mod reactive;
 pub mod regime;
 pub mod signals;
-#[path = "archive/spot_follower.rs"]
-pub mod spot_follower;
 #[path = "archive/spot_momentum.rs"]
 pub mod spot_momentum;
 #[path = "archive/trivial.rs"]
 pub mod trivial;
-#[path = "archive/unlawful_recycler.rs"]
-pub mod unlawful_recycler;
 
 use pm_model::{ModelAttribution, ModelOutput};
 use pm_types::{ReplayEvent, SpotHistory, TradeHistory};
@@ -160,14 +145,6 @@ pub trait Strategy {
 pub use back_to_explore::{BackToExploreConfig, BackToExploreTaker};
 pub use convex::{ConvexBookConfig, ConvexBookStrategy};
 pub use convex::position::PositionConfig;
-pub use bonereaper::{BonereaperLite, BonereaperLiteConfig};
 pub use bonereaper_v2::{BonereaperV2, BonereaperV2Config};
-pub use delta_neutral_mm::{DeltaNeutralMm, DeltaNeutralMmConfig};
-pub use late_big_bet::{LateBigBet, LateBigBetConfig};
-pub use late_confirmation::{LateConfirmation, LateConfirmationConfig};
-pub use late_convex_tail::{LateConvexTail, LateConvexTailConfig};
 pub use paired_mm::{PairedMmDense, PairedMmDenseConfig};
-pub use reactive::ReactiveDirectional;
-pub use spot_follower::{SpotMomentumFollower, SpotMomentumFollowerConfig};
-pub use trivial::{BuyYesAtOpen, NoopStrategy};
-pub use unlawful_recycler::{UnlawfulRecycler, UnlawfulRecyclerConfig};
+pub use trivial::NoopStrategy;

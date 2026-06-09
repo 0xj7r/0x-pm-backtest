@@ -9,13 +9,8 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use pm_model::MetaTrainingConfig;
 use pm_risk::PortfolioLimits;
 use pm_strategy::{
-    BonereaperLite, BonereaperV2, BuyYesAtOpen, DeltaNeutralMm, LateBigBet, LateConfirmation,
-    LateConvexTail, PairedMmDense, ReactiveDirectional,
-    SpotMomentumFollower, Strategy, bonereaper::BonereaperLiteConfig,
-    bonereaper_v2::BonereaperV2Config, delta_neutral_mm::DeltaNeutralMmConfig,
-    late_big_bet::LateBigBetConfig, late_confirmation::LateConfirmationConfig,
-    late_convex_tail::LateConvexTailConfig, paired_mm::PairedMmDenseConfig,
-    reactive::ReactiveDirectionalConfig, spot_follower::SpotMomentumFollowerConfig,
+    BonereaperV2, PairedMmDense,
+    bonereaper_v2::BonereaperV2Config, paired_mm::PairedMmDenseConfig,
 };
 use pm_telonex_loader::{
     Channel, TelonexStore, TelonexStoreConfig, load_binance_agg_trades_async,
@@ -56,16 +51,8 @@ struct Cli {
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 enum StrategyKind {
-    BuyYesAtOpen,
-    ReactiveDirectional,
     PairedMm,
-    SpotMomentumFollower,
-    LateBigBet,
-    BonereaperLite,
     BonereaperV2,
-    DeltaNeutralMm,
-    LateConfirmation,
-    LateConvexTail,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -128,16 +115,10 @@ enum Cmd {
         resolved_yes: Option<bool>,
         #[arg(long, default_value = "1")]
         market_id: u32,
-        #[arg(long, value_enum, default_value = "reactive-directional")]
+        #[arg(long, value_enum, default_value = "bonereaper-v2")]
         strategy: StrategyKind,
         #[arg(long, default_value = "100.0")]
         starting_cash: f64,
-        /// For BuyYesAtOpen only: number of YES shares to buy. For
-        /// ReactiveDirectional this is ignored.
-        #[arg(long, default_value = "10.0")]
-        clip_shares: f64,
-        #[arg(long, default_value = "0.25")]
-        kelly_fraction: f64,
         #[arg(long, default_value = "5.0")]
         max_clip_usdc: f64,
         #[arg(long, default_value = "0.30")]
@@ -924,16 +905,10 @@ enum Cmd {
         resolved_yes: Option<bool>,
         #[arg(long, default_value = "1")]
         market_id: u32,
-        #[arg(long, value_enum, default_value = "reactive-directional")]
+        #[arg(long, value_enum, default_value = "bonereaper-v2")]
         strategy: StrategyKind,
         #[arg(long, default_value = "100.0")]
         starting_cash: f64,
-        /// For BuyYesAtOpen only: number of YES shares to buy. For
-        /// ReactiveDirectional this is ignored.
-        #[arg(long, default_value = "10.0")]
-        clip_shares: f64,
-        #[arg(long, default_value = "0.25")]
-        kelly_fraction: f64,
         #[arg(long, default_value = "5.0")]
         max_clip_usdc: f64,
         #[arg(long, default_value = "0.30")]
@@ -983,16 +958,10 @@ enum Cmd {
         resolved_yes: Option<bool>,
         #[arg(long, default_value = "1")]
         market_id: u32,
-        #[arg(long, value_enum, default_value = "reactive-directional")]
+        #[arg(long, value_enum, default_value = "bonereaper-v2")]
         strategy: StrategyKind,
         #[arg(long, default_value = "100.0")]
         starting_cash: f64,
-        /// For BuyYesAtOpen only: number of YES shares to buy. For
-        /// ReactiveDirectional this is ignored.
-        #[arg(long, default_value = "10.0")]
-        clip_shares: f64,
-        #[arg(long, default_value = "0.25")]
-        kelly_fraction: f64,
         #[arg(long, default_value = "5.0")]
         max_clip_usdc: f64,
         #[arg(long, default_value = "0.30")]
@@ -1084,8 +1053,6 @@ async fn main() -> Result<()> {
             market_id,
             strategy,
             starting_cash,
-            clip_shares,
-            kelly_fraction,
             max_clip_usdc,
             max_drawdown_pct,
             max_daily_exposure_usdc,
@@ -1122,8 +1089,6 @@ async fn main() -> Result<()> {
                 MarketId(market_id),
                 strategy,
                 starting_cash,
-                clip_shares,
-                kelly_fraction,
                 limits,
                 close_ts_s,
                 resolved_yes,
@@ -1695,8 +1660,6 @@ async fn main() -> Result<()> {
             market_id,
             strategy,
             starting_cash,
-            clip_shares,
-            kelly_fraction,
             max_clip_usdc,
             max_drawdown_pct,
             max_daily_exposure_usdc,
@@ -1733,8 +1696,6 @@ async fn main() -> Result<()> {
                 MarketId(market_id),
                 strategy,
                 starting_cash,
-                clip_shares,
-                kelly_fraction,
                 limits,
                 close_ts_s,
                 resolved_yes,
@@ -1759,8 +1720,6 @@ async fn main() -> Result<()> {
             market_id,
             strategy,
             starting_cash,
-            clip_shares,
-            kelly_fraction,
             max_clip_usdc,
             max_drawdown_pct,
             max_daily_exposure_usdc,
@@ -1797,8 +1756,6 @@ async fn main() -> Result<()> {
                 MarketId(market_id),
                 strategy,
                 starting_cash,
-                clip_shares,
-                kelly_fraction,
                 limits,
                 close_ts_s,
                 resolved_yes,
@@ -3006,8 +2963,6 @@ async fn backtest_s3(
     market_id: MarketId,
     strategy: StrategyKind,
     starting_cash: f64,
-    clip_shares: f64,
-    kelly_fraction: f64,
     limits: PortfolioLimits,
     close_ts_seconds: i64,
     resolved_yes: Option<bool>,
@@ -3026,8 +2981,6 @@ async fn backtest_s3(
         market_id,
         strategy,
         starting_cash,
-        clip_shares,
-        kelly_fraction,
         limits,
         close_ts_seconds,
         resolved_yes,
@@ -3051,8 +3004,6 @@ async fn run_market_backtest(
     market_id: MarketId,
     strategy: StrategyKind,
     starting_cash: f64,
-    clip_shares: f64,
-    kelly_fraction: f64,
     limits: PortfolioLimits,
     close_ts_seconds: i64,
     resolved_yes: Option<bool>,
@@ -3142,42 +3093,10 @@ async fn run_market_backtest(
 
     let started = Instant::now();
     let report = match strategy {
-        StrategyKind::BuyYesAtOpen => {
-            let mut s = BuyYesAtOpen::new(clip_shares);
-            run_backtest(&events, &spot_history, &trade_history, &mut s, &cfg)?
-        }
-        StrategyKind::ReactiveDirectional => {
-            let mut s = build_reactive(starting_cash, kelly_fraction, max_clip_usdc);
-            run_backtest(&events, &spot_history, &trade_history, &mut s, &cfg)?
-        }
         StrategyKind::PairedMm => {
             let mut s = PairedMmDense::new(PairedMmDenseConfig {
                 clip_shares: max_clip_usdc / 0.5_f64.max(0.01),
                 ..PairedMmDenseConfig::default()
-            });
-            run_backtest(&events, &spot_history, &trade_history, &mut s, &cfg)?
-        }
-        StrategyKind::SpotMomentumFollower => {
-            let mut s = SpotMomentumFollower::new(SpotMomentumFollowerConfig {
-                clip_usdc: max_clip_usdc,
-                ..SpotMomentumFollowerConfig::default()
-            });
-            run_backtest(&events, &spot_history, &trade_history, &mut s, &cfg)?
-        }
-        StrategyKind::LateBigBet => {
-            let mut s = LateBigBet::new(LateBigBetConfig {
-                bankroll_usdc: starting_cash,
-                max_clip_usdc,
-                kelly_fraction,
-                ..LateBigBetConfig::default()
-            });
-            run_backtest(&events, &spot_history, &trade_history, &mut s, &cfg)?
-        }
-        StrategyKind::BonereaperLite => {
-            let mut s = BonereaperLite::new(BonereaperLiteConfig {
-                bankroll_usdc: starting_cash,
-                max_clip_usdc,
-                ..BonereaperLiteConfig::default()
             });
             run_backtest(&events, &spot_history, &trade_history, &mut s, &cfg)?
         }
@@ -3186,29 +3105,6 @@ async fn run_market_backtest(
                 bankroll_usdc: starting_cash,
                 max_clip_usdc,
                 ..BonereaperV2Config::default()
-            });
-            run_backtest(&events, &spot_history, &trade_history, &mut s, &cfg)?
-        }
-        StrategyKind::DeltaNeutralMm => {
-            let mut s = DeltaNeutralMm::new(DeltaNeutralMmConfig {
-                clip_shares: (max_clip_usdc * 0.3).max(0.1),
-                ..DeltaNeutralMmConfig::default()
-            });
-            run_backtest(&events, &spot_history, &trade_history, &mut s, &cfg)?
-        }
-        StrategyKind::LateConfirmation => {
-            let mut s = LateConfirmation::new(LateConfirmationConfig {
-                bankroll_usdc: starting_cash,
-                max_clip_usdc,
-                ..LateConfirmationConfig::default()
-            });
-            run_backtest(&events, &spot_history, &trade_history, &mut s, &cfg)?
-        }
-        StrategyKind::LateConvexTail => {
-            let mut s = LateConvexTail::new(LateConvexTailConfig {
-                bankroll_usdc: starting_cash,
-                max_clip_usdc: max_clip_usdc * 0.2,
-                ..LateConvexTailConfig::default()
             });
             run_backtest(&events, &spot_history, &trade_history, &mut s, &cfg)?
         }
@@ -3229,24 +3125,6 @@ async fn run_market_backtest(
         tracing::info!(?path, "wrote report");
     }
     Ok(())
-}
-
-fn build_reactive(
-    starting_cash: f64,
-    kelly_fraction: f64,
-    max_clip_usdc: f64,
-) -> impl Strategy + use<> {
-    let cfg = ReactiveDirectionalConfig {
-        bankroll_usdc: starting_cash,
-        kelly_fraction,
-        max_clip_usdc,
-        early_pair_clip_usdc: 0.5,
-        book_weight: 0.4,
-        spot_weight: 0.6,
-        shared_skew_table: None,
-        ..ReactiveDirectionalConfig::default()
-    };
-    ReactiveDirectional::new(cfg)
 }
 
 /// Build a Nautilus-conformant symbol from a Polymarket slug. The dotted
@@ -3391,13 +3269,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_strategies_blocks_archived_names_without_flag() {
+    fn parse_strategies_rejects_unknown_names() {
         assert!(parse_strategies("reactive_directional", false).is_err());
-    }
-
-    #[test]
-    fn parse_strategies_allows_archived_names_with_flag() {
-        let parsed = parse_strategies("reactive_directional", true).unwrap();
-        assert_eq!(parsed, vec![StratId::ReactiveDirectional]);
+        assert!(parse_strategies("reactive_directional", true).is_err());
     }
 }

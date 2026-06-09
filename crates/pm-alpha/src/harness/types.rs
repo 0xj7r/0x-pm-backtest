@@ -48,6 +48,10 @@ pub struct HarnessConfig {
     pub decision_dt_ms: u64,
     /// No entries within this many seconds of resolution.
     pub stop_before_close_s: u32,
+    /// Emit calibrator training samples (features + raw base p + outcome).
+    pub collect_training: bool,
+    /// Cadence of training-sample collection (seconds into the window).
+    pub train_sample_dt_s: u32,
 }
 
 impl Default for HarnessConfig {
@@ -59,6 +63,8 @@ impl Default for HarnessConfig {
             notional_usdc: 50.0,
             decision_dt_ms: 1000,
             stop_before_close_s: 10,
+            collect_training: false,
+            train_sample_dt_s: 15,
         }
     }
 }
@@ -103,4 +109,6 @@ pub struct MarketRunOutput {
     pub samples: Vec<ProbSample>,
     /// True when the model produced at least one belief during the window.
     pub had_belief: bool,
+    /// Calibrator training samples (only when `collect_training` is set).
+    pub train_samples: Vec<crate::calibrator::TrainingSample>,
 }

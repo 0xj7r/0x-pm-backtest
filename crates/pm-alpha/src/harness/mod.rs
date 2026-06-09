@@ -14,19 +14,19 @@ pub use types::{
     BookTick, HarnessConfig, MarketRunOutput, MarketSeries, ProbSample, Side, TradeRecord,
 };
 
-use crate::model::AlphaModelConfig;
+use crate::model::AlphaModel;
 use pm_types::SpotHistory;
 
 /// Run a set of markets (each paired with its day's spot history) under one
 /// config and aggregate.
 pub fn run_set<'a>(
     items: impl IntoIterator<Item = (&'a MarketSeries, &'a SpotHistory)>,
-    model_cfg: &AlphaModelConfig,
+    model: &AlphaModel,
     cfg: &HarnessConfig,
 ) -> HuntReport {
     let results: Vec<(&MarketSeries, MarketRunOutput)> = items
         .into_iter()
-        .map(|(series, spot)| (series, run_market(series, spot, model_cfg, cfg)))
+        .map(|(series, spot)| (series, run_market(series, spot, model, cfg)))
         .collect();
     aggregate(results.iter().map(|(s, o)| (&s.meta, o)))
 }
@@ -34,7 +34,7 @@ pub fn run_set<'a>(
 /// The edge-vs-latency curve: identical config swept over entry latencies.
 pub fn run_sweep<'a>(
     items: &[(&'a MarketSeries, &'a SpotHistory)],
-    model_cfg: &AlphaModelConfig,
+    model: &AlphaModel,
     base_cfg: &HarnessConfig,
     latencies_ms: &[u64],
 ) -> Vec<(u64, HuntReport)> {
@@ -45,10 +45,7 @@ pub fn run_sweep<'a>(
                 latency_ms,
                 ..*base_cfg
             };
-            (
-                latency_ms,
-                run_set(items.iter().copied(), model_cfg, &cfg),
-            )
+            (latency_ms, run_set(items.iter().copied(), model, &cfg))
         })
         .collect()
 }
@@ -136,14 +133,14 @@ mod tests {
         // Book reprices 3 seconds after the spot jump: low latency catches
         // the stale 0.52 ask, high latency pays 0.95.
         let (series, spot) = dislocation_market(2053);
-        let model_cfg = AlphaModelConfig::default();
+        let model = AlphaModel::default();
         let base = HarnessConfig {
             edge_threshold: 0.05,
             taker_fee_bps: 0.0,
             ..HarnessConfig::default()
         };
         let items = [(&series, &spot)];
-        let sweep = run_sweep(&items, &model_cfg, &base, &[0, 1_000, 5_000, 30_000]);
+        let sweep = run_sweep(&items, &model, &base, &[0, 1_000, 5_000, 30_000]);
         let pnls: Vec<f64> = sweep.iter().map(|(_, r)| r.aggregate.total_pnl).collect();
         for w in pnls.windows(2) {
             assert!(
@@ -189,11 +186,7 @@ mod tests {
             latency_ms: 0,
             ..HarnessConfig::default()
         };
-        let report = run_set(
-            [(&m_yes, &spot), (&m_no, &spot)],
-            &AlphaModelConfig::default(),
-            &cfg,
-        );
+        let report = run_set([(&m_yes, &spot), (&m_no, &spot)], &AlphaModel::default(), &cfg);
         assert_eq!(report.aggregate.n_trades, 2);
         assert!(
             report.aggregate.total_pnl < 0.0,
@@ -208,21 +201,16 @@ mod tests {
         let (series, spot) = dislocation_market(2053);
         let items = [(&series, &spot)];
         let cfg = HarnessConfig::default();
-        let model_cfg = AlphaModelConfig::default();
-        let a = serde_json::to_string(&run_set(items.iter().copied(), &model_cfg, &cfg)).unwrap();
-        let b = serde_json::to_string(&run_set(items.iter().copied(), &model_cfg, &cfg)).unwrap();
+        let model = AlphaModel::default();
+        let a = serde_json::to_string(&run_set(items.iter().copied(), &model, &cfg)).unwrap();
+        let b = serde_json::to_string(&run_set(items.iter().copied(), &model, &cfg)).unwrap();
         assert_eq!(a, b);
     }
 
     #[test]
     fn log_loss_checkpoints_score_exo_vs_book_at_same_instants() {
         let (series, spot) = dislocation_market(2053);
-        let out = run_market(
-            &series,
-            &spot,
-            &AlphaModelConfig::default(),
-            &HarnessConfig::default(),
-        );
+        let out = run_market(&series, &spot, &AlphaModel::default(), &HarnessConfig::default());
         assert!(!out.samples.is_empty());
         // After the jump the exogenous belief is sharp and right while the
         // (post-reprice) book is also right — but at the 60s checkpoint the
@@ -242,7 +230,7 @@ mod tests {
         let out = run_market(
             &series,
             &spot,
-            &AlphaModelConfig::default(),
+            &AlphaModel::default(),
             &HarnessConfig {
                 stop_before_close_s: 10,
                 edge_threshold: -1.0,

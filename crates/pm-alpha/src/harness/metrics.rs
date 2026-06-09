@@ -167,6 +167,7 @@ mod tests {
                 resolved_yes: true,
             }],
             had_belief: true,
+            train_samples: Vec::new(),
         }
     }
 

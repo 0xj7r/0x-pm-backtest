@@ -127,6 +127,16 @@ enum Cmd {
         /// Write the full JSON report here.
         #[arg(long)]
         out_json: Option<PathBuf>,
+        /// Train the exogenous calibrator on dates strictly before this
+        /// (YYYY-MM-DD) and evaluate on dates at-or-after it.
+        #[arg(long)]
+        calibrate_split: Option<String>,
+        /// Save the trained calibrator snapshot (JSON).
+        #[arg(long)]
+        calibrator_out: Option<PathBuf>,
+        /// Load a calibrator snapshot instead of training.
+        #[arg(long)]
+        calibrator_in: Option<PathBuf>,
     },
     /// Stream a Telonex book_snapshot parquet from S3 and print sanity stats.
     InspectS3 {
@@ -1092,6 +1102,9 @@ async fn main() -> Result<()> {
             momentum_lookback_s,
             momentum_weight,
             out_json,
+            calibrate_split,
+            calibrator_out,
+            calibrator_in,
         } => {
             let store = if let Some(ref dir) = local_cache_dir {
                 tracing::info!(?dir, "using local cache");
@@ -1124,6 +1137,9 @@ async fn main() -> Result<()> {
                     momentum_lookback_s,
                     momentum_weight,
                     out_json,
+                    calibrate_split,
+                    calibrator_out,
+                    calibrator_in,
                 },
             )
             .await

@@ -8,12 +8,14 @@
 //!
 //! Design: docs/superpowers/specs/2026-06-09-signal-ssot-design.md
 
+pub mod calibrator;
 pub mod fair_value;
 pub mod harness;
 pub mod model;
 pub mod state;
 pub mod vol;
 
+pub use calibrator::{ExoCalibrator, ExoCalibratorSnapshot, ExoFeatures, TrainingConfig, TrainingSample};
 pub use fair_value::{FairValueEstimate, FairValueModel, NoSignalReason};
-pub use model::{AlphaModelConfig, Belief};
+pub use model::{AlphaModel, AlphaModelConfig, Belief, Evaluation};
 pub use state::{ExoState, MarketMeta, Token};

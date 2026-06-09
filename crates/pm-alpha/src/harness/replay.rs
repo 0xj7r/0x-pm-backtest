@@ -8,7 +8,8 @@
 use super::types::{
     BookTick, HarnessConfig, MarketRunOutput, MarketSeries, ProbSample, Side, TradeRecord,
 };
-use crate::model::{AlphaModelConfig, belief};
+use crate::calibrator::TrainingSample;
+use crate::model::AlphaModel;
 use crate::state::ExoState;
 use pm_types::SpotHistory;
 use pm_types::tape::BookLevel;
@@ -29,13 +30,14 @@ struct Decision {
 struct BeliefPass {
     decisions: Vec<Decision>,
     samples: Vec<ProbSample>,
+    train_samples: Vec<TrainingSample>,
     had_belief: bool,
 }
 
 fn belief_pass(
     series: &MarketSeries,
     spot: &SpotHistory,
-    model_cfg: &AlphaModelConfig,
+    model: &AlphaModel,
     cfg: &HarnessConfig,
 ) -> BeliefPass {
     let open_ns = series.meta.open_ts_ns;
@@ -46,10 +48,13 @@ fn belief_pass(
     let mut pass = BeliefPass {
         decisions: Vec::new(),
         samples: Vec::new(),
+        train_samples: Vec::new(),
         had_belief: false,
     };
     let mut next_decision_ns = open_ns;
     let mut next_sample = 0usize;
+    let mut next_train_ns = open_ns;
+    let train_dt_ns = (cfg.train_sample_dt_s.max(1) as i64) * 1_000_000_000;
 
     for (i, tick) in series.ticks.iter().enumerate() {
         if tick.ts_ns < open_ns || tick.ts_ns > close_ns {
@@ -66,16 +71,36 @@ fn belief_pass(
                 market: series.meta,
                 now_ns: tick.ts_ns,
             };
-            if let (Some(b), Some(mid)) = (belief(&state, model_cfg), tick.mid()) {
+            if let (Some(ev), Some(mid)) = (model.evaluate(&state, false), tick.mid()) {
                 pass.had_belief = true;
                 pass.samples.push(ProbSample {
                     ts_ns: tick.ts_ns,
-                    p_exo: b.p_up,
+                    p_exo: ev.p,
                     p_book: mid,
                     resolved_yes: series.resolved_yes,
                 });
             }
             next_sample += 1;
+        }
+
+        // Training-sample collection at its own cadence (raw base p +
+        // exogenous features + outcome; the calibrator maps raw -> truth).
+        if cfg.collect_training && tick.ts_ns >= next_train_ns {
+            next_train_ns = tick.ts_ns + train_dt_ns;
+            let state = ExoState {
+                spot,
+                market: series.meta,
+                now_ns: tick.ts_ns,
+            };
+            if let Some(ev) = model.evaluate(&state, true)
+                && let Some(features) = ev.features
+            {
+                pass.train_samples.push(TrainingSample {
+                    features,
+                    base_side_probability: ev.raw.p_up as f32,
+                    side_observed: series.resolved_yes,
+                });
+            }
         }
 
         if tick.ts_ns < next_decision_ns || tick.ts_ns >= entry_deadline_ns {
@@ -88,7 +113,7 @@ fn belief_pass(
             market: series.meta,
             now_ns: tick.ts_ns,
         };
-        let Some(b) = belief(&state, model_cfg) else {
+        let Some(ev) = model.evaluate(&state, false) else {
             continue;
         };
         pass.had_belief = true;
@@ -98,7 +123,7 @@ fn belief_pass(
         pass.decisions.push(Decision {
             tick_idx: i,
             ts_ns: tick.ts_ns,
-            p_up: b.p_up,
+            p_up: ev.p,
             mid,
             yes_bid: tick.yes_bid as f64,
             yes_ask: tick.yes_ask as f64,
@@ -173,7 +198,7 @@ fn execute(
 pub fn run_market_grid(
     series: &MarketSeries,
     spot: &SpotHistory,
-    model_cfg: &AlphaModelConfig,
+    model: &AlphaModel,
     cfg: &HarnessConfig,
     latencies_ms: &[u64],
     edge_thresholds: &[f64],
@@ -185,13 +210,23 @@ pub fn run_market_grid(
         }
         return outputs;
     }
-    let pass = belief_pass(series, spot, model_cfg, cfg);
+    let pass = belief_pass(series, spot, model, cfg);
+    let mut first = true;
     for &latency_ms in latencies_ms {
         for &threshold in edge_thresholds {
+            // Training samples are identical across grid cells; attach them
+            // to the first cell only so the caller doesn't dedupe.
+            let train_samples = if first {
+                pass.train_samples.clone()
+            } else {
+                Vec::new()
+            };
+            first = false;
             outputs.push(MarketRunOutput {
                 trade: execute(series, &pass, latency_ms, threshold, cfg),
                 samples: pass.samples.clone(),
                 had_belief: pass.had_belief,
+                train_samples,
             });
         }
     }
@@ -201,13 +236,13 @@ pub fn run_market_grid(
 pub fn run_market(
     series: &MarketSeries,
     spot: &SpotHistory,
-    model_cfg: &AlphaModelConfig,
+    model: &AlphaModel,
     cfg: &HarnessConfig,
 ) -> MarketRunOutput {
     run_market_grid(
         series,
         spot,
-        model_cfg,
+        model,
         cfg,
         &[cfg.latency_ms],
         &[cfg.edge_threshold],

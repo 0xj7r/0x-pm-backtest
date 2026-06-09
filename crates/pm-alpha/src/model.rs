@@ -101,6 +101,38 @@ fn finish(estimate: FairValueEstimate, sigma_bar_bps: f64, momentum_return: f64)
     }
 }
 
+/// The deployable model: base fair value plus an optional trained calibrator.
+/// Still a pure function of `ExoState` — the calibrator's features are built
+/// from the same exogenous state, so the leakage guarantee is unchanged.
+#[derive(Debug, Clone, Default)]
+pub struct AlphaModel {
+    pub cfg: AlphaModelConfig,
+    pub calibrator: Option<crate::calibrator::ExoCalibrator>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Evaluation {
+    /// The deployed belief: calibrated when a calibrator is loaded, else raw.
+    pub p: f64,
+    pub raw: Belief,
+    /// Present when a calibrator is loaded or features were requested.
+    pub features: Option<crate::calibrator::ExoFeatures>,
+}
+
+impl AlphaModel {
+    pub fn evaluate(&self, state: &ExoState, want_features: bool) -> Option<Evaluation> {
+        let raw = belief(state, &self.cfg)?;
+        let need_features = want_features || self.calibrator.is_some();
+        let features =
+            need_features.then(|| crate::calibrator::exo_features(state, &raw, self.cfg.vol_lookback_s));
+        let p = match (&self.calibrator, &features) {
+            (Some(cal), Some(f)) => cal.predict(raw.p_up as f32, f) as f64,
+            _ => raw.p_up,
+        };
+        Some(Evaluation { p, raw, features })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

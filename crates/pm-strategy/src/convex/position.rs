@@ -38,7 +38,13 @@ pub struct PositionConfig {
     pub tail_max_clips: usize,
     pub tail_sweep_depth: usize,
     pub tail_refresh_secs: f32,
-    pub tail_coverage_frac: f64,
+    /// Accumulate the cheap tail toward this fraction of the favourite's shares.
+    /// 1.0 = roughly share-balanced (pays ~$1 whichever way it resolves); <1.0
+    /// keeps a net directional tilt with a partial cheap cushion. Plan-4 knob.
+    pub tail_balance_frac: f64,
+    /// Add the tail only while favourite_avg_cost + tail_ask < 1 - this edge, so
+    /// each paired share is positive-EV on EITHER resolution. 0.0 = pair < $1.
+    pub tail_min_pair_edge: f32,
     /// Reserved for Plan 4 sizing-curve tuning (|yes_mid-0.5| skew gate on the tail).
     pub tail_extreme_skew: f32,
 }
@@ -51,7 +57,7 @@ impl Default for PositionConfig {
             favourite_sweep_depth: 7,
             tail_min_ask: 0.01, tail_max_ask: 0.10, tail_min_seconds_to_close: 10.0,
             tail_max_clips: 3, tail_sweep_depth: 3, tail_refresh_secs: 5.0,
-            tail_coverage_frac: 0.50, tail_extreme_skew: 0.20,
+            tail_balance_frac: 1.0, tail_min_pair_edge: 0.0, tail_extreme_skew: 0.20,
         }
     }
 }
@@ -78,11 +84,11 @@ pub struct PositionManager {
     cfg: PositionConfig,
     favourite_side: Option<Side>,
     favourite_clips: usize,
-    /// Reserved for Plan 4 sizing-curve tuning (per-share inventory accounting).
     favourite_shares: f64,
     favourite_notional: f64,
     last_favourite_secs: f32,
     tail_clips: usize,
+    tail_shares: f64,
     tail_notional: f64,
     last_tail_secs: f32,
 }
@@ -98,7 +104,7 @@ impl PositionManager {
             cfg,
             favourite_side: None, favourite_clips: 0, favourite_shares: 0.0,
             favourite_notional: 0.0, last_favourite_secs: f32::INFINITY,
-            tail_clips: 0, tail_notional: 0.0, last_tail_secs: f32::INFINITY,
+            tail_clips: 0, tail_shares: 0.0, tail_notional: 0.0, last_tail_secs: f32::INFINITY,
         }
     }
 
@@ -140,10 +146,20 @@ impl PositionManager {
             }
         }
 
-        // Convex tail leg (cheap opposite side)
+        // Convex tail leg (cheap opposite side). Added only while the locked pair
+        // (favourite_avg_cost + tail_ask) stays under $1, so each tail share paired
+        // with a held favourite share is positive-EV on EITHER resolution. Cheap
+        // tail -> accumulate toward share-balance (convex reversal upside + downside
+        // floor); expensive tail -> the <$1 guard blocks it and we stay directional.
         if let Some(fav) = self.favourite_side {
             let tail_side = opposite(fav);
             let tail_ask = prices.ask(tail_side);
+            let fav_avg = if self.favourite_shares > 0.0 {
+                self.favourite_notional / self.favourite_shares
+            } else {
+                1.0
+            };
+            let pair_cost = fav_avg + tail_ask as f64;
             let tail_refresh_ok = (self.last_tail_secs - secs_to_close).abs() >= self.cfg.tail_refresh_secs
                 || self.tail_clips == 0;
             if self.favourite_notional > 0.0
@@ -152,16 +168,19 @@ impl PositionManager {
                 && secs_to_close >= self.cfg.tail_min_seconds_to_close
                 && tail_ask >= self.cfg.tail_min_ask
                 && tail_ask <= self.cfg.tail_max_ask
+                && pair_cost < 1.0 - self.cfg.tail_min_pair_edge as f64
             {
-                let target = self.favourite_notional * self.cfg.tail_coverage_frac * tail_ask as f64;
-                let clip_usdc = (target - self.tail_notional).max(0.0);
-                let shares = shares_capped(clip_usdc, tail_ask);
+                let target_tail_shares = self.favourite_shares * self.cfg.tail_balance_frac;
+                let remaining = (target_tail_shares - self.tail_shares).max(0.0);
+                let clip_cap = shares_capped(self.cfg.max_clip_usdc, tail_ask);
+                let shares = remaining.min(clip_cap);
                 if shares > 0.0 {
                     legs.push(TargetLeg {
                         side: tail_side, shares,
                         max_depth: self.cfg.tail_sweep_depth, price_ref: tail_ask,
                     });
                     self.tail_clips += 1;
+                    self.tail_shares += shares;
                     self.tail_notional += shares * tail_ask as f64;
                     self.last_tail_secs = secs_to_close;
                 }
@@ -215,6 +234,20 @@ mod tests {
         let inc = pm.plan(Some(&conv(Side::BuyYes, 0.90, 0.06)), &prices(0.92, 0.91, 0.09, 0.07), 60.0);
         let tail = inc.legs.iter().find(|l| l.side == Side::BuyNo).expect("tail leg");
         assert!(tail.shares > 0.0, "cheap tail should size > 0 once favourite exists");
+    }
+
+    #[test]
+    fn tail_blocked_when_pair_cost_would_exceed_one() {
+        let mut pm = PositionManager::new(PositionConfig::default());
+        // Favourite loaded at a high ask (0.95).
+        let _ = pm.plan(Some(&conv(Side::BuyYes, 0.97, 0.02)), &prices(0.95, 0.94, 0.06, 0.04), 100.0);
+        // Tail (NO) ask 0.09 is in range, but pair = 0.95 + 0.09 = 1.04 > $1, so the
+        // positive-EV-either-side guard must block it (no negative-EV lock).
+        let inc = pm.plan(Some(&conv(Side::BuyYes, 0.97, 0.02)), &prices(0.95, 0.94, 0.09, 0.07), 60.0);
+        assert!(
+            inc.legs.iter().all(|l| l.side != Side::BuyNo),
+            "tail must be blocked when favourite_avg + tail_ask >= $1"
+        );
     }
 
     #[test]

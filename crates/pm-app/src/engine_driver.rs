@@ -527,7 +527,9 @@ pub async fn run_engine_backtest(cfg: EngineBacktestCfg) -> Result<EngineBacktes
     let mut traded: std::collections::HashSet<MarketId> = std::collections::HashSet::new();
     let mut orders_submitted = 0usize;
     let mut fills = 0usize;
+    let mut tag_tally: std::collections::BTreeMap<&'static str, usize> = std::collections::BTreeMap::new();
     for (_, kind, market, _) in &engine.trace {
+        *tag_tally.entry(*kind).or_insert(0) += 1;
         match *kind {
             "submit" => {
                 orders_submitted += 1;
@@ -540,6 +542,10 @@ pub async fn run_engine_backtest(cfg: EngineBacktestCfg) -> Result<EngineBacktes
             _ => {}
         }
     }
+    // Diagnostic: proposals = submit + every reject reason; tells us whether br2
+    // stopped proposing or the risk gate rejected.
+    let proposals: usize = tag_tally.iter().filter(|(k, _)| **k != "fill").map(|(_, n)| *n).sum();
+    eprintln!("[engine-diag] trace tags: {tag_tally:?}  (proposals submit+rejects = {proposals})");
 
     Ok(EngineBacktestReport {
         markets_total,

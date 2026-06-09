@@ -239,11 +239,18 @@ impl<S: Strategy> Engine<S> {
                 kind,
             };
 
-            if self.risk.check(&intent, &self.portfolio, &self.marks, &self.exposure, market_key, signed)
-                == RiskDecision::Approve
-            {
-                self.trace.push((clock.now(), "submit", intent.market, intent.shares));
-                ex.submit(intent, clock.now());
+            let decision =
+                self.risk.check(&intent, &self.portfolio, &self.marks, &self.exposure, market_key, signed);
+            match decision {
+                RiskDecision::Approve => {
+                    self.trace.push((clock.now(), "submit", intent.market, intent.shares));
+                    ex.submit(intent, clock.now());
+                }
+                RiskDecision::Reject(reason) => {
+                    // Diagnostic: record rejected proposals so we can tally why
+                    // (proposed-but-rejected) vs not-proposed.
+                    self.trace.push((clock.now(), reason, intent.market, intent.shares));
+                }
             }
         }
     }

@@ -10,22 +10,14 @@ pub mod back_to_explore;
 pub mod convex;
 pub mod bonereaper;
 pub mod bonereaper_v2;
-#[path = "archive/competitor_recycler.rs"]
-pub mod competitor_recycler;
 #[path = "archive/delta_neutral_mm.rs"]
 pub mod delta_neutral_mm;
-#[path = "archive/last_second_snipe.rs"]
-pub mod last_second_snipe;
 #[path = "archive/late_big_bet.rs"]
 pub mod late_big_bet;
 #[path = "archive/late_confirmation.rs"]
 pub mod late_confirmation;
 #[path = "archive/late_convex_tail.rs"]
 pub mod late_convex_tail;
-#[path = "archive/lively_momentum_taker.rs"]
-pub mod lively_momentum_taker;
-#[path = "archive/low_vol_specialist.rs"]
-pub mod low_vol_specialist;
 pub mod paired_mm;
 #[path = "archive/reactive.rs"]
 pub mod reactive;
@@ -170,18 +162,10 @@ pub use convex::{ConvexBookConfig, ConvexBookStrategy};
 pub use convex::position::PositionConfig;
 pub use bonereaper::{BonereaperLite, BonereaperLiteConfig};
 pub use bonereaper_v2::{BonereaperV2, BonereaperV2Config};
-// Archived strategy: kept for historical analysis and quick reactivation.
-pub use competitor_recycler::{CompetitorRecycler, CompetitorRecyclerConfig, PairQuoteMode};
 pub use delta_neutral_mm::{DeltaNeutralMm, DeltaNeutralMmConfig};
-// Archived strategy: kept for historical analysis and quick reactivation.
-pub use last_second_snipe::{LastSecondSnipe, LastSecondSnipeConfig};
 pub use late_big_bet::{LateBigBet, LateBigBetConfig};
 pub use late_confirmation::{LateConfirmation, LateConfirmationConfig};
 pub use late_convex_tail::{LateConvexTail, LateConvexTailConfig};
-// Archived strategy: kept for historical analysis and quick reactivation.
-pub use lively_momentum_taker::{LivelyMomentumTaker, LivelyMomentumTakerConfig};
-// Archived strategy: kept for historical analysis and quick reactivation.
-pub use low_vol_specialist::{LowVolDecisionSurface, LowVolSpecialist, LowVolSpecialistConfig};
 pub use paired_mm::{PairedMmDense, PairedMmDenseConfig};
 pub use reactive::ReactiveDirectional;
 pub use spot_follower::{SpotMomentumFollower, SpotMomentumFollowerConfig};

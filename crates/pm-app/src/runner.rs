@@ -2530,9 +2530,7 @@ fn depth_weighted_fill(event: &ReplayEvent, req: &OrderRequest) -> Option<(f32, 
 }
 
 fn order_requires_model_gate(tag: &str) -> bool {
-    !tag.starts_with("br2_participation_")
-        && tag != "lively_momentum_taker"
-        && !tag.starts_with("pmm_")
+    !tag.starts_with("br2_participation_") && !tag.starts_with("pmm_")
 }
 
 fn fill_respects_limit(side: Side, price: f32, limit_price: Option<f32>) -> bool {
@@ -2653,7 +2651,6 @@ mod tests {
     #[test]
     fn pure_execution_lanes_bypass_generic_model_gate() {
         assert!(!order_requires_model_gate("br2_participation_yes"));
-        assert!(!order_requires_model_gate("lively_momentum_taker"));
         assert!(order_requires_model_gate("br2_late_favourite"));
         assert!(order_requires_model_gate("smf_directional"));
     }

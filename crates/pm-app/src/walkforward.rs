@@ -27,7 +27,6 @@ use pm_strategy::{
     late_big_bet::LateBigBetConfig,
     late_confirmation::LateConfirmationConfig,
     late_convex_tail::LateConvexTailConfig,
-    low_vol_specialist::LowVolDecisionSurface,
     paired_mm::PairedMmDenseConfig,
     reactive::ReactiveDirectionalConfig,
     spot_follower::SpotMomentumFollowerConfig,
@@ -881,10 +880,6 @@ pub struct WalkForwardConfig {
     pub max_per_market_exposure_frac: Option<f64>,
     pub spot_symbol: String,
     pub strategies: Vec<StratId>,
-    pub low_vol_specialist_surface: Option<LowVolDecisionSurface>,
-    pub low_vol_specialist_min_edge: f64,
-    pub low_vol_specialist_min_legacy_edge: f64,
-    pub low_vol_specialist_max_depth: usize,
     pub max_concurrent_fetches: usize,
     /// Optional research-speed replay thinning. `0` keeps every raw event.
     /// Non-zero keeps first/last plus at most one event per interval.
@@ -1087,21 +1082,6 @@ pub struct WalkForwardConfig {
     pub br2_reversal_score_cov_max: f32,
     pub br2_reversal_score_size_floor: f32,
     pub br2_reversal_score_size_ceiling: f32,
-    pub competitor_recycler_child_clip_shares: Option<f64>,
-    pub competitor_recycler_max_leg_shares: Option<f64>,
-    pub competitor_recycler_max_pair_cost: f64,
-    pub competitor_recycler_repair_delta_shares: Option<f64>,
-    pub competitor_recycler_lean_delta_shares: Option<f64>,
-    pub competitor_recycler_stop_secs_before_close: f32,
-    pub competitor_recycler_min_regime_realized_vol_180s_bps: f32,
-    pub competitor_recycler_min_regime_sign_flip_rate: f32,
-    pub competitor_recycler_max_regime_path_efficiency: f32,
-    pub competitor_recycler_max_abs_spot_flow_30s: f64,
-    pub competitor_recycler_stress_warmup_events: u64,
-    pub competitor_recycler_max_attractive_pair_frac_so_far: f64,
-    pub competitor_recycler_min_top_bid_ask_size_ratio: f64,
-    pub competitor_recycler_stress_clip_multiplier: f64,
-    pub competitor_recycler_quote_mode: String,
     pub enforce_model_gate: bool,
     pub model_gate_min_confidence: f32,
     pub model_gate_max_risk: f32,
@@ -1186,10 +1166,6 @@ impl Default for WalkForwardConfig {
             max_per_market_exposure_frac: None,
             spot_symbol: "auto".to_string(),
             strategies: StratId::ACTIVE.to_vec(),
-            low_vol_specialist_surface: None,
-            low_vol_specialist_min_edge: 0.0,
-            low_vol_specialist_min_legacy_edge: f64::NEG_INFINITY,
-            low_vol_specialist_max_depth: 1,
             max_concurrent_fetches: 64,
             replay_sample_ms: 0,
             replay_event_cache_dir: None,
@@ -1355,21 +1331,6 @@ impl Default for WalkForwardConfig {
             br2_reversal_score_cov_max: f32::NAN,
             br2_reversal_score_size_floor: 1.0,
             br2_reversal_score_size_ceiling: 1.0,
-            competitor_recycler_child_clip_shares: None,
-            competitor_recycler_max_leg_shares: None,
-            competitor_recycler_max_pair_cost: 0.970,
-            competitor_recycler_repair_delta_shares: None,
-            competitor_recycler_lean_delta_shares: None,
-            competitor_recycler_stop_secs_before_close: 30.0,
-            competitor_recycler_min_regime_realized_vol_180s_bps: 0.0,
-            competitor_recycler_min_regime_sign_flip_rate: 0.0,
-            competitor_recycler_max_regime_path_efficiency: 1.0,
-            competitor_recycler_max_abs_spot_flow_30s: f64::INFINITY,
-            competitor_recycler_stress_warmup_events: 20,
-            competitor_recycler_max_attractive_pair_frac_so_far: f64::INFINITY,
-            competitor_recycler_min_top_bid_ask_size_ratio: 0.0,
-            competitor_recycler_stress_clip_multiplier: 0.0,
-            competitor_recycler_quote_mode: "passive_bid".to_string(),
             enforce_model_gate: true,
             model_gate_min_confidence: 0.68,
             model_gate_max_risk: 0.72,
@@ -6034,8 +5995,6 @@ debug_signals = true
             .and_then(|v| v.as_array())
             .expect("strategy config missing");
 
-        assert!(shared.get("competitor_recycler_max_pair_cost").is_none());
-        assert!(shared.get("low_vol_specialist_min_edge").is_none());
         assert!(shared.get("spot_symbol").is_none());
         assert!(shared.get("model_btc_whipsaw_risk_weight").is_none());
         assert!(

@@ -10,7 +10,7 @@ use pm_model::MetaTrainingConfig;
 use pm_risk::PortfolioLimits;
 use pm_strategy::{
     BonereaperLite, BonereaperV2, BuyYesAtOpen, DeltaNeutralMm, LateBigBet, LateConfirmation,
-    LateConvexTail, LowVolDecisionSurface, PairedMmDense, ReactiveDirectional,
+    LateConvexTail, PairedMmDense, ReactiveDirectional,
     SpotMomentumFollower, Strategy, bonereaper::BonereaperLiteConfig,
     bonereaper_v2::BonereaperV2Config, delta_neutral_mm::DeltaNeutralMmConfig,
     late_big_bet::LateBigBetConfig, late_confirmation::LateConfirmationConfig,
@@ -381,63 +381,6 @@ enum Cmd {
         /// Allow previously archived strategy identifiers (for historical experiments).
         #[arg(long, default_value_t = false)]
         allow_legacy_strategies: bool,
-        /// JSON decision surface from scripts/low_vol_decision_model.py --out-json.
-        #[arg(long)]
-        low_vol_specialist_model: Option<PathBuf>,
-        /// Minimum predicted win probability edge over entry price for low_vol_specialist.
-        #[arg(long, default_value = "0.0")]
-        low_vol_specialist_min_edge: f64,
-        /// Minimum legacy calibrated edge over entry price for low_vol_specialist.
-        #[arg(long, default_value = "-1000000000.0")]
-        low_vol_specialist_min_legacy_edge: f64,
-        /// Book depth the low_vol_specialist taker order may sweep.
-        #[arg(long, default_value = "1")]
-        low_vol_specialist_max_depth: usize,
-        /// CompetitorRecycler child order size in shares. Omitted derives from max clip.
-        #[arg(long)]
-        competitor_recycler_child_clip_shares: Option<f64>,
-        /// CompetitorRecycler aggregate cap per leg in shares. Omitted derives from max clip.
-        #[arg(long)]
-        competitor_recycler_max_leg_shares: Option<f64>,
-        /// CompetitorRecycler maximum shared YES+NO pair quote cost.
-        #[arg(long, default_value = "0.970")]
-        competitor_recycler_max_pair_cost: f64,
-        /// CompetitorRecycler residual repair threshold in shares. Omitted derives from child clip.
-        #[arg(long)]
-        competitor_recycler_repair_delta_shares: Option<f64>,
-        /// CompetitorRecycler spot-confirmed residual lean allowance in shares. Omitted derives from child clip.
-        #[arg(long)]
-        competitor_recycler_lean_delta_shares: Option<f64>,
-        /// CompetitorRecycler quote pull time before market close.
-        #[arg(long, default_value = "30.0")]
-        competitor_recycler_stop_secs_before_close: f32,
-        /// CompetitorRecycler minimum live 180s BTC realized vol in bps.
-        #[arg(long, default_value = "0.0")]
-        competitor_recycler_min_regime_realized_vol_180s_bps: f32,
-        /// CompetitorRecycler minimum live BTC sign-flip rate.
-        #[arg(long, default_value = "0.0")]
-        competitor_recycler_min_regime_sign_flip_rate: f32,
-        /// CompetitorRecycler maximum live BTC path efficiency.
-        #[arg(long, default_value = "1.0")]
-        competitor_recycler_max_regime_path_efficiency: f32,
-        /// CompetitorRecycler maximum absolute 30s Binance aggressor-flow imbalance.
-        #[arg(long, default_value = "inf")]
-        competitor_recycler_max_abs_spot_flow_30s: f64,
-        /// CompetitorRecycler events before persistent pair-stress gate activates.
-        #[arg(long, default_value = "20")]
-        competitor_recycler_stress_warmup_events: u64,
-        /// CompetitorRecycler max attractive pair fraction before depth-stress gate can pull.
-        #[arg(long, default_value = "inf")]
-        competitor_recycler_max_attractive_pair_frac_so_far: f64,
-        /// CompetitorRecycler minimum top bid/ask size ratio when attractive-pair stress is high.
-        #[arg(long, default_value = "0.0")]
-        competitor_recycler_min_top_bid_ask_size_ratio: f64,
-        /// CompetitorRecycler child-size multiplier under flow/book stress. 0 hard-pulls, 1 leaves size unchanged.
-        #[arg(long, default_value = "0.0")]
-        competitor_recycler_stress_clip_multiplier: f64,
-        /// CompetitorRecycler quote placement: passive_bid, shared_slack_even, or shared_slack_leader.
-        #[arg(long, default_value = "passive_bid")]
-        competitor_recycler_quote_mode: String,
         #[arg(long, default_value = "64")]
         max_concurrent_fetches: usize,
         /// Research-speed replay thinning in milliseconds. 0 keeps every raw event.
@@ -1388,25 +1331,6 @@ async fn main() -> Result<()> {
             spot_symbol,
             strategies,
             allow_legacy_strategies,
-            low_vol_specialist_model,
-            low_vol_specialist_min_edge,
-            low_vol_specialist_min_legacy_edge,
-            low_vol_specialist_max_depth,
-            competitor_recycler_child_clip_shares,
-            competitor_recycler_max_leg_shares,
-            competitor_recycler_max_pair_cost,
-            competitor_recycler_repair_delta_shares,
-            competitor_recycler_lean_delta_shares,
-            competitor_recycler_stop_secs_before_close,
-            competitor_recycler_min_regime_realized_vol_180s_bps,
-            competitor_recycler_min_regime_sign_flip_rate,
-            competitor_recycler_max_regime_path_efficiency,
-            competitor_recycler_max_abs_spot_flow_30s,
-            competitor_recycler_stress_warmup_events,
-            competitor_recycler_max_attractive_pair_frac_so_far,
-            competitor_recycler_min_top_bid_ask_size_ratio,
-            competitor_recycler_stress_clip_multiplier,
-            competitor_recycler_quote_mode,
             max_concurrent_fetches,
             replay_sample_ms,
             taker_latency_ms,
@@ -1584,25 +1508,6 @@ async fn main() -> Result<()> {
                 spot_symbol,
                 strategies,
                 allow_legacy_strategies,
-                low_vol_specialist_model,
-                low_vol_specialist_min_edge,
-                low_vol_specialist_min_legacy_edge,
-                low_vol_specialist_max_depth,
-                competitor_recycler_child_clip_shares,
-                competitor_recycler_max_leg_shares,
-                competitor_recycler_max_pair_cost,
-                competitor_recycler_repair_delta_shares,
-                competitor_recycler_lean_delta_shares,
-                competitor_recycler_stop_secs_before_close,
-                competitor_recycler_min_regime_realized_vol_180s_bps,
-                competitor_recycler_min_regime_sign_flip_rate,
-                competitor_recycler_max_regime_path_efficiency,
-                competitor_recycler_max_abs_spot_flow_30s,
-                competitor_recycler_stress_warmup_events,
-                competitor_recycler_max_attractive_pair_frac_so_far,
-                competitor_recycler_min_top_bid_ask_size_ratio,
-                competitor_recycler_stress_clip_multiplier,
-                competitor_recycler_quote_mode,
                 max_concurrent_fetches,
                 replay_sample_ms,
                 taker_latency_ms,
@@ -2355,25 +2260,6 @@ async fn walk_forward(
     spot_symbol: String,
     strategies_csv: String,
     allow_legacy_strategies: bool,
-    low_vol_specialist_model: Option<PathBuf>,
-    low_vol_specialist_min_edge: f64,
-    low_vol_specialist_min_legacy_edge: f64,
-    low_vol_specialist_max_depth: usize,
-    competitor_recycler_child_clip_shares: Option<f64>,
-    competitor_recycler_max_leg_shares: Option<f64>,
-    competitor_recycler_max_pair_cost: f64,
-    competitor_recycler_repair_delta_shares: Option<f64>,
-    competitor_recycler_lean_delta_shares: Option<f64>,
-    competitor_recycler_stop_secs_before_close: f32,
-    competitor_recycler_min_regime_realized_vol_180s_bps: f32,
-    competitor_recycler_min_regime_sign_flip_rate: f32,
-    competitor_recycler_max_regime_path_efficiency: f32,
-    competitor_recycler_max_abs_spot_flow_30s: f64,
-    competitor_recycler_stress_warmup_events: u64,
-    competitor_recycler_max_attractive_pair_frac_so_far: f64,
-    competitor_recycler_min_top_bid_ask_size_ratio: f64,
-    competitor_recycler_stress_clip_multiplier: f64,
-    competitor_recycler_quote_mode: String,
     max_concurrent_fetches: usize,
     replay_sample_ms: u64,
     taker_latency_ms: u64,
@@ -2603,25 +2489,6 @@ async fn walk_forward(
     }
 
     let strategies = parse_strategies(&strategies_csv, allow_legacy_strategies)?;
-    let low_vol_specialist_surface = if let Some(path) = &low_vol_specialist_model {
-        let file =
-            File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-        let surface: LowVolDecisionSurface = serde_json::from_reader(file)
-            .with_context(|| format!("failed to parse {}", path.display()))?;
-        if !surface.is_valid() {
-            return Err(anyhow!(
-                "invalid low-vol specialist surface: feature, weight, mean, and std lengths must align"
-            ));
-        }
-        tracing::info!(
-            path = %path.display(),
-            features = surface.features.len(),
-            "loaded low-vol specialist surface"
-        );
-        Some(surface)
-    } else {
-        None
-    };
 
     // Load optional strategy profile (currently supports bonereaper_v2 and back_to_explore).
     let selected_profile = if let Some(p) = &profile {
@@ -2681,25 +2548,6 @@ async fn walk_forward(
         max_per_market_exposure_frac,
         spot_symbol,
         strategies,
-        low_vol_specialist_surface,
-        low_vol_specialist_min_edge,
-        low_vol_specialist_min_legacy_edge,
-        low_vol_specialist_max_depth,
-        competitor_recycler_child_clip_shares,
-        competitor_recycler_max_leg_shares,
-        competitor_recycler_max_pair_cost,
-        competitor_recycler_repair_delta_shares,
-        competitor_recycler_lean_delta_shares,
-        competitor_recycler_stop_secs_before_close,
-        competitor_recycler_min_regime_realized_vol_180s_bps,
-        competitor_recycler_min_regime_sign_flip_rate,
-        competitor_recycler_max_regime_path_efficiency,
-        competitor_recycler_max_abs_spot_flow_30s,
-        competitor_recycler_stress_warmup_events,
-        competitor_recycler_max_attractive_pair_frac_so_far,
-        competitor_recycler_min_top_bid_ask_size_ratio,
-        competitor_recycler_stress_clip_multiplier,
-        competitor_recycler_quote_mode,
         max_concurrent_fetches,
         replay_sample_ms,
         taker_latency_ms,

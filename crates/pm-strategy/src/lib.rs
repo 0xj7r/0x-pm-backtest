@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 pub mod back_to_explore;
+pub mod convex;
 pub mod bonereaper;
 pub mod bonereaper_v2;
 #[path = "archive/competitor_recycler.rs"]

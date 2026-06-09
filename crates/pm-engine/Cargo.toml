@@ -15,3 +15,5 @@ pm-types    = { workspace = true }
 pm-strategy = { workspace = true }
 pm-risk     = { workspace = true }
 pm-model    = { workspace = true }
+serde_json  = { workspace = true }
+anyhow      = { workspace = true }

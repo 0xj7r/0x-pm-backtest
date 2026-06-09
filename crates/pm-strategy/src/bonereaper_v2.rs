@@ -710,6 +710,7 @@ impl Default for BonereaperV2Config {
     }
 }
 
+#[derive(Clone)]
 pub struct BonereaperV2 {
     cfg: BonereaperV2Config,
     recent_mids: Ring,
@@ -3521,5 +3522,15 @@ mod tests {
         // invariant for the directional lanes.
         let strat = BonereaperV2::new(BonereaperV2Config::default());
         assert!(strat.directional_overlay_allowed());
+    }
+
+    #[test]
+    fn bonereaper_v2_is_clonable_with_independent_state() {
+        let mut a = BonereaperV2::new(BonereaperV2Config::default());
+        a.late_fires = 2;
+        let b = a.clone();
+        a.late_fires = 99;
+        // Clone is a deep copy: mutating the original must not change the clone.
+        assert_eq!(b.late_fires, 2, "clone must have independent late_fires");
     }
 }

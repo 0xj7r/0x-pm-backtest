@@ -312,6 +312,9 @@ enum Cmd {
         /// Cap on markets (for small fixed slices). Omit to use all discovered.
         #[arg(long)]
         max_markets: Option<usize>,
+        /// Strategy to run: bonereaper_v2 (legacy taker) or convex (directional convex-book).
+        #[arg(long, default_value = "convex")]
+        strategy: String,
     },
     /// Run a walk-forward backtest over many markets.
     WalkForward {
@@ -1297,7 +1300,13 @@ async fn main() -> Result<()> {
             maker_rebate_bps,
             replay_sample_ms,
             max_markets,
+            strategy,
         } => {
+            let strategy_kind = match strategy.as_str() {
+                "bonereaper_v2" | "br2" => engine_driver::StrategyKind::BonereaperV2,
+                "convex" => engine_driver::StrategyKind::Convex,
+                other => anyhow::bail!("unknown --strategy {other} (use bonereaper_v2|convex)"),
+            };
             let report = engine_driver::run_engine_backtest(engine_driver::EngineBacktestCfg {
                 cache_dir: local_cache_dir,
                 start_date,
@@ -1312,6 +1321,7 @@ async fn main() -> Result<()> {
                 maker_rebate_bps,
                 replay_sample_ms,
                 max_markets,
+                strategy: strategy_kind,
             })
             .await?;
             let pnl = report.final_equity_usd - report.starting_cash_usd;

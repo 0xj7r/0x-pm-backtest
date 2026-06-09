@@ -167,6 +167,7 @@ pub trait Strategy {
 
 pub use back_to_explore::{BackToExploreConfig, BackToExploreTaker};
 pub use convex::{ConvexBookConfig, ConvexBookStrategy};
+pub use convex::position::PositionConfig;
 pub use bonereaper::{BonereaperLite, BonereaperLiteConfig};
 pub use bonereaper_v2::{BonereaperV2, BonereaperV2Config};
 // Archived strategy: kept for historical analysis and quick reactivation.

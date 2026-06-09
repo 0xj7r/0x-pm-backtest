@@ -24,7 +24,7 @@ use pm_engine::risk::{RiskGate, RiskLimits};
 use pm_engine::seams::SimClock;
 use pm_engine::sim_exchange::{SimExchange, SimExchangeConfig};
 use pm_model::{ModelConfig, ModelMarketContext};
-use pm_strategy::{BonereaperV2, BonereaperV2Config};
+use pm_strategy::{BonereaperV2, BonereaperV2Config, ConvexBookStrategy, ConvexBookConfig, PositionConfig, Strategy};
 use pm_telonex_loader::{
     Channel, TelonexStore, load_binance_agg_trades_async, load_book_snapshot_async,
     load_pm_trades_async, resolve_binance_day, resolve_pm_trades_day,
@@ -191,6 +191,12 @@ pub fn split_yes_no(
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum StrategyKind {
+    BonereaperV2,
+    Convex,
+}
+
 /// Configuration for a standalone pm-engine BTC-5m backtest run.
 pub struct EngineBacktestCfg {
     pub cache_dir: PathBuf,
@@ -208,6 +214,7 @@ pub struct EngineBacktestCfg {
     pub replay_sample_ms: i64,
     /// Cap on markets processed (for small fixed slices / quick runs).
     pub max_markets: Option<usize>,
+    pub strategy: StrategyKind,
 }
 
 /// Headline numbers from an engine backtest run.
@@ -439,9 +446,75 @@ async fn load_window_spot(
     SpotHistory::new(ticks)
 }
 
-/// Run br2 through the shared engine over real BTC-5m data with the both-book
-/// fill model. Standalone (no champion byte-reproduction); reports the trace +
-/// P&L for the both-book delta vs the old synthetic-NO run.
+/// Strategy-agnostic engine core: build engine from a template strategy + pre-computed
+/// inputs, run the feed, tally the trace, and return the report.
+fn run_engine_with<S: Strategy + Clone>(
+    template: S,
+    cfg: &EngineBacktestCfg,
+    enricher: CtxEnricher,
+    all_events: Vec<EngineEvent>,
+    prior_map: HashMap<MarketId, PriorRanges>,
+    meta_map: HashMap<MarketId, MarketMeta>,
+    trades_map: HashMap<MarketId, TradeHistory>,
+    spot: pm_types::SpotHistory,
+    markets_total: usize,
+) -> EngineBacktestReport {
+    let mut engine = Engine::new(
+        template,
+        Portfolio::new(cfg.starting_cash),
+        RiskGate { limits: engine_risk_limits(cfg.max_clip_usdc) },
+        classify_btc,
+    )
+    .with_enricher(enricher, spot, TradeHistory::default(), PriorRanges::default())
+    .with_market_meta(meta_map)
+    .with_market_prior_ranges(prior_map)
+    .with_market_trades(trades_map);
+
+    let clock_cell = Rc::new(Cell::new(0i64));
+    let mut feed = SliceFeed::with_clock(all_events, clock_cell.clone());
+    let clock = SimClock { ts: clock_cell };
+    let mut sim = SimExchange::new(SimExchangeConfig {
+        taker_latency_ms: cfg.taker_latency_ms,
+        taker_fee_bps: cfg.taker_fee_bps,
+        maker_rebate_bps: cfg.maker_rebate_bps,
+    });
+    engine.run(&mut feed, &mut sim, &clock);
+
+    let mut traded: std::collections::HashSet<MarketId> = std::collections::HashSet::new();
+    let mut orders_submitted = 0usize;
+    let mut fills = 0usize;
+    let mut tag_tally: std::collections::BTreeMap<&'static str, usize> = std::collections::BTreeMap::new();
+    for (_, kind, market, _) in &engine.trace {
+        *tag_tally.entry(*kind).or_insert(0) += 1;
+        match *kind {
+            "submit" => {
+                orders_submitted += 1;
+                traded.insert(*market);
+            }
+            "fill" => {
+                fills += 1;
+                traded.insert(*market);
+            }
+            _ => {}
+        }
+    }
+    let proposals: usize = tag_tally.iter().filter(|(k, _)| **k != "fill").map(|(_, n)| *n).sum();
+    eprintln!("[engine-diag] trace tags: {tag_tally:?}  (proposals submit+rejects = {proposals})");
+
+    EngineBacktestReport {
+        markets_total,
+        markets_traded: traded.len(),
+        orders_submitted,
+        fills,
+        starting_cash_usd: cfg.starting_cash,
+        final_equity_usd: engine.portfolio.free_cash_usd(),
+        trace: engine.trace,
+    }
+}
+
+/// Run an engine backtest over real BTC-5m data with the both-book fill model.
+/// Strategy-agnostic discovery/loading is performed once; then `cfg.strategy`
+/// selects which template to run.
 pub async fn run_engine_backtest(cfg: EngineBacktestCfg) -> Result<EngineBacktestReport> {
     let store = TelonexStore::try_new_local(cfg.cache_dir.clone())?;
     let store_arc = store.store();
@@ -498,64 +571,29 @@ pub async fn run_engine_backtest(cfg: EngineBacktestCfg) -> Result<EngineBacktes
         ModelConfig::default(),
         ModelMarketContext::default(),
     )?;
-    let strat = BonereaperV2::new(BonereaperV2Config {
-        bankroll_usdc: cfg.starting_cash,
-        max_clip_usdc: cfg.max_clip_usdc,
-        ..Default::default()
-    });
-    let mut engine = Engine::new(
-        strat,
-        Portfolio::new(cfg.starting_cash),
-        RiskGate { limits: engine_risk_limits(cfg.max_clip_usdc) },
-        classify_btc,
-    )
-    .with_enricher(enricher, spot, TradeHistory::default(), PriorRanges::default())
-    .with_market_meta(meta_map)
-    .with_market_prior_ranges(prior_map)
-    .with_market_trades(trades_map);
 
-    let clock_cell = Rc::new(Cell::new(0i64));
-    let mut feed = SliceFeed::with_clock(all_events, clock_cell.clone());
-    let clock = SimClock { ts: clock_cell };
-    let mut sim = SimExchange::new(SimExchangeConfig {
-        taker_latency_ms: cfg.taker_latency_ms,
-        taker_fee_bps: cfg.taker_fee_bps,
-        maker_rebate_bps: cfg.maker_rebate_bps,
-    });
-    engine.run(&mut feed, &mut sim, &clock);
-
-    let mut traded: std::collections::HashSet<MarketId> = std::collections::HashSet::new();
-    let mut orders_submitted = 0usize;
-    let mut fills = 0usize;
-    let mut tag_tally: std::collections::BTreeMap<&'static str, usize> = std::collections::BTreeMap::new();
-    for (_, kind, market, _) in &engine.trace {
-        *tag_tally.entry(*kind).or_insert(0) += 1;
-        match *kind {
-            "submit" => {
-                orders_submitted += 1;
-                traded.insert(*market);
-            }
-            "fill" => {
-                fills += 1;
-                traded.insert(*market);
-            }
-            _ => {}
+    let report = match cfg.strategy {
+        StrategyKind::BonereaperV2 => {
+            let template = BonereaperV2::new(BonereaperV2Config {
+                bankroll_usdc: cfg.starting_cash,
+                max_clip_usdc: cfg.max_clip_usdc,
+                ..Default::default()
+            });
+            run_engine_with(template, &cfg, enricher, all_events, prior_map, meta_map, trades_map, spot, markets_total)
         }
-    }
-    // Diagnostic: proposals = submit + every reject reason; tells us whether br2
-    // stopped proposing or the risk gate rejected.
-    let proposals: usize = tag_tally.iter().filter(|(k, _)| **k != "fill").map(|(_, n)| *n).sum();
-    eprintln!("[engine-diag] trace tags: {tag_tally:?}  (proposals submit+rejects = {proposals})");
-
-    Ok(EngineBacktestReport {
-        markets_total,
-        markets_traded: traded.len(),
-        orders_submitted,
-        fills,
-        starting_cash_usd: cfg.starting_cash,
-        final_equity_usd: engine.portfolio.free_cash_usd(),
-        trace: engine.trace,
-    })
+        StrategyKind::Convex => {
+            let template = ConvexBookStrategy::new(ConvexBookConfig {
+                position: PositionConfig {
+                    bankroll_usdc: cfg.starting_cash,
+                    max_clip_usdc: cfg.max_clip_usdc,
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+            run_engine_with(template, &cfg, enricher, all_events, prior_map, meta_map, trades_map, spot, markets_total)
+        }
+    };
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -749,6 +787,7 @@ mod tests {
             maker_rebate_bps: 0.0,
             replay_sample_ms: 1000,
             max_markets: Some(40),
+            strategy: StrategyKind::BonereaperV2,
         };
         let r1 = run_engine_backtest(mk()).await.expect("engine run 1");
         let r2 = run_engine_backtest(mk()).await.expect("engine run 2");

@@ -44,8 +44,14 @@ pub struct Engine<S: Strategy> {
     /// Optional enricher that populates regime/model/prior-range Ctx fields.
     /// None in Phase-1 tests; set via `with_enricher` for the backtest driver.
     enricher: Option<CtxEnricher>,
-    /// Prior-range values supplied by the driver (one set per engine instance).
+    /// Prior-range values supplied by the driver (fallback when a market has no
+    /// per-market entry in `prior_ranges_by_market`).
     prior_ranges: PriorRanges,
+    /// Per-market prior market-range features. Empty → use `prior_ranges`.
+    prior_ranges_by_market: HashMap<MarketId, PriorRanges>,
+    /// Per-market PM trade tape passed to the strategy (br2 reads it for
+    /// trade-flow). Empty → use `trades`.
+    trades_by_market: HashMap<MarketId, TradeHistory>,
     /// Order/fill trace for determinism testing and diagnostics.
     pub trace: Vec<(i64, &'static str, MarketId, f64)>,
 }
@@ -71,6 +77,8 @@ impl<S: Strategy> Engine<S> {
             classify,
             enricher: None,
             prior_ranges: PriorRanges::default(),
+            prior_ranges_by_market: HashMap::new(),
+            trades_by_market: HashMap::new(),
             trace: Vec::new(),
         }
     }
@@ -100,6 +108,21 @@ impl<S: Strategy> Engine<S> {
     /// resolution from `yes_mid` (the Phase-1 behavior).
     pub fn with_market_meta(mut self, meta: HashMap<MarketId, MarketMeta>) -> Self {
         self.market_meta = meta;
+        self
+    }
+
+    /// Attach per-market prior market-range features. Without it the engine uses
+    /// the single `prior_ranges` from `with_enricher` for every market.
+    pub fn with_market_prior_ranges(mut self, ranges: HashMap<MarketId, PriorRanges>) -> Self {
+        self.prior_ranges_by_market = ranges;
+        self
+    }
+
+    /// Attach per-market PM trade tapes. br2 reads the `trades` argument for its
+    /// trade-flow feature, so each market must see its own tape; without this the
+    /// engine passes the single `trades` from `with_enricher` (empty by default).
+    pub fn with_market_trades(mut self, trades: HashMap<MarketId, TradeHistory>) -> Self {
+        self.trades_by_market = trades;
         self
     }
 
@@ -162,6 +185,12 @@ impl<S: Strategy> Engine<S> {
             &self.exposure,
         );
 
+        let prior = self
+            .prior_ranges_by_market
+            .get(&e.market_id)
+            .copied()
+            .unwrap_or(self.prior_ranges);
+
         if let Some(enricher) = &mut self.enricher {
             enricher.fill_regime(&mut ctx, e.ts_ns, &self.spot);
 
@@ -170,10 +199,11 @@ impl<S: Strategy> Engine<S> {
             let secs_since_open = ((e.ts_ns - open_ns).max(0) as f64 / 1e9) as i64;
             enricher.fill_model(&mut ctx, e, e.ts_ns, secs_since_open, &self.spot);
 
-            enricher.fill_prior_range(&mut ctx, self.prior_ranges);
+            enricher.fill_prior_range(&mut ctx, prior);
         }
 
-        let (out, _model) = self.strategy.on_event_scored(e, &ctx, &self.spot, &self.trades);
+        let trades = self.trades_by_market.get(&e.market_id).unwrap_or(&self.trades);
+        let (out, _model) = self.strategy.on_event_scored(e, &ctx, &self.spot, trades);
 
         let market_key = ExposureKey { token, window };
         for req in out.orders {

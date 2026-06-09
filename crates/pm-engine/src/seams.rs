@@ -43,6 +43,7 @@ pub struct FillReport {
     pub shares: f64,
     /// Executed price in YES terms (NO fills are reported as their NO price).
     pub price: f32,
+    /// USD fee on this fill. Positive = fee charged; negative = maker rebate credited.
     pub fee_usd: f64,
     pub liquidity: FillLiquidity,
     pub ts: Ts,

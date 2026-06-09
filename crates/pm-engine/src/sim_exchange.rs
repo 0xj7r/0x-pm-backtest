@@ -110,6 +110,43 @@ impl SimExchange {
         Some(((notional / filled) as f32, filled))
     }
 
+    fn push_taker_fill(&mut self, order: &OrderIntent, price: f32, shares: f64, ts: Ts) {
+        let notional = shares * price as f64;
+        let fee_usd = notional * self.cfg.taker_fee_bps / 10_000.0;
+        self.pending_fills.push(PendingFill {
+            report: FillReport {
+                order: order.id,
+                market: order.market,
+                side: order.side,
+                shares,
+                price,
+                fee_usd,
+                liquidity: FillLiquidity::Taker,
+                ts,
+            },
+            realize_ts: ts,
+        });
+    }
+
+    fn push_maker_fill(&mut self, r: &RestingOrder, shares: f64, ts: Ts) {
+        let fill_price = maker_fill_price(r.side, r.limit_price);
+        let notional = shares * fill_price as f64;
+        let fee_usd = -(notional * self.cfg.maker_rebate_bps / 10_000.0);
+        self.pending_fills.push(PendingFill {
+            report: FillReport {
+                order: r.id,
+                market: r.market,
+                side: r.side,
+                shares,
+                price: fill_price,
+                fee_usd,
+                liquidity: FillLiquidity::Maker,
+                ts,
+            },
+            realize_ts: ts,
+        });
+    }
+
     /// Drain pending takers whose `realize_ts <= now`, pricing each against the
     /// current book (re-read at realize time, not locked at submit time).
     fn realize_pending_takers(&mut self, now: Ts) {
@@ -135,21 +172,7 @@ impl SimExchange {
             ) else {
                 continue;
             };
-            let notional = filled_shares * price as f64;
-            let fee_usd = notional * self.cfg.taker_fee_bps / 10_000.0;
-            self.pending_fills.push(PendingFill {
-                report: FillReport {
-                    order: pt.order.id,
-                    market: pt.order.market,
-                    side: pt.order.side,
-                    shares: filled_shares,
-                    price,
-                    fee_usd,
-                    liquidity: FillLiquidity::Taker,
-                    ts: pt.realize_ts,
-                },
-                realize_ts: pt.realize_ts,
-            });
+            self.push_taker_fill(&pt.order, price, filled_shares, pt.realize_ts);
         }
     }
 
@@ -176,23 +199,8 @@ impl SimExchange {
                 i += 1;
                 continue;
             }
-            let fill_price = maker_fill_price(r.side, r.limit_price);
-            let notional = r.shares * fill_price as f64;
-            let rebate = notional * self.cfg.maker_rebate_bps / 10_000.0;
-            let fee_usd = -rebate;
-            self.pending_fills.push(PendingFill {
-                report: FillReport {
-                    order: r.id,
-                    market: r.market,
-                    side: r.side,
-                    shares: r.shares,
-                    price: fill_price,
-                    fee_usd,
-                    liquidity: FillLiquidity::Maker,
-                    ts: now,
-                },
-                realize_ts: now,
-            });
+            self.push_maker_fill(&r, r.shares, now);
+            // swap_remove is deterministic; intra-tick emission order is not insertion-order, but downstream accounting is order-independent.
             self.resting.swap_remove(i);
         }
     }
@@ -230,23 +238,7 @@ impl SimExchange {
                 continue;
             }
             let fill_shares = remaining.min(r.shares);
-            let fill_price = maker_fill_price(r.side, r.limit_price);
-            let notional = fill_shares * fill_price as f64;
-            let rebate = notional * self.cfg.maker_rebate_bps / 10_000.0;
-            let fee_usd = -rebate;
-            self.pending_fills.push(PendingFill {
-                report: FillReport {
-                    order: r.id,
-                    market: r.market,
-                    side: r.side,
-                    shares: fill_shares,
-                    price: fill_price,
-                    fee_usd,
-                    liquidity: FillLiquidity::Maker,
-                    ts: now,
-                },
-                realize_ts: now,
-            });
+            self.push_maker_fill(&r, fill_shares, now);
             remaining -= fill_shares;
             if fill_shares >= self.resting[i].shares {
                 self.resting.swap_remove(i);
@@ -324,21 +316,7 @@ impl Exchange for SimExchange {
             ) else {
                 return SubmitAck::Rejected;
             };
-            let notional = filled_shares * price as f64;
-            let fee_usd = notional * self.cfg.taker_fee_bps / 10_000.0;
-            self.pending_fills.push(PendingFill {
-                report: FillReport {
-                    order: order.id,
-                    market: order.market,
-                    side: order.side,
-                    shares: filled_shares,
-                    price,
-                    fee_usd,
-                    liquidity: FillLiquidity::Taker,
-                    ts: now,
-                },
-                realize_ts: now,
-            });
+            self.push_taker_fill(&order, price, filled_shares, now);
         } else {
             let realize_ts = now + self.cfg.taker_latency_ms as i64 * 1_000_000;
             self.pending_takers.push(PendingTaker { order, realize_ts });
@@ -720,5 +698,46 @@ mod tests {
             fills[0].price
         );
         assert!((fills[0].shares - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn maker_rebate_is_negative_fee_usd() {
+        let rebate_bps = 50.0_f64;
+        let mut ex = SimExchange::new(SimExchangeConfig {
+            taker_latency_ms: 0,
+            taker_fee_bps: 0.0,
+            maker_rebate_bps: rebate_bps,
+        });
+        // Resting BuyYes at 0.55; 100 shares.
+        ex.on_book(MarketId(0), &ev(0.60, 1000.0), &NoBook::default(), 1000);
+        ex.submit(
+            OrderIntent {
+                id: OrderId(10),
+                market: MarketId(0),
+                side: Side::BuyYes,
+                shares: 100.0,
+                max_depth: 1,
+                limit_price: Some(0.55),
+                tag: "m",
+                kind: IntentKind::Entry,
+            },
+            1000,
+        );
+        // Book crosses below limit to trigger the fill.
+        ex.on_book(MarketId(0), &ev(0.54, 1000.0), &NoBook::default(), 2000);
+        let fills = ex.poll_fills(2000);
+        assert_eq!(fills.len(), 1);
+        // Rebate must be credited (negative fee_usd).
+        assert!(fills[0].fee_usd < 0.0, "expected negative fee_usd (rebate), got {}", fills[0].fee_usd);
+        // fill_price for BuyYes = limit_price = 0.55 (f32); cast to f64 for notional.
+        let fill_price = 0.55_f32 as f64;
+        let notional = 100.0_f64 * fill_price;
+        let expected = -(notional * rebate_bps / 10_000.0);
+        assert!(
+            (fills[0].fee_usd - expected).abs() < 1e-9,
+            "expected rebate {:.10}, got {:.10}",
+            expected,
+            fills[0].fee_usd
+        );
     }
 }

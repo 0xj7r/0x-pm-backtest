@@ -30,6 +30,8 @@ pub struct AlphaArgs {
     pub notional_usdc: f64,
     pub decision_dt_ms: u64,
     pub stop_before_close_s: u32,
+    pub max_clips: u32,
+    pub clip_cooldown_ms: u64,
     pub vol_lookback_s: u32,
     pub momentum_lookback_s: u32,
     pub momentum_weight: f64,
@@ -267,6 +269,8 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
         notional_usdc: args.notional_usdc,
         decision_dt_ms: args.decision_dt_ms,
         stop_before_close_s: args.stop_before_close_s,
+        max_clips: args.max_clips,
+        clip_cooldown_ms: args.clip_cooldown_ms,
         collect_training: false,
         train_sample_dt_s: 15,
     };
@@ -355,10 +359,11 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
         let mut f = std::fs::File::create(path)?;
         use std::io::Write as _;
         for (meta, out) in &eval_out.per_cell[0] {
-            if let Some(t) = &out.trade {
+            for t in &out.trades {
                 let row = serde_json::json!({
                     "token": meta.token, "window_secs": meta.window_secs,
                     "open_ts_ns": meta.open_ts_ns, "strike": meta.strike,
+                    "regime": out.regime.map(|r| r.as_str()),
                     "side": t.side, "decision_ts_ns": t.decision_ts_ns,
                     "fill_ts_ns": t.fill_ts_ns, "avg_price": t.avg_price,
                     "shares": t.shares, "p_exo": t.p_exo,
@@ -431,6 +436,19 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
                     r.log_loss_book
                 );
             }
+        }
+    }
+    if let Some(last) = sweep.last() {
+        println!("regime cells (latency {}ms, thr {}):", last.latency_ms, last.edge_threshold);
+        for (cell, r) in &last.report.regime_cells {
+            println!(
+                "  {cell}: n={} trades={} pnl={:.2} per={:.3} hit={:.1}%",
+                r.n_markets,
+                r.n_trades,
+                r.total_pnl,
+                r.mean_pnl_per_trade,
+                r.hit_rate * 100.0
+            );
         }
     }
 

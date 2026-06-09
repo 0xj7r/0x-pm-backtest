@@ -48,6 +48,10 @@ pub struct HarnessConfig {
     pub decision_dt_ms: u64,
     /// No entries within this many seconds of resolution.
     pub stop_before_close_s: u32,
+    /// Max laddered clip entries per market (1 = single entry).
+    pub max_clips: u32,
+    /// Minimum time between clip entries.
+    pub clip_cooldown_ms: u64,
     /// Emit calibrator training samples (features + raw base p + outcome).
     pub collect_training: bool,
     /// Cadence of training-sample collection (seconds into the window).
@@ -63,6 +67,8 @@ impl Default for HarnessConfig {
             notional_usdc: 50.0,
             decision_dt_ms: 1000,
             stop_before_close_s: 10,
+            max_clips: 1,
+            clip_cooldown_ms: 5000,
             collect_training: false,
             train_sample_dt_s: 15,
         }
@@ -108,8 +114,11 @@ pub struct ProbSample {
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct MarketRunOutput {
-    pub trade: Option<TradeRecord>,
+    /// Laddered clip entries, in fill order (empty when no entry).
+    pub trades: Vec<TradeRecord>,
     pub samples: Vec<ProbSample>,
+    /// Exogenous regime at window open (None when spot history is too thin).
+    pub regime: Option<crate::regime::Regime>,
     /// True when the model produced at least one belief during the window.
     pub had_belief: bool,
     /// Calibrator training samples (only when `collect_training` is set).

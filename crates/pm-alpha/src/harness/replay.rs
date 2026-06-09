@@ -133,18 +133,29 @@ fn belief_pass(
     pass
 }
 
-/// Execute one (latency, threshold) combination against a shared belief pass.
+/// Execute one (latency, threshold) combination against a shared belief
+/// pass, laddering up to `max_clips` entries separated by the cooldown.
 fn execute(
     series: &MarketSeries,
     pass: &BeliefPass,
     latency_ms: u64,
     edge_threshold: f64,
     cfg: &HarnessConfig,
-) -> Option<TradeRecord> {
+) -> Vec<TradeRecord> {
     let close_ns = series.meta.close_ts_ns;
     let latency_ns = latency_ms as i64 * 1_000_000;
+    let cooldown_ns = cfg.clip_cooldown_ms as i64 * 1_000_000;
+    let max_clips = cfg.max_clips.max(1) as usize;
+    let mut trades: Vec<TradeRecord> = Vec::new();
+    let mut next_entry_ns = i64::MIN;
 
     for d in &pass.decisions {
+        if trades.len() >= max_clips {
+            break;
+        }
+        if d.ts_ns < next_entry_ns {
+            continue;
+        }
         // Edge per side against touch prices (entry test; fill walks depth).
         let edge_yes = d.p_up - d.yes_ask;
         let edge_no = d.yes_bid - d.p_up; // buy NO at 1 - bid
@@ -176,6 +187,7 @@ fn execute(
         };
         let payout = if won { 1.0 } else { 0.0 };
         let pnl = shares * (payout - avg_price) - fee;
+        next_entry_ns = d.ts_ns + cooldown_ns;
         let mark_60s = series.ticks[d.tick_idx..]
             .iter()
             .find(|t| t.ts_ns >= fill_tick.ts_ns + 60_000_000_000)
@@ -185,7 +197,7 @@ fn execute(
                 Side::No => 1.0 - m,
             });
 
-        return Some(TradeRecord {
+        trades.push(TradeRecord {
             side,
             decision_ts_ns: d.ts_ns,
             fill_ts_ns: fill_tick.ts_ns,
@@ -199,7 +211,7 @@ fn execute(
             mark_60s,
         });
     }
-    None
+    trades
 }
 
 /// Run one market across a latency x threshold grid, computing the belief
@@ -220,6 +232,7 @@ pub fn run_market_grid(
         return outputs;
     }
     let pass = belief_pass(series, spot, model, cfg);
+    let regime = crate::regime::classify(spot, series.meta.open_ts_ns);
     let mut first = true;
     for &latency_ms in latencies_ms {
         for &threshold in edge_thresholds {
@@ -232,10 +245,11 @@ pub fn run_market_grid(
             };
             first = false;
             outputs.push(MarketRunOutput {
-                trade: execute(series, &pass, latency_ms, threshold, cfg),
+                trades: execute(series, &pass, latency_ms, threshold, cfg),
                 samples: pass.samples.clone(),
                 had_belief: pass.had_belief,
                 train_samples,
+                regime,
             });
         }
     }

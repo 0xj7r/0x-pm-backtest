@@ -17,6 +17,8 @@ fn log_loss_term(p_yes: f64, resolved_yes: bool) -> f64 {
 pub struct CellReport {
     pub n_markets: usize,
     pub n_with_belief: usize,
+    /// Markets with at least one clip filled.
+    pub n_markets_traded: usize,
     pub n_trades: usize,
     pub n_wins: usize,
     pub total_pnl: f64,
@@ -63,6 +65,8 @@ impl PartialOrd for Token {
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct HuntReport {
     pub cells: BTreeMap<String, CellReport>,
+    /// Cells additionally split by exogenous regime at window open.
+    pub regime_cells: BTreeMap<String, CellReport>,
     pub aggregate: CellReport,
 }
 
@@ -79,7 +83,10 @@ impl Accum {
         if out.had_belief {
             self.report.n_with_belief += 1;
         }
-        if let Some(t) = &out.trade {
+        if !out.trades.is_empty() {
+            self.report.n_markets_traded += 1;
+        }
+        for t in &out.trades {
             self.report.n_trades += 1;
             if t.won {
                 self.report.n_wins += 1;
@@ -107,6 +114,7 @@ pub fn aggregate<'a>(
     results: impl IntoIterator<Item = (&'a crate::state::MarketMeta, &'a MarketRunOutput)>,
 ) -> HuntReport {
     let mut cells: BTreeMap<CellKey, Accum> = BTreeMap::new();
+    let mut regime_cells: BTreeMap<String, Accum> = BTreeMap::new();
     let mut agg = Accum::default();
     for (meta, out) in results {
         let key = CellKey {
@@ -114,6 +122,11 @@ pub fn aggregate<'a>(
             window_secs: meta.window_secs,
         };
         cells.entry(key).or_default().add(out);
+        let regime = out.regime.map(|r| r.as_str()).unwrap_or("unknown");
+        regime_cells
+            .entry(format!("{}-{}s|{}", meta.token.as_str(), meta.window_secs, regime))
+            .or_default()
+            .add(out);
         agg.add(out);
     }
     HuntReport {
@@ -125,6 +138,10 @@ pub fn aggregate<'a>(
                     v.finalize(),
                 )
             })
+            .collect(),
+        regime_cells: regime_cells
+            .into_iter()
+            .map(|(k, v)| (k, v.finalize()))
             .collect(),
         aggregate: agg.finalize(),
     }
@@ -148,7 +165,7 @@ mod tests {
 
     fn output(pnl: f64, won: bool, p_exo: f64, p_book: f64) -> MarketRunOutput {
         MarketRunOutput {
-            trade: Some(TradeRecord {
+            trades: vec![TradeRecord {
                 side: Side::Yes,
                 decision_ts_ns: 0,
                 fill_ts_ns: 0,
@@ -160,7 +177,7 @@ mod tests {
                 pnl,
                 won,
                 mark_60s: None,
-            }),
+            }],
             samples: vec![ProbSample {
                 ts_ns: 60_000_000_000,
                 p_exo,
@@ -169,6 +186,7 @@ mod tests {
             }],
             had_belief: true,
             train_samples: Vec::new(),
+            regime: None,
         }
     }
 

@@ -237,6 +237,6 @@ mod tests {
                 ..HarnessConfig::default()
             },
         );
-        assert!(out.trade.is_none());
+        assert!(out.trades.is_empty());
     }
 }

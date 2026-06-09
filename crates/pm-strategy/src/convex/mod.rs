@@ -7,7 +7,7 @@ use crate::{Ctx, Side, Strategy, StrategyOutput};
 use pm_model::ModelOutput;
 use pm_types::{ReplayEvent, SpotHistory, TradeHistory};
 
-use signal::{evaluate, SignalGate, Conviction};
+use signal::{evaluate, SignalGate};
 use position::{BothBookPrices, PositionConfig, PositionManager};
 use execution::{ExecutionPolicy, Posture};
 
@@ -30,9 +30,6 @@ pub struct ConvexBookStrategy {
     signal: SignalGate,
     position: PositionManager,
     execution_posture: Posture,
-    /// Last confirmed conviction; retained so the tail checker can run on
-    /// ticks where the signal gate fails but inventory is already loaded.
-    last_conv: Option<Conviction>,
 }
 
 impl ConvexBookStrategy {
@@ -41,7 +38,6 @@ impl ConvexBookStrategy {
             signal: cfg.signal,
             position: PositionManager::new(cfg.position),
             execution_posture: cfg.posture,
-            last_conv: None,
         }
     }
 }
@@ -58,14 +54,11 @@ impl Strategy for ConvexBookStrategy {
         };
         let favourite = if event.yes_mid >= 0.5 { Side::BuyYes } else { Side::BuyNo };
         let fav_ask = prices.ask(favourite);
+        // Re-gate the favourite by current model support every tick (br2 parity).
+        // `fresh` is None when the model no longer supports the favourite; the
+        // tail still fires off existing inventory in that case.
         let fresh = evaluate(ctx, event.yes_mid, fav_ask, &self.signal);
-        if let Some(c) = fresh {
-            self.last_conv = Some(c);
-        }
-        let Some(conv) = self.last_conv else {
-            return StrategyOutput::hold();
-        };
-        let target = self.position.plan(&conv, &prices, secs_to_close);
+        let target = self.position.plan(fresh.as_ref(), &prices, secs_to_close);
         if target.legs.is_empty() {
             return StrategyOutput::hold();
         }

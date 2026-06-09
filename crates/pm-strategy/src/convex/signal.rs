@@ -15,6 +15,8 @@ impl Default for SignalGate {
 }
 
 /// Directional conviction for the favoured outcome of one market.
+/// `side_p`/`edge`/`confidence`/`risk` are reserved for Plan 4 sizing-curve tuning
+/// (conviction-scaled clip sizing); only `favourite` drives v1 sizing.
 #[derive(Debug, Clone, Copy)]
 pub struct Conviction {
     pub favourite: Side,

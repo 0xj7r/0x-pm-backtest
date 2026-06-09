@@ -19,7 +19,8 @@ pub struct ConvexBookConfig {
 }
 impl Default for ConvexBookConfig {
     fn default() -> Self {
-        Self { signal: SignalGate::default(), position: PositionConfig::default(), posture: Posture::Adaptive }
+        // Taker: the directional edge is captured by crossing the spread, not resting.
+        Self { signal: SignalGate::default(), position: PositionConfig::default(), posture: Posture::Taker }
     }
 }
 
@@ -78,6 +79,12 @@ mod tests {
     use crate::{Ctx, Side, Strategy};
     use pm_model::ModelOutput;
     use pm_types::{MarketId, ReplayEvent, ReplayFlags, SpotHistory, TradeHistory};
+
+    #[test]
+    fn default_posture_is_taker() {
+        // The directional edge is captured by crossing the spread, not resting.
+        assert!(matches!(ConvexBookConfig::default().posture, execution::Posture::Taker));
+    }
 
     fn event_at(secs_to_close: f32, yes_ask: f32, yes_bid: f32) -> (ReplayEvent, Ctx) {
         let close_ns = 1_000_000_000_000i64;

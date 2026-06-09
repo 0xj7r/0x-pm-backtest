@@ -9,7 +9,7 @@ mod replay;
 mod types;
 
 pub use metrics::{CellReport, HuntReport, aggregate};
-pub use replay::run_market;
+pub use replay::{run_market, run_market_grid};
 pub use types::{
     BookTick, HarnessConfig, MarketRunOutput, MarketSeries, ProbSample, Side, TradeRecord,
 };

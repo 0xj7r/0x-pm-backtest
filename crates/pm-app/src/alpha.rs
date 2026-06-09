@@ -3,7 +3,7 @@
 //! runs fit in memory.
 
 use anyhow::{Context, Result, anyhow};
-use pm_alpha::harness::{BookTick, HarnessConfig, HuntReport, MarketRunOutput, MarketSeries, aggregate, run_market};
+use pm_alpha::harness::{BookTick, HarnessConfig, HuntReport, MarketRunOutput, MarketSeries, aggregate, run_market_grid};
 use pm_alpha::{AlphaModelConfig, MarketMeta, Token};
 use pm_telonex_loader::TelonexStore;
 use pm_types::MarketId;
@@ -25,7 +25,7 @@ pub struct AlphaArgs {
     pub max_markets: usize,
     pub replay_event_cache_dir: Option<PathBuf>,
     pub latencies_ms: Vec<u64>,
-    pub edge_threshold: f64,
+    pub edge_thresholds: Vec<f64>,
     pub fee_bps: f64,
     pub notional_usdc: f64,
     pub decision_dt_ms: u64,
@@ -48,12 +48,13 @@ struct AlphaRunReport {
     n_skipped_no_strike: usize,
     n_skipped_no_outcome: usize,
     n_skipped_load_error: usize,
-    sweep: Vec<LatencyEntry>,
+    sweep: Vec<GridEntry>,
 }
 
 #[derive(serde::Serialize)]
-struct LatencyEntry {
+struct GridEntry {
     latency_ms: u64,
+    edge_threshold: f64,
     report: HuntReport,
 }
 
@@ -110,7 +111,7 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
     let base_cfg = HarnessConfig {
         latency_ms: *args.latencies_ms.first().unwrap_or(&150),
         taker_fee_bps: args.fee_bps,
-        edge_threshold: args.edge_threshold,
+        edge_threshold: *args.edge_thresholds.first().unwrap_or(&0.05),
         notional_usdc: args.notional_usdc,
         decision_dt_ms: args.decision_dt_ms,
         stop_before_close_s: args.stop_before_close_s,
@@ -118,8 +119,9 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
 
     let mut spot_cache = SpotCache::default();
     let store_inner = store.store();
-    let mut per_latency: Vec<Vec<(MarketMeta, MarketRunOutput)>> =
-        vec![Vec::with_capacity(n_considered); args.latencies_ms.len()];
+    let n_cells = args.latencies_ms.len() * args.edge_thresholds.len();
+    let mut per_cell: Vec<Vec<(MarketMeta, MarketRunOutput)>> =
+        vec![Vec::with_capacity(n_considered); n_cells];
     let mut n_run = 0usize;
     let mut n_no_strike = 0usize;
     let mut n_no_outcome = 0usize;
@@ -218,13 +220,16 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
             date: market.date.clone(),
         };
 
-        for (li, &latency_ms) in args.latencies_ms.iter().enumerate() {
-            let cfg = HarnessConfig {
-                latency_ms,
-                ..base_cfg
-            };
-            let out = run_market(&series, &spot, &model_cfg, &cfg);
-            per_latency[li].push((series.meta, out));
+        let outputs = run_market_grid(
+            &series,
+            &spot,
+            &model_cfg,
+            &base_cfg,
+            &args.latencies_ms,
+            &args.edge_thresholds,
+        );
+        for (cell, out) in outputs.into_iter().enumerate() {
+            per_cell[cell].push((series.meta, out));
         }
         n_run += 1;
         if n_run % 500 == 0 {
@@ -232,38 +237,40 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
         }
     }
 
-    let sweep: Vec<LatencyEntry> = args
-        .latencies_ms
-        .iter()
-        .zip(per_latency.iter())
-        .map(|(&latency_ms, results)| LatencyEntry {
-            latency_ms,
-            report: aggregate(results.iter().map(|(m, o)| (m, o))),
-        })
-        .collect();
+    let mut sweep: Vec<GridEntry> = Vec::with_capacity(n_cells);
+    for (li, &latency_ms) in args.latencies_ms.iter().enumerate() {
+        for (ti, &edge_threshold) in args.edge_thresholds.iter().enumerate() {
+            let results = &per_cell[li * args.edge_thresholds.len() + ti];
+            sweep.push(GridEntry {
+                latency_ms,
+                edge_threshold,
+                report: aggregate(results.iter().map(|(m, o)| (m, o))),
+            });
+        }
+    }
 
     println!(
         "\nalpha run: {} markets run / {} considered (skipped: {} no-strike, {} no-outcome, {} load-error)",
         n_run, n_considered, n_no_strike, n_no_outcome, n_load_error
     );
     println!(
-        "model: vol_lookback={}s momentum_lookback={}s weight={} | threshold={} fee={}bps notional=${}",
+        "model: vol_lookback={}s momentum_lookback={}s weight={} | fee={}bps notional=${}",
         args.vol_lookback_s,
         args.momentum_lookback_s,
         args.momentum_weight,
-        args.edge_threshold,
         args.fee_bps,
         args.notional_usdc
     );
     println!(
-        "{:>8} {:>8} {:>7} {:>10} {:>9} {:>6} {:>9} {:>9}",
-        "latency", "markets", "trades", "totPnL$", "perTrade", "hit%", "LL_exo", "LL_book"
+        "{:>8} {:>6} {:>8} {:>7} {:>10} {:>9} {:>6} {:>9} {:>9}",
+        "latency", "thresh", "markets", "trades", "totPnL$", "perTrade", "hit%", "LL_exo", "LL_book"
     );
     for entry in &sweep {
         let a = &entry.report.aggregate;
         println!(
-            "{:>7}ms {:>8} {:>7} {:>10.2} {:>9.4} {:>6.1} {:>9.4} {:>9.4}",
+            "{:>7}ms {:>6.3} {:>8} {:>7} {:>10.2} {:>9.4} {:>6.1} {:>9.4} {:>9.4}",
             entry.latency_ms,
+            entry.edge_threshold,
             a.n_markets,
             a.n_trades,
             a.total_pnl,

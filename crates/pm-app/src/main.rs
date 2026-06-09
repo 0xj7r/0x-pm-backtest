@@ -106,8 +106,9 @@ enum Cmd {
         /// Sweep latencies 0/50/150/300/500/1000 ms.
         #[arg(long)]
         latency_sweep: bool,
-        #[arg(long, default_value = "0.05")]
-        edge_threshold: f64,
+        /// Comma-separated edge thresholds to grid over.
+        #[arg(long, value_delimiter = ',', default_value = "0.05")]
+        edge_thresholds: Vec<f64>,
         #[arg(long, default_value = "0.0")]
         fee_bps: f64,
         #[arg(long, default_value = "50.0")]
@@ -1082,7 +1083,7 @@ async fn main() -> Result<()> {
             replay_event_cache_dir,
             latency_ms,
             latency_sweep,
-            edge_threshold,
+            edge_thresholds,
             fee_bps,
             notional_usdc,
             decision_dt_ms,
@@ -1114,7 +1115,7 @@ async fn main() -> Result<()> {
                     max_markets,
                     replay_event_cache_dir,
                     latencies_ms,
-                    edge_threshold,
+                    edge_thresholds,
                     fee_bps,
                     notional_usdc,
                     decision_dt_ms,

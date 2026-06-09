@@ -25,13 +25,23 @@ pub fn realized_vol_bps_over_bar(
     let dt_ns = sample_dt_s as i64 * 1_000_000_000;
     let start_ns = now_ns - lookback_s as i64 * 1_000_000_000;
 
+    // One range scan + pointer walk instead of a binary search per grid
+    // point (the estimator runs every decision tick; this is the hot path).
+    // Semantics: last trade at-or-before each grid instant; stale prices
+    // repeat, contributing zero returns — correct for a no-trade interval.
+    let window = spot.range(start_ns, now_ns);
+    let mut idx = 0usize;
+    let mut last_price = spot.price_at_or_before(start_ns);
+
     let mut returns: Vec<f64> = Vec::with_capacity((lookback_s / sample_dt_s) as usize);
     let mut prev: Option<f64> = None;
     let mut ts = start_ns;
     while ts <= now_ns {
-        // Last trade at-or-before the sample instant. Stale prices repeat,
-        // contributing zero returns — correct for a no-trade interval.
-        if let Some(price) = spot.price_at_or_before(ts) {
+        while idx < window.len() && window[idx].ts_ns <= ts {
+            last_price = Some(window[idx].price);
+            idx += 1;
+        }
+        if let Some(price) = last_price {
             if price.is_finite() && price > 0.0 {
                 if let Some(p0) = prev {
                     returns.push((price / p0).ln());

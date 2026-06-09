@@ -383,8 +383,13 @@ async fn load_one_market(
         events.push(EngineEvent::Trade { market, tick: *t });
     }
 
-    let close_ns = up.close_ts * 1_000_000_000;
-    let open_ns = close_ns - FIVE_MIN_SECS * 1_000_000_000;
+    // The slug's trailing number is the market OPEN/start ts (the runner's
+    // market_open_ts = parse_close_ts(slug)); the close is open + duration.
+    // `up.close_ts` was parsed from the slug, so it IS the open ts here.
+    let open_ts = up.close_ts;
+    let close_ts = open_ts + FIVE_MIN_SECS;
+    let open_ns = open_ts * 1_000_000_000;
+    let close_ns = close_ts * 1_000_000_000;
 
     if let Some((mut replay, no_book)) = last_book {
         let max_ts = events.iter().map(|e| e.ts()).max().unwrap_or(replay.ts_ns);

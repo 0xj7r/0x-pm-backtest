@@ -788,6 +788,9 @@ pub fn run_backtest<S: Strategy>(
             daily_start_cash_usdc: cfg.daily_start_cash_usdc,
             daily_loss_cap_pct: cfg.daily_loss_cap_pct,
             current_daily_loss_pct: cfg.current_daily_loss_pct,
+            no_bid: 0.0,
+            no_ask: 0.0,
+            no_mid: 0.0,
         };
         let (output, strategy_model_output) = strategy.on_event_scored(event, &ctx, spot, trades);
         let strategy_emitted_model_output = strategy_model_output.is_some();

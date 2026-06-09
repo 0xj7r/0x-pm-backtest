@@ -22,6 +22,7 @@ use std::fs::File;
 use std::path::PathBuf;
 use std::time::Instant;
 
+mod alpha;
 mod discovery;
 mod engine_driver;
 mod prep_cache;
@@ -74,6 +75,58 @@ impl MarketRunMode {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
+    /// pm-alpha exogenous edge hunt: replay markets through the pm-alpha
+    /// validation harness (latency-modeled, cost-aware, leakage-free belief).
+    Alpha {
+        /// Markets JSONL (MarketHandle rows, e.g.
+        /// data/manifests/may2026_focused/markets_btc.jsonl).
+        #[arg(long)]
+        markets: PathBuf,
+        /// Slug prefix filter.
+        #[arg(long, default_value = "btc-updown-5m-")]
+        slug_prefix: String,
+        /// Inclusive date range start (YYYY-MM-DD).
+        #[arg(long)]
+        date_start: Option<String>,
+        /// Inclusive date range end (YYYY-MM-DD).
+        #[arg(long)]
+        date_end: Option<String>,
+        /// Cap on number of markets (0 = all).
+        #[arg(long, default_value = "0")]
+        max_markets: usize,
+        /// Read from a local cache mirror instead of S3.
+        #[arg(long)]
+        local_cache_dir: Option<PathBuf>,
+        /// ReplayEvent disk cache for repeated runs.
+        #[arg(long)]
+        replay_event_cache_dir: Option<PathBuf>,
+        /// Entry latency in ms (single run); ignored when --latency-sweep.
+        #[arg(long, default_value = "150")]
+        latency_ms: u64,
+        /// Sweep latencies 0/50/150/300/500/1000 ms.
+        #[arg(long)]
+        latency_sweep: bool,
+        #[arg(long, default_value = "0.05")]
+        edge_threshold: f64,
+        #[arg(long, default_value = "0.0")]
+        fee_bps: f64,
+        #[arg(long, default_value = "50.0")]
+        notional_usdc: f64,
+        #[arg(long, default_value = "1000")]
+        decision_dt_ms: u64,
+        #[arg(long, default_value = "10")]
+        stop_before_close_s: u32,
+        #[arg(long, default_value = "1800")]
+        vol_lookback_s: u32,
+        /// 0 disables the momentum drift term (base model).
+        #[arg(long, default_value = "0")]
+        momentum_lookback_s: u32,
+        #[arg(long, default_value = "1.0")]
+        momentum_weight: f64,
+        /// Write the full JSON report here.
+        #[arg(long)]
+        out_json: Option<PathBuf>,
+    },
     /// Stream a Telonex book_snapshot parquet from S3 and print sanity stats.
     InspectS3 {
         #[arg(long, default_value = "polymarket")]
@@ -1019,6 +1072,61 @@ async fn main() -> Result<()> {
     init_tracing();
     let cli = Cli::parse();
     match cli.cmd {
+        Cmd::Alpha {
+            markets,
+            slug_prefix,
+            date_start,
+            date_end,
+            max_markets,
+            local_cache_dir,
+            replay_event_cache_dir,
+            latency_ms,
+            latency_sweep,
+            edge_threshold,
+            fee_bps,
+            notional_usdc,
+            decision_dt_ms,
+            stop_before_close_s,
+            vol_lookback_s,
+            momentum_lookback_s,
+            momentum_weight,
+            out_json,
+        } => {
+            let store = if let Some(ref dir) = local_cache_dir {
+                tracing::info!(?dir, "using local cache");
+                TelonexStore::try_new_local(dir.clone())?
+            } else {
+                let cfg = TelonexStoreConfig::from_env()?;
+                TelonexStore::try_new(&cfg)?
+            };
+            let latencies_ms = if latency_sweep {
+                vec![0, 50, 150, 300, 500, 1000]
+            } else {
+                vec![latency_ms]
+            };
+            alpha::run_alpha(
+                &store,
+                alpha::AlphaArgs {
+                    markets_path: markets,
+                    slug_prefix,
+                    date_start,
+                    date_end,
+                    max_markets,
+                    replay_event_cache_dir,
+                    latencies_ms,
+                    edge_threshold,
+                    fee_bps,
+                    notional_usdc,
+                    decision_dt_ms,
+                    stop_before_close_s,
+                    vol_lookback_s,
+                    momentum_lookback_s,
+                    momentum_weight,
+                    out_json,
+                },
+            )
+            .await
+        }
         Cmd::InspectS3 {
             exchange,
             channel,

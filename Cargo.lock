@@ -1843,6 +1843,7 @@ dependencies = [
  "futures",
  "object_store",
  "parquet",
+ "pm-alpha",
  "pm-copytrade",
  "pm-engine",
  "pm-model",

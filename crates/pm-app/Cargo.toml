@@ -16,6 +16,7 @@ pm-telonex-loader = { workspace = true }
 pm-strategy       = { workspace = true }
 pm-risk           = { workspace = true }
 pm-model          = { workspace = true }
+pm-alpha          = { workspace = true }
 pm-engine         = { workspace = true }
 pm-copytrade      = { path = "../pm-copytrade" }
 

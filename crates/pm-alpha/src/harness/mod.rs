@@ -28,7 +28,7 @@ pub fn run_set<'a>(
         .into_iter()
         .map(|(series, spot)| (series, run_market(series, spot, model_cfg, cfg)))
         .collect();
-    aggregate(&results)
+    aggregate(results.iter().map(|(s, o)| (&s.meta, o)))
 }
 
 /// The edge-vs-latency curve: identical config swept over entry latencies.

@@ -1408,7 +1408,7 @@ pub struct StrategyMarketResult {
     pub model_training_samples: Vec<MetaTrainingSample>,
 }
 
-fn market_duration_secs_from_slug(slug: &str) -> i64 {
+pub(crate) fn market_duration_secs_from_slug(slug: &str) -> i64 {
     let slug = slug.to_ascii_lowercase();
     if slug.contains("-updown-15m-") {
         900
@@ -1436,11 +1436,11 @@ fn market_close_ts(m: &MarketHandle) -> i64 {
     }
 }
 
-fn market_open_ns(m: &MarketHandle) -> i64 {
+pub(crate) fn market_open_ns(m: &MarketHandle) -> i64 {
     market_open_ts(m).saturating_mul(1_000_000_000)
 }
 
-fn market_close_ns(m: &MarketHandle) -> i64 {
+pub(crate) fn market_close_ns(m: &MarketHandle) -> i64 {
     market_close_ts(m).saturating_mul(1_000_000_000)
 }
 
@@ -1489,7 +1489,7 @@ fn bte_policy_scale_for(scales: Option<&BtePolicyScaleMap>, market: &MarketHandl
         .unwrap_or(1.0)
 }
 
-fn outcome_label_resolved_yes(outcome: &str) -> Option<bool> {
+pub(crate) fn outcome_label_resolved_yes(outcome: &str) -> Option<bool> {
     if outcome.eq_ignore_ascii_case("up") || outcome.eq_ignore_ascii_case("yes") {
         Some(true)
     } else if outcome.eq_ignore_ascii_case("down") || outcome.eq_ignore_ascii_case("no") {
@@ -2303,7 +2303,7 @@ fn replay_event_cache_path(cache_dir: Option<&Path>, market: &MarketHandle) -> O
     })
 }
 
-async fn load_replay_events_for_market(
+pub(crate) async fn load_replay_events_for_market(
     store: &TelonexStore,
     store_inner: Arc<dyn object_store::ObjectStore>,
     market: &MarketHandle,
@@ -2836,7 +2836,7 @@ impl FillTagAccumulator {
 
 /// Per-market spot-history cache so we don't re-download the same Binance day.
 #[derive(Default)]
-struct SpotCache {
+pub(crate) struct SpotCache {
     pub inner: HashMap<String, Arc<SpotHistory>>,
     raw_days: HashMap<String, Arc<Vec<SpotTick>>>,
 }
@@ -2876,7 +2876,7 @@ impl SpotCache {
         Ok(Some(ticks))
     }
 
-    async fn get_or_load(
+    pub(crate) async fn get_or_load(
         &mut self,
         store: &TelonexStore,
         symbol: &str,

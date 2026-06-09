@@ -1,6 +1,6 @@
 //! Aggregation: per token x window cell and aggregate, plus the latency sweep.
 
-use super::types::{MarketRunOutput, MarketSeries};
+use super::types::MarketRunOutput;
 use crate::state::Token;
 use std::collections::BTreeMap;
 
@@ -100,14 +100,18 @@ impl Accum {
     }
 }
 
-/// Aggregate per-market outputs into per-cell and aggregate reports.
-pub fn aggregate(results: &[(&MarketSeries, MarketRunOutput)]) -> HuntReport {
+/// Aggregate per-market outputs into per-cell and aggregate reports. Takes
+/// `MarketMeta` rather than the full series so callers can stream markets
+/// and drop tapes as they go.
+pub fn aggregate<'a>(
+    results: impl IntoIterator<Item = (&'a crate::state::MarketMeta, &'a MarketRunOutput)>,
+) -> HuntReport {
     let mut cells: BTreeMap<CellKey, Accum> = BTreeMap::new();
     let mut agg = Accum::default();
-    for (series, out) in results {
+    for (meta, out) in results {
         let key = CellKey {
-            token: series.meta.token,
-            window_secs: series.meta.window_secs,
+            token: meta.token,
+            window_secs: meta.window_secs,
         };
         cells.entry(key).or_default().add(out);
         agg.add(out);
@@ -132,18 +136,13 @@ mod tests {
     use crate::harness::types::{ProbSample, Side, TradeRecord};
     use crate::state::{MarketMeta, Token};
 
-    fn series(token: Token) -> MarketSeries {
-        MarketSeries {
-            meta: MarketMeta {
-                token,
-                window_secs: 300,
-                open_ts_ns: 0,
-                close_ts_ns: 300_000_000_000,
-                strike: 100.0,
-            },
-            resolved_yes: true,
-            ticks: Vec::new(),
-            date: "2026-05-01".into(),
+    fn series(token: Token) -> MarketMeta {
+        MarketMeta {
+            token,
+            window_secs: 300,
+            open_ts_ns: 0,
+            close_ts_ns: 300_000_000_000,
+            strike: 100.0,
         }
     }
 
@@ -174,8 +173,8 @@ mod tests {
     #[test]
     fn sharp_exogenous_p_beats_book_mid_on_log_loss() {
         let s = series(Token::Btc);
-        let results = vec![(&s, output(5.0, true, 0.95, 0.5))];
-        let r = aggregate(&results);
+        let results = vec![(s, output(5.0, true, 0.95, 0.5))];
+        let r = aggregate(results.iter().map(|(m, o)| (m, o)));
         assert!(r.aggregate.log_loss_exo < r.aggregate.log_loss_book);
     }
 
@@ -184,10 +183,10 @@ mod tests {
         let a = series(Token::Btc);
         let b = series(Token::Eth);
         let results = vec![
-            (&a, output(1.0, true, 0.9, 0.5)),
-            (&b, output(-1.0, false, 0.9, 0.5)),
+            (a, output(1.0, true, 0.9, 0.5)),
+            (b, output(-1.0, false, 0.9, 0.5)),
         ];
-        let r = aggregate(&results);
+        let r = aggregate(results.iter().map(|(m, o)| (m, o)));
         assert_eq!(r.cells.len(), 2);
         assert_eq!(r.aggregate.n_trades, 2);
         assert_eq!(r.aggregate.n_wins, 1);

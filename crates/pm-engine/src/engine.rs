@@ -24,6 +24,9 @@ struct MarketCtx {
     open_ns: i64,
     close_ns: i64,
     events_seen: u64,
+    /// Running min/max of `yes_mid` for this market, for `market_yes_range_so_far`.
+    yes_min: f32,
+    yes_max: f32,
 }
 
 pub struct Engine<S: Strategy> {
@@ -157,6 +160,8 @@ impl<S: Strategy> Engine<S> {
             open_ns: meta.map(|m| m.open_ns).unwrap_or(e.ts_ns),
             close_ns: meta.map(|m| m.close_ns).unwrap_or(e.ts_ns),
             events_seen: 0,
+            yes_min: e.yes_mid,
+            yes_max: e.yes_mid,
         });
 
         if e.flags.contains(ReplayFlags::MARKET_CLOSE) {
@@ -169,9 +174,12 @@ impl<S: Strategy> Engine<S> {
         }
 
         mc.events_seen += 1;
+        mc.yes_min = mc.yes_min.min(e.yes_mid);
+        mc.yes_max = mc.yes_max.max(e.yes_mid);
         let open_ns = mc.open_ns;
         let close_ns = mc.close_ns;
         let events_seen = mc.events_seen;
+        let market_yes_range_so_far = (mc.yes_max - mc.yes_min).max(0.0);
         let btc_key = ExposureKey { token: Token::Btc, window };
         let eth_key = ExposureKey { token: Token::Eth, window };
 
@@ -184,6 +192,7 @@ impl<S: Strategy> Engine<S> {
             eth_key,
             &self.exposure,
         );
+        ctx.market_yes_range_so_far = market_yes_range_so_far;
 
         let prior = self
             .prior_ranges_by_market

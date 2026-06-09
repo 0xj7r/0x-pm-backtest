@@ -106,7 +106,7 @@ impl CtxEnricher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pm_types::{SpotHistory, SpotTick};
+    use pm_types::{BookLevel, ReplayEvent, ReplayFlags, SpotHistory, SpotTick};
 
     fn spot_tick(ts_ns: i64, price: f64) -> SpotTick {
         SpotTick {
@@ -114,6 +114,33 @@ mod tests {
             price,
             quantity: 1.0,
             is_buyer_maker: false,
+        }
+    }
+
+    fn make_spot(n: usize) -> SpotHistory {
+        let ticks: Vec<SpotTick> = (0..n as i64)
+            .map(|i| spot_tick(i * 3_000_000_000, 100.0 + (i as f64 * 0.3).sin() * 2.0))
+            .collect();
+        SpotHistory::new(ticks)
+    }
+
+    fn make_replay_event() -> ReplayEvent {
+        use pm_types::MarketId;
+        let mut asks = [BookLevel::default(); 5];
+        asks[0] = BookLevel { price: 0.55, size: 500.0 };
+        let mut bids = [BookLevel::default(); 5];
+        bids[0] = BookLevel { price: 0.45, size: 500.0 };
+        ReplayEvent {
+            ts_ns: 60_000_000_000,
+            market_id: MarketId(0),
+            yes_mid: 0.50,
+            yes_bid: 0.45,
+            yes_ask: 0.55,
+            volume: 1000.0,
+            bids,
+            asks,
+            spot_price: 100.0,
+            flags: ReplayFlags::BOOK_UPDATE,
         }
     }
 
@@ -170,5 +197,37 @@ mod tests {
         assert!((ctx.prior_market_range_1d - 0.05).abs() < 1e-6);
         assert!((ctx.prior_market_range_3d - 0.08).abs() < 1e-6);
         assert!((ctx.prior_market_range_7d - 0.12).abs() < 1e-6);
+    }
+
+    #[test]
+    fn model_eval_populates_model_output_from_snapshot() {
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/snap_test.json"
+        );
+        let mut enr =
+            CtxEnricher::with_model_snapshot(fixture).expect("load snapshot fixture");
+        let spot = make_spot(60);
+        let event = make_replay_event();
+        let mut ctx = pm_strategy::Ctx::default();
+        enr.fill_model(&mut ctx, &event, event.ts_ns, 30, &spot);
+        assert!(
+            ctx.model_output.is_some(),
+            "model_output should be Some after fill_model"
+        );
+        assert!(
+            ctx.model_attribution.is_some(),
+            "model_attribution should be Some after fill_model"
+        );
+    }
+
+    #[test]
+    fn fill_model_noop_without_snapshot() {
+        let mut enr = CtxEnricher::new_without_model();
+        let spot = make_spot(10);
+        let event = make_replay_event();
+        let mut ctx = pm_strategy::Ctx::default();
+        enr.fill_model(&mut ctx, &event, event.ts_ns, 30, &spot);
+        assert!(ctx.model_output.is_none(), "should be None when no model loaded");
     }
 }

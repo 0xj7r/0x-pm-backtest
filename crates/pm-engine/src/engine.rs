@@ -1,3 +1,4 @@
+use crate::enrich::{CtxEnricher, PriorRanges};
 use crate::event::{EngineEvent, Token};
 use crate::exposure::{ExposureKey, ExposureState};
 use crate::host::build_ctx;
@@ -26,6 +27,11 @@ pub struct Engine<S: Strategy> {
     marks: HashMap<MarketId, f32>,
     /// Maps a market to its (token, window) for exposure keying.
     classify: fn(MarketId) -> (Token, i64),
+    /// Optional enricher that populates regime/model/prior-range Ctx fields.
+    /// None in Phase-1 tests; set via `with_enricher` for the backtest driver.
+    enricher: Option<CtxEnricher>,
+    /// Prior-range values supplied by the driver (one set per engine instance).
+    prior_ranges: PriorRanges,
     /// Order/fill trace for determinism testing and diagnostics.
     pub trace: Vec<(i64, &'static str, MarketId, f64)>,
 }
@@ -48,8 +54,30 @@ impl<S: Strategy> Engine<S> {
             trades: TradeHistory::default(),
             marks: HashMap::new(),
             classify,
+            enricher: None,
+            prior_ranges: PriorRanges::default(),
             trace: Vec::new(),
         }
+    }
+
+    /// Attach a `CtxEnricher` plus precomputed spot and trade histories for
+    /// the Phase-2 backtest driver. The enricher populates regime/model/
+    /// prior-range fields on `Ctx` before `on_event_scored` is called.
+    ///
+    /// Phase-1 tests use `Engine::new` and see `enricher = None`, so they are
+    /// unaffected by this addition.
+    pub fn with_enricher(
+        mut self,
+        enricher: CtxEnricher,
+        spot: SpotHistory,
+        trades: TradeHistory,
+        prior_ranges: PriorRanges,
+    ) -> Self {
+        self.enricher = Some(enricher);
+        self.spot = spot;
+        self.trades = trades;
+        self.prior_ranges = prior_ranges;
+        self
     }
 
     pub fn run<F: Feed, X: Exchange, C: Clock>(&mut self, feed: &mut F, ex: &mut X, clock: &C) {
@@ -95,7 +123,7 @@ impl<S: Strategy> Engine<S> {
         let btc_key = ExposureKey { token: Token::Btc, window };
         let eth_key = ExposureKey { token: Token::Eth, window };
 
-        let ctx = build_ctx(
+        let mut ctx = build_ctx(
             &self.portfolio,
             e.market_id,
             events_seen,
@@ -104,6 +132,18 @@ impl<S: Strategy> Engine<S> {
             eth_key,
             &self.exposure,
         );
+
+        if let Some(enricher) = &mut self.enricher {
+            enricher.fill_regime(&mut ctx, e.ts_ns, &self.spot);
+
+            // Task 8: real open time wired via market metadata. For now use first-
+            // seen ts stored in close_ns as a proxy; Task 8 replaces this with
+            // the actual market open timestamp from the Polymarket metadata feed.
+            let secs_since_open = ((e.ts_ns - close_ns).max(0) as f64 / 1e9) as i64;
+            enricher.fill_model(&mut ctx, e, e.ts_ns, secs_since_open, &self.spot);
+
+            enricher.fill_prior_range(&mut ctx, self.prior_ranges);
+        }
 
         let (out, _model) = self.strategy.on_event_scored(e, &ctx, &self.spot, &self.trades);
 

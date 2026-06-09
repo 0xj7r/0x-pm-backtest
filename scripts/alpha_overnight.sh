@@ -25,12 +25,13 @@ pids=()
 for EXIT_S in 0 30 60 120; do
   for SKIP in 0 1; do
     NAME="riskB_exit${EXIT_S}_skip${SKIP}"
-    EXTRA=()
-    [ "$SKIP" = 1 ] && EXTRA+=(--skip-calm)
+    SKIPARG=""
+    [ "$SKIP" = 1 ] && SKIPARG="--skip-calm"
+    # shellcheck disable=SC2086
     run_alpha "$NAME" --markets "$MAY" \
       --date-start 2026-05-07 --date-end 2026-05-18 \
       --latency-ms 150 --edge-thresholds 0.12 --vol-lookback-s 3600 \
-      --exit-after-s "$EXIT_S" "${EXTRA[@]}" &
+      --exit-after-s "$EXIT_S" $SKIPARG &
     pids+=($!)
   done
 done
@@ -39,15 +40,16 @@ for p in "${pids[@]}"; do wait "$p" || log "WARN riskB job failed"; done
 python3 scripts/alpha_overnight_pick.py risk "$NIGHT" > "$NIGHT/riskB_choice.env" || { log "risk pick failed"; exit 1; }
 . "$NIGHT/riskB_choice.env"   # sets CHOSEN_EXIT_S, CHOSEN_SKIP
 log "phase B chosen: exit=$CHOSEN_EXIT_S skip_calm=$CHOSEN_SKIP"
-SKIPFLAG=()
-[ "$CHOSEN_SKIP" = 1 ] && SKIPFLAG+=(--skip-calm)
+SKIPFLAG=""
+[ "$CHOSEN_SKIP" = 1 ] && SKIPFLAG="--skip-calm"
+# shellcheck disable=SC2086
 
 # Phase B2: single verification on TEST window (May 19-28).
 log "phase B2: verify risk config on test window"
 run_alpha "riskB2_verify_test" --markets "$MAY" \
   --date-start 2026-05-19 --date-end 2026-05-28 \
   --latency-ms 150 --edge-thresholds 0.12 --vol-lookback-s 3600 \
-  --exit-after-s "$CHOSEN_EXIT_S" "${SKIPFLAG[@]}" || log "WARN B2 failed"
+  --exit-after-s "$CHOSEN_EXIT_S" $SKIPFLAG || log "WARN B2 failed"
 
 # Phase C: metadata manifests for all families (local, no API).
 log "phase C: metadata manifests"
@@ -77,14 +79,14 @@ while read -r FAM; do
     --date-start 2026-05-21 --date-end 2026-05-24 \
     --latency-ms 150 --edge-thresholds 0.08,0.12,0.16 \
     --vol-lookback-s 3600 \
-    --exit-after-s "$CHOSEN_EXIT_S" "${SKIPFLAG[@]}" || { log "WARN tune $FAM failed"; continue; }
+    --exit-after-s "$CHOSEN_EXIT_S" $SKIPFLAG || { log "WARN tune $FAM failed"; continue; }
   THR=$(python3 scripts/alpha_overnight_pick.py best-thr "$NIGHT/D_${SAFE}_tune.json") || continue
   log "family $FAM chosen thr=$THR"
   run_alpha "D_${SAFE}_test" --markets "$MM/meta_may21_28.jsonl" \
     --slug-prefix "${FAM}-" --infer-outcome \
     --date-start 2026-05-25 --date-end 2026-05-28 \
     --latency-ms 150 --edge-thresholds "$THR" --vol-lookback-s 3600 \
-    --exit-after-s "$CHOSEN_EXIT_S" "${SKIPFLAG[@]}" || log "WARN test $FAM failed"
+    --exit-after-s "$CHOSEN_EXIT_S" $SKIPFLAG || log "WARN test $FAM failed"
 done < "$NIGHT/families.txt"
 
 # Phase E: June finale — frozen config only, every family with June data.
@@ -98,7 +100,7 @@ while read -r FAM; do
     --slug-prefix "${FAM}-" --infer-outcome \
     --date-start 2026-06-01 --date-end 2026-06-07 \
     --latency-ms 150 --edge-thresholds "$THR" --vol-lookback-s 3600 \
-    --exit-after-s "$CHOSEN_EXIT_S" "${SKIPFLAG[@]}" || log "WARN june $FAM failed"
+    --exit-after-s "$CHOSEN_EXIT_S" $SKIPFLAG || log "WARN june $FAM failed"
 done < "$NIGHT/families.txt"
 
 python3 scripts/alpha_overnight_pick.py summary "$NIGHT" > "$NIGHT/SUMMARY.txt" 2>&1 || true

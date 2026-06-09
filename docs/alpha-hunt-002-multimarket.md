@@ -57,3 +57,7 @@ At $1K: $50 clips = 5% of equity per market — too big. $25 clips with a 3-conc
 ## 6. Run inventory
 
 All artifacts: `data/runs/alpha/overnight/` (8 risk configs + verify + 4 family tunes + 4 family tests + June finale, each with JSON + trade dumps + logs); configs disclosed in each JSON. Manifests: `data/manifests/multimarket/`.
+
+## Appendix: momentum family (Family A) — rejected at the tune gate
+
+Momentum drift added to the belief (lookback {60, 300}s x weight {0.5, 1.0}, on the exit-30s champion, May 7-18): best variant +$1,356 vs the +$21,476 no-momentum baseline; the 60s variants were -$4.3k to -$5.9k. Rejected without spending test-window data. Interpretation: the validated edge fades book overreaction to spot moves; a drift term aligns the belief with the move and erases the disagreement signal. Momentum remains a candidate for a separate directional strategy in trending regimes (the Feb-Apr profile), not an overlay on this one.

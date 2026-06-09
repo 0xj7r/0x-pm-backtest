@@ -215,6 +215,12 @@ pub struct EngineBacktestCfg {
     /// Cap on markets processed (for small fixed slices / quick runs).
     pub max_markets: Option<usize>,
     pub strategy: StrategyKind,
+    pub signal_min_edge: f32,
+    pub signal_min_confidence: f32,
+    pub signal_max_risk: f32,
+    pub favourite_start_secs: f32,
+    pub favourite_stop_secs_before_close: f32,
+    pub tail_balance_frac: f64,
 }
 
 /// Headline numbers from an engine backtest run.
@@ -583,12 +589,21 @@ pub async fn run_engine_backtest(cfg: EngineBacktestCfg) -> Result<EngineBacktes
         }
         StrategyKind::Convex => {
             let template = ConvexBookStrategy::new(ConvexBookConfig {
+                signal: pm_strategy::convex::signal::SignalGate {
+                    min_edge: cfg.signal_min_edge,
+                    min_confidence: cfg.signal_min_confidence,
+                    max_risk: cfg.signal_max_risk,
+                    ..Default::default()
+                },
                 position: PositionConfig {
                     bankroll_usdc: cfg.starting_cash,
                     max_clip_usdc: cfg.max_clip_usdc,
+                    favourite_start_secs: cfg.favourite_start_secs,
+                    favourite_stop_secs_before_close: cfg.favourite_stop_secs_before_close,
+                    tail_balance_frac: cfg.tail_balance_frac,
                     ..Default::default()
                 },
-                ..Default::default()
+                posture: pm_strategy::convex::execution::Posture::Taker,
             });
             run_engine_with(template, &cfg, enricher, all_events, prior_map, meta_map, trades_map, spot, markets_total)
         }
@@ -788,6 +803,12 @@ mod tests {
             replay_sample_ms: 1000,
             max_markets: Some(40),
             strategy: StrategyKind::BonereaperV2,
+            signal_min_edge: 0.03,
+            signal_min_confidence: 0.68,
+            signal_max_risk: 0.72,
+            favourite_start_secs: 180.0,
+            favourite_stop_secs_before_close: 0.0,
+            tail_balance_frac: 1.0,
         };
         let r1 = run_engine_backtest(mk()).await.expect("engine run 1");
         let r2 = run_engine_backtest(mk()).await.expect("engine run 2");

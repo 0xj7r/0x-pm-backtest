@@ -315,6 +315,24 @@ enum Cmd {
         /// Strategy to run: bonereaper_v2 (legacy taker) or convex (directional convex-book).
         #[arg(long, default_value = "convex")]
         strategy: String,
+        /// Convex: minimum model edge over entry price to gate a favourite load.
+        #[arg(long, default_value_t = 0.03)]
+        signal_min_edge: f32,
+        /// Convex: minimum model confidence to gate a favourite load.
+        #[arg(long, default_value_t = 0.68)]
+        signal_min_confidence: f32,
+        /// Convex: maximum model risk to gate a favourite load.
+        #[arg(long, default_value_t = 0.72)]
+        signal_max_risk: f32,
+        /// Convex: seconds into the market window before favourite loads begin.
+        #[arg(long, default_value_t = 180.0)]
+        favourite_start_secs: f32,
+        /// Convex: favourite loads stop when secs_to_close drops below this floor (0 = disabled).
+        #[arg(long, default_value_t = 0.0)]
+        favourite_stop_secs_before_close: f32,
+        /// Convex: tail target as fraction of favourite shares (1.0 = share-balanced).
+        #[arg(long, default_value_t = 1.0)]
+        tail_balance_frac: f64,
     },
     /// Run a walk-forward backtest over many markets.
     WalkForward {
@@ -1301,6 +1319,12 @@ async fn main() -> Result<()> {
             replay_sample_ms,
             max_markets,
             strategy,
+            signal_min_edge,
+            signal_min_confidence,
+            signal_max_risk,
+            favourite_start_secs,
+            favourite_stop_secs_before_close,
+            tail_balance_frac,
         } => {
             let strategy_kind = match strategy.as_str() {
                 "bonereaper_v2" | "br2" => engine_driver::StrategyKind::BonereaperV2,
@@ -1322,6 +1346,12 @@ async fn main() -> Result<()> {
                 replay_sample_ms,
                 max_markets,
                 strategy: strategy_kind,
+                signal_min_edge,
+                signal_min_confidence,
+                signal_max_risk,
+                favourite_start_secs,
+                favourite_stop_secs_before_close,
+                tail_balance_frac,
             })
             .await?;
             let pnl = report.final_equity_usd - report.starting_cash_usd;

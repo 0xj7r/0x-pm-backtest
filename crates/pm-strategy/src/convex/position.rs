@@ -47,6 +47,9 @@ pub struct PositionConfig {
     pub tail_min_pair_edge: f32,
     /// Reserved for Plan 4 sizing-curve tuning (|yes_mid-0.5| skew gate on the tail).
     pub tail_extreme_skew: f32,
+    /// Favourite loads are blocked once secs_to_close drops below this floor.
+    /// 0.0 = no effect (current behaviour).
+    pub favourite_stop_secs_before_close: f32,
 }
 impl Default for PositionConfig {
     fn default() -> Self {
@@ -58,6 +61,7 @@ impl Default for PositionConfig {
             tail_min_ask: 0.01, tail_max_ask: 0.10, tail_min_seconds_to_close: 10.0,
             tail_max_clips: 3, tail_sweep_depth: 3, tail_refresh_secs: 5.0,
             tail_balance_frac: 1.0, tail_min_pair_edge: 0.0, tail_extreme_skew: 0.20,
+            favourite_stop_secs_before_close: 0.0,
         }
     }
 }
@@ -129,6 +133,7 @@ impl PositionManager {
                 && refresh_ok
                 && fav_ask >= self.cfg.favourite_min_ask
                 && fav_ask <= self.cfg.favourite_max_ask
+                && secs_to_close > self.cfg.favourite_stop_secs_before_close
             {
                 let clip_usdc = self.cfg.max_clip_usdc * self.cfg.favourite_clip_frac;
                 let shares = shares_capped(clip_usdc, fav_ask);
@@ -256,6 +261,21 @@ mod tests {
         let _ = pm.plan(Some(&conv(Side::BuyYes, 0.86, 0.06)), &prices(0.80, 0.79, 0.21, 0.19), 100.0);
         let inc2 = pm.plan(Some(&conv(Side::BuyYes, 0.86, 0.06)), &prices(0.80, 0.79, 0.21, 0.19), 90.0);
         assert!(inc2.legs.iter().all(|l| l.side != Side::BuyYes), "favourite capped at max_clips");
+    }
+
+    #[test]
+    fn favourite_stops_loading_near_close() {
+        let mut pm = PositionManager::new(PositionConfig {
+            favourite_stop_secs_before_close: 90.0,
+            ..PositionConfig::default()
+        });
+        // secs_to_close=60 is inside the late window (secs_in=240 >= start 180)
+        // but below the stop floor of 90 -> no favourite leg.
+        let inc = pm.plan(Some(&conv(Side::BuyYes, 0.86, 0.06)), &prices(0.80, 0.79, 0.21, 0.19), 60.0);
+        assert!(
+            inc.legs.iter().all(|l| l.side != Side::BuyYes),
+            "favourite must be blocked when secs_to_close <= favourite_stop_secs_before_close"
+        );
     }
 
     #[test]

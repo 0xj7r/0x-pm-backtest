@@ -91,6 +91,9 @@ pub struct TradeRecord {
     /// Net P&L at resolution: shares * (payout - avg_price) - fee.
     pub pnl: f64,
     pub won: bool,
+    /// Side-oriented book mid 60s after the fill (diagnostic: did the book
+    /// move toward the belief, or did we only "win" at resolution?).
+    pub mark_60s: Option<f64>,
 }
 
 /// A probability sample at a fixed checkpoint, for log-loss scoring of the

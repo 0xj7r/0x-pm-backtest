@@ -39,6 +39,8 @@ pub struct AlphaArgs {
     pub calibrate_split: Option<String>,
     pub calibrator_out: Option<PathBuf>,
     pub calibrator_in: Option<PathBuf>,
+    /// Dump per-trade records (first grid cell only) to this JSONL path.
+    pub trades_out: Option<PathBuf>,
 }
 
 #[derive(serde::Serialize)]
@@ -346,6 +348,28 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
         args.replay_event_cache_dir.as_deref(),
     )
     .await?;
+    if let Some(path) = &args.trades_out {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut f = std::fs::File::create(path)?;
+        use std::io::Write as _;
+        for (meta, out) in &eval_out.per_cell[0] {
+            if let Some(t) = &out.trade {
+                let row = serde_json::json!({
+                    "token": meta.token, "window_secs": meta.window_secs,
+                    "open_ts_ns": meta.open_ts_ns, "strike": meta.strike,
+                    "side": t.side, "decision_ts_ns": t.decision_ts_ns,
+                    "fill_ts_ns": t.fill_ts_ns, "avg_price": t.avg_price,
+                    "shares": t.shares, "p_exo": t.p_exo,
+                    "mid_at_decision": t.mid_at_decision, "pnl": t.pnl, "won": t.won,
+                    "mark_60s": t.mark_60s,
+                });
+                writeln!(f, "{row}")?;
+            }
+        }
+        println!("trades written: {}", path.display());
+    }
     let per_cell = eval_out.per_cell;
     let n_run = eval_out.counters.n_run;
     let n_no_strike = eval_out.counters.n_no_strike;

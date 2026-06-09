@@ -176,6 +176,14 @@ fn execute(
         };
         let payout = if won { 1.0 } else { 0.0 };
         let pnl = shares * (payout - avg_price) - fee;
+        let mark_60s = series.ticks[d.tick_idx..]
+            .iter()
+            .find(|t| t.ts_ns >= fill_tick.ts_ns + 60_000_000_000)
+            .and_then(|t| t.mid())
+            .map(|m| match side {
+                Side::Yes => m,
+                Side::No => 1.0 - m,
+            });
 
         return Some(TradeRecord {
             side,
@@ -188,6 +196,7 @@ fn execute(
             mid_at_decision: d.mid,
             pnl,
             won,
+            mark_60s,
         });
     }
     None

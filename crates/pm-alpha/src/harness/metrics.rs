@@ -159,6 +159,7 @@ mod tests {
                 mid_at_decision: p_book,
                 pnl,
                 won,
+                mark_60s: None,
             }),
             samples: vec![ProbSample {
                 ts_ns: 60_000_000_000,

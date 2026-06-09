@@ -1,9 +1,10 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use pm_model::{ModelConfig, ModelMarketContext, ModelState, OnlineMetaCalibratorSnapshot};
 use pm_strategy::Ctx;
-use pm_types::{ReplayEvent, SpotHistory};
+use pm_types::{MarketId, ReplayEvent, SpotHistory};
 use pm_strategy::regime::WhipsawRiskSnapshot;
 
 /// Prior-market YES-mid range statistics computed by the driver for the current
@@ -24,7 +25,19 @@ pub struct PriorRanges {
 /// `new_without_model()` is used until `with_model_snapshot` is called (Task 6).
 /// Phase-1 integration tests that never attach an enricher are unaffected.
 pub struct CtxEnricher {
-    model: Option<(ModelState, ModelConfig, ModelMarketContext)>,
+    model: Option<ModelEval>,
+}
+
+/// Model evaluation state. `ModelState::evaluate_*` mutates rolling per-market
+/// buffers (recent mids/direction/imbalance, stability window). The serial
+/// runner uses a fresh `ModelState` per market; the engine interleaves markets
+/// by timestamp, so it keeps a per-market `ModelState` (cloned from `base`, the
+/// snapshot-loaded template with empty rings) to avoid cross-market pollution.
+struct ModelEval {
+    base: ModelState,
+    cfg: ModelConfig,
+    market_context: ModelMarketContext,
+    per_market: HashMap<MarketId, ModelState>,
 }
 
 impl CtxEnricher {
@@ -54,7 +67,12 @@ impl CtxEnricher {
         let mut model_state = ModelState::new();
         model_state.load_meta_calibrator_snapshot(snapshot);
         Ok(Self {
-            model: Some((model_state, model_cfg, market_context)),
+            model: Some(ModelEval {
+                base: model_state,
+                cfg: model_cfg,
+                market_context,
+                per_market: HashMap::new(),
+            }),
         })
     }
 
@@ -95,15 +113,23 @@ impl CtxEnricher {
         secs_since_open: i64,
         spot: &SpotHistory,
     ) {
-        let Some((model_state, model_cfg, market_context)) = &mut self.model else {
+        let Some(m) = &mut self.model else {
             return;
         };
+        // Isolate rolling state per market: clone the snapshot template the first
+        // time each market is seen so its rings start empty (matching the serial
+        // runner's fresh ModelState per market).
+        if !m.per_market.contains_key(&event.market_id) {
+            let base = m.base.clone();
+            m.per_market.insert(event.market_id, base);
+        }
+        let model_state = m.per_market.get_mut(&event.market_id).unwrap();
         let eval = model_state.evaluate_detailed_with_market_context(
             event,
             spot,
             secs_since_open as f32,
-            model_cfg,
-            *market_context,
+            &m.cfg,
+            m.market_context,
         );
         ctx.model_output = Some(eval.output);
         ctx.model_attribution = Some(eval.attribution);

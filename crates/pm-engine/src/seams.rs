@@ -72,6 +72,20 @@ pub trait Exchange {
     fn cancel(&mut self, id: OrderId, now: Ts) -> CancelAck;
     /// Fills realized since the previous poll.
     fn poll_fills(&mut self, now: Ts) -> Vec<FillReport>;
+
+    /// Latest book state for a market (YES ladder via ReplayEvent + real NO ladder).
+    /// Default no-op so book-agnostic exchanges (e.g. test InstantExchange) ignore it.
+    fn on_book(
+        &mut self,
+        _market: pm_types::MarketId,
+        _replay: &pm_types::ReplayEvent,
+        _no_book: &pm_types::NoBook,
+        _now: Ts,
+    ) {
+    }
+
+    /// A real on-chain trade print for a market (drives maker fills).
+    fn on_trade(&mut self, _market: pm_types::MarketId, _tick: &pm_types::TradeTick, _now: Ts) {}
 }
 
 /// Time source. sim: last event ts; live: wall clock.

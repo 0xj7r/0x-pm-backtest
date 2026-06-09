@@ -55,7 +55,9 @@ impl<S: Strategy> Engine<S> {
     pub fn run<F: Feed, X: Exchange, C: Clock>(&mut self, feed: &mut F, ex: &mut X, clock: &C) {
         while let Some(ev) = feed.next() {
             match ev {
-                EngineEvent::Market { replay, no_book: _ } => {
+                EngineEvent::Market { replay, no_book } => {
+                    ex.on_book(replay.market_id, &replay, &no_book, clock.now());
+                    // Task 7 wires trades via on_trade when a Trade EngineEvent variant is added.
                     self.on_market(&replay, ex, clock);
                 }
             }

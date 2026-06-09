@@ -69,6 +69,10 @@ The first clip captures most of the edge; later clips fill after the book has pa
 
 The edge concentrates in expanded/whipsaw regimes and is thin in calm tape — consistent with the fade thesis (the book gets caught wrong when price whips around the strike) and with br2's live experience (idle in calm). This is the seed of the regime router: this strategy wants size in expanded regimes; calm tape belongs to other plays (e.g. the paired-MM analysis) and Feb-Apr-style trends likely belong to the momentum/favourite profile, to be validated separately.
 
+## Daily stability (test window, $50 block, 150 ms)
+
+9 of 10 days positive; mean +$1,411/day, sd $1,033 (daily Sharpe 1.37 on these ten days). Worst day -$775 (May 25, hit 46.7%). At $2,800 bankroll the $50 clip is ~1.8% of equity per market with ~245 trades/day, so per-market sizing, daily loss caps, and exposure overlap limits are the next engineering layer before any live test. The annualized Sharpe implied by ten days is not meaningful; capacity and quote competition will compress it.
+
 ## Big caveats, stated plainly
 
 1. **Regime.** May was a violently whipsaw month that structurally favors fading the book; Feb-Apr favored momentum/directional flow (the br2 profile). Nothing here is validated outside May. Feb-Apr S3 validation is mandatory before sizing up (AWS creds currently expired).

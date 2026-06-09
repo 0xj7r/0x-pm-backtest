@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use anyhow::{Context, Result};
 use pm_model::{ModelConfig, ModelMarketContext, ModelState, OnlineMetaCalibratorSnapshot};
 use pm_strategy::Ctx;
@@ -34,18 +36,23 @@ impl CtxEnricher {
     /// Create an enricher that also evaluates the model from a frozen snapshot.
     ///
     /// Ports `read_meta_snapshot` from `walkforward.rs:3440-3449` and
-    /// `ModelState::load_meta_calibrator_snapshot`. Champion defaults are used
-    /// for `ModelConfig` and `ModelMarketContext::btc_5m()` (the BTC-5m cell).
-    pub fn with_model_snapshot(path: &str) -> Result<Self> {
+    /// `ModelState::load_meta_calibrator_snapshot`. Both `model_cfg` and
+    /// `market_context` are driver-supplied; callers must pass the values that
+    /// match the champion being replayed. The BTC-5m champion uses
+    /// `ModelMarketContext::default()` (market-context features disabled).
+    pub fn with_model_snapshot(
+        path: impl AsRef<Path>,
+        model_cfg: ModelConfig,
+        market_context: ModelMarketContext,
+    ) -> Result<Self> {
+        let path = path.as_ref();
         let file = std::fs::File::open(path)
-            .with_context(|| format!("open meta-calibrator snapshot {path}"))?;
+            .with_context(|| format!("open meta-calibrator snapshot {}", path.display()))?;
         let snapshot: OnlineMetaCalibratorSnapshot =
             serde_json::from_reader(std::io::BufReader::new(file))
-                .with_context(|| format!("parse meta-calibrator snapshot {path}"))?;
+                .with_context(|| format!("parse meta-calibrator snapshot {}", path.display()))?;
         let mut model_state = ModelState::new();
         model_state.load_meta_calibrator_snapshot(snapshot);
-        let model_cfg = ModelConfig::default();
-        let market_context = ModelMarketContext::btc_5m();
         Ok(Self {
             model: Some((model_state, model_cfg, market_context)),
         })
@@ -106,6 +113,7 @@ impl CtxEnricher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pm_model::{ModelConfig, ModelMarketContext};
     use pm_types::{BookLevel, ReplayEvent, ReplayFlags, SpotHistory, SpotTick};
 
     fn spot_tick(ts_ns: i64, price: f64) -> SpotTick {
@@ -205,8 +213,12 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/snap_test.json"
         );
-        let mut enr =
-            CtxEnricher::with_model_snapshot(fixture).expect("load snapshot fixture");
+        let mut enr = CtxEnricher::with_model_snapshot(
+            fixture,
+            ModelConfig::default(),
+            ModelMarketContext::default(),
+        )
+        .expect("load snapshot fixture");
         let spot = make_spot(60);
         let event = make_replay_event();
         let mut ctx = pm_strategy::Ctx::default();
@@ -218,6 +230,78 @@ mod tests {
         assert!(
             ctx.model_attribution.is_some(),
             "model_attribution should be Some after fill_model"
+        );
+    }
+
+    /// Contract test: market_context flows through to model attribution.
+    ///
+    /// Loads the same fixture into two enrichers — one with
+    /// `ModelMarketContext::default()` (champion setting, Unknown/0s) and one
+    /// with `ModelMarketContext::btc_5m()` (BTC/300s). The 9 market-context
+    /// slots in `meta_features.values` must differ between the two, proving the
+    /// param flows all the way through `fill_model`.
+    ///
+    /// `calibrated_p` is NOT asserted here: with an untrained fixture snapshot
+    /// the meta-calibrator returns the same floor for any feature vector.
+    /// Instead we assert on `META_FEATURE_NAMES[75] = "market_is_btc"`, which is
+    /// deterministically 0.0 for Unknown and 1.0 for BTC regardless of training.
+    #[test]
+    fn market_context_param_flows_through_to_model_output() {
+        use pm_model::META_FEATURE_NAMES;
+
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/snap_test.json"
+        );
+        let spot = make_spot(60);
+        let event = make_replay_event();
+
+        let mut enr_default = CtxEnricher::with_model_snapshot(
+            fixture,
+            ModelConfig::default(),
+            ModelMarketContext::default(),
+        )
+        .expect("load snapshot fixture (default context)");
+        let mut ctx_default = pm_strategy::Ctx::default();
+        enr_default.fill_model(&mut ctx_default, &event, event.ts_ns, 30, &spot);
+
+        let mut enr_btc5m = CtxEnricher::with_model_snapshot(
+            fixture,
+            ModelConfig::default(),
+            ModelMarketContext::btc_5m(),
+        )
+        .expect("load snapshot fixture (btc_5m context)");
+        let mut ctx_btc5m = pm_strategy::Ctx::default();
+        enr_btc5m.fill_model(&mut ctx_btc5m, &event, event.ts_ns, 30, &spot);
+
+        let attr_default = ctx_default
+            .model_attribution
+            .expect("default context must produce model_attribution");
+        let attr_btc5m = ctx_btc5m
+            .model_attribution
+            .expect("btc_5m context must produce model_attribution");
+
+        // Locate the "market_is_btc" feature by name to make the index robust.
+        let market_is_btc_idx = META_FEATURE_NAMES
+            .iter()
+            .position(|&n| n == "market_is_btc")
+            .expect("market_is_btc must exist in META_FEATURE_NAMES");
+
+        let val_default = attr_default.meta_features.values[market_is_btc_idx];
+        let val_btc5m = attr_btc5m.meta_features.values[market_is_btc_idx];
+
+        assert!(
+            (val_default - val_btc5m).abs() > 1e-6,
+            "meta_features[market_is_btc] must differ: default={val_default} btc_5m={val_btc5m}; \
+             market_context param is not flowing through fill_model",
+        );
+        assert_eq!(
+            val_default, 0.0,
+            "default context (Unknown asset) must produce market_is_btc=0.0, got {val_default}"
+        );
+        assert_eq!(
+            val_btc5m, 1.0,
+            "btc_5m context must produce market_is_btc=1.0, got {val_btc5m}"
         );
     }
 

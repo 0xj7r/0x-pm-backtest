@@ -93,3 +93,7 @@ The canonical metadata parquet also expands the validated universe: six assets (
 ## Appendix 4: hardened Feb-Apr final (2026-06-10)
 
 Full rerun under the hardened pipeline (canonical true resolutions, real NO ladders, look-ahead-free strike): **+$102,114 at thr 0.16** (+$97,733 at 0.12) across Feb 12 - Apr 30, ~13,100 trades at $50 clips, every ten-day shard positive except Feb 12-21 (-$313). Within 1-3% of the pre-hardening estimate in every shard — the fourth time the headline survived a correctness upgrade unchanged. The Feb-June record is now: Feb-Apr +$102.1k (validation, never tuned on), May 19-28 +$12.2k (test), June 1-7 +$11.9k (sealed holdout), with the only flat stretch being early February.
+
+## Appendix 5: the race clock (offline capture estimate, 2026-06-10)
+
+For 500 June entries, the real trades channel shows whether the targeted quote was actually consumed and how fast: **98% were taken by real takers within 60s** (the liquidity is real), median competitor delay **77ms** (p10 8ms, p90 496ms); only **35% of takes are slower than our 150ms**. Realistic capture at current latency therefore sits near the 25%-depth-capture stress row (~+$7k/June-week at $50 clips). Latency is a purchasable edge: the live agent runs in eu-west-1 while Polymarket is US-east — relocating to us-east-1 moves us up the take-delay curve. No live taker fills exist in any historical journal (the br2 "live" taker run was kill-switched into paper; recorded real-money executions are maker-only), so the micro-pilot remains the final word.

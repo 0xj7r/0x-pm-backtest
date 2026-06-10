@@ -21,6 +21,8 @@ pm-engine         = { workspace = true }
 pm-copytrade      = { path = "../pm-copytrade" }
 
 anyhow             = { workspace = true }
+bincode            = { workspace = true }
+zstd               = { workspace = true }
 clap               = { workspace = true }
 tokio              = { workspace = true }
 tracing            = { workspace = true }

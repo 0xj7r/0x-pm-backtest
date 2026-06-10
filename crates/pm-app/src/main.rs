@@ -159,6 +159,10 @@ enum Cmd {
         /// Down); enables real NO ladders instead of the synthetic 1-yes.
         #[arg(long)]
         down_assets: Option<PathBuf>,
+        /// Compact merged-tick cache dir (bincode+zstd; ~10x smaller than
+        /// parquet re-decode, written through on miss).
+        #[arg(long)]
+        tick_cache_dir: Option<PathBuf>,
     },
     /// Stream a Telonex book_snapshot parquet from S3 and print sanity stats.
     InspectS3 {
@@ -1134,6 +1138,7 @@ async fn main() -> Result<()> {
             calibrator_in,
             trades_out,
             down_assets,
+            tick_cache_dir,
         } => {
             let store = if let Some(ref dir) = local_cache_dir {
                 tracing::info!(?dir, "using local cache");
@@ -1176,6 +1181,7 @@ async fn main() -> Result<()> {
                     calibrator_in,
                     trades_out,
                     down_assets,
+                    tick_cache_dir,
                 },
             )
             .await

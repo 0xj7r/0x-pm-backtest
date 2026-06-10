@@ -52,6 +52,9 @@ pub struct AlphaArgs {
     /// JSONL of Down-token MarketHandle rows (metadata discovery with
     /// --token-outcome Down); enables the real NO ladder, keyed by slug.
     pub down_assets: Option<PathBuf>,
+    /// Compact merged-tick cache dir (bincode+zstd of the two-sided
+    /// BookTick series; ~10x smaller and faster than re-decoding parquet).
+    pub tick_cache_dir: Option<PathBuf>,
 }
 
 #[derive(serde::Serialize)]
@@ -111,6 +114,82 @@ enum Item {
     Done(Box<(MarketMeta, Vec<MarketRunOutput>)>),
 }
 
+// Compact merged-tick cache: post-merge two-sided BookTick series per
+// market, bincode + zstd, versioned. ~10x smaller than re-decoding the
+// up+down parquets and skips the merge entirely on repeat runs.
+const TICK_CACHE_MAGIC: &[u8; 4] = b"PTC1";
+
+fn tick_cache_path(dir: &Path, market: &MarketHandle, has_down: bool) -> PathBuf {
+    let suffix = if has_down { "2s" } else { "1s" };
+    dir.join(&market.date)
+        .join(format!("{}.{}.btc", market.asset_id, suffix))
+}
+
+fn read_tick_cache(path: &Path) -> Option<Vec<BookTick>> {
+    let raw = std::fs::read(path).ok()?;
+    if raw.len() < 4 || &raw[..4] != TICK_CACHE_MAGIC {
+        return None;
+    }
+    let decompressed = zstd::stream::decode_all(&raw[4..]).ok()?;
+    bincode::deserialize(&decompressed).ok()
+}
+
+fn write_tick_cache(path: &Path, ticks: &[BookTick]) {
+    let Ok(body) = bincode::serialize(ticks) else {
+        return;
+    };
+    let Ok(compressed) = zstd::stream::encode_all(body.as_slice(), 3) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut buf = Vec::with_capacity(4 + compressed.len());
+    buf.extend_from_slice(TICK_CACHE_MAGIC);
+    buf.extend_from_slice(&compressed);
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, &buf).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
+/// Merge the Down-token tape into the YES tape: latest NO state attached to
+/// each valid YES tick (pointer merge on timestamps).
+fn build_ticks(
+    events: &[pm_types::ReplayEvent],
+    down_events: &[pm_types::ReplayEvent],
+) -> Vec<BookTick> {
+    let mut down_idx = 0usize;
+    let mut last_no: Option<&pm_types::ReplayEvent> = None;
+    events
+        .iter()
+        .filter(|e| e.yes_bid > 0.0 && e.yes_ask > 0.0 && e.yes_ask < 1.0)
+        .map(|e| {
+            while down_idx < down_events.len() && down_events[down_idx].ts_ns <= e.ts_ns {
+                last_no = Some(&down_events[down_idx]);
+                down_idx += 1;
+            }
+            let (no_bid, no_ask, no_bids, no_asks) = match last_no {
+                Some(n) if n.yes_bid > 0.0 && n.yes_ask > 0.0 && n.yes_ask < 1.0 => {
+                    (n.yes_bid, n.yes_ask, n.bids, n.asks)
+                }
+                _ => (0.0, 0.0, Default::default(), Default::default()),
+            };
+            BookTick {
+                ts_ns: e.ts_ns,
+                yes_bid: e.yes_bid,
+                yes_ask: e.yes_ask,
+                bids: e.bids,
+                asks: e.asks,
+                no_bid,
+                no_ask,
+                no_bids,
+                no_asks,
+            }
+        })
+        .collect()
+}
+
 #[derive(Default)]
 struct ProcessCounters {
     n_run: usize,
@@ -137,6 +216,7 @@ async fn process_markets(
     replay_event_cache_dir: Option<&Path>,
     infer_outcome: bool,
     down_by_slug: &std::collections::HashMap<String, MarketHandle>,
+    tick_cache_dir: Option<&Path>,
 ) -> Result<ProcessOutput> {
     let store_inner = store.store();
     let n_cells = latencies_ms.len() * edge_thresholds.len();
@@ -185,32 +265,54 @@ async fn process_markets(
         let base_cfg = base_cfg.clone();
         let latencies = latencies.clone();
         let thresholds = thresholds.clone();
+        let tick_cache = tick_cache_dir.map(|p| p.to_path_buf());
         async move {
-            let events = load_replay_events_for_market(
-                &store,
-                store_inner.clone(),
-                &market,
-                MarketId(idx as u32),
-                cache_dir.as_deref(),
-            )
-            .await;
-            let down_events = match &down {
-                Some(d) => load_replay_events_for_market(
+            let has_down = down.is_some();
+            let cache_path = tick_cache
+                .as_deref()
+                .map(|d| tick_cache_path(d, &market, has_down));
+            let cached: Option<Vec<BookTick>> = match &cache_path {
+                Some(p) => {
+                    let p = p.clone();
+                    tokio::task::spawn_blocking(move || read_tick_cache(&p))
+                        .await
+                        .ok()
+                        .flatten()
+                }
+                None => None,
+            };
+            let (events, down_events) = if cached.is_some() {
+                (Ok(Vec::new()), Vec::new())
+            } else {
+                let events = load_replay_events_for_market(
                     &store,
-                    store_inner,
-                    d,
-                    MarketId(idx as u32 | 0x8000_0000),
+                    store_inner.clone(),
+                    &market,
+                    MarketId(idx as u32),
                     cache_dir.as_deref(),
                 )
-                .await
-                .unwrap_or_default(),
-                None => Vec::new(),
+                .await;
+                let down_events = match &down {
+                    Some(d) => load_replay_events_for_market(
+                        &store,
+                        store_inner,
+                        d,
+                        MarketId(idx as u32 | 0x8000_0000),
+                        cache_dir.as_deref(),
+                    )
+                    .await
+                    .unwrap_or_default(),
+                    None => Vec::new(),
+                };
+                (events, down_events)
             };
             tokio::task::spawn_blocking(move || {
                 compute_market(
                     &market,
                     events,
                     down_events,
+                    cached,
+                    cache_path.as_deref(),
                     spot,
                     infer_outcome,
                     &model,
@@ -251,6 +353,8 @@ fn compute_market(
     market: &MarketHandle,
     events_res: Result<Vec<pm_types::ReplayEvent>>,
     down_events: Vec<pm_types::ReplayEvent>,
+    cached_ticks: Option<Vec<BookTick>>,
+    cache_path: Option<&Path>,
     spot: Option<std::sync::Arc<pm_types::SpotHistory>>,
     infer_outcome: bool,
     model: &AlphaModel,
@@ -289,46 +393,25 @@ fn compute_market(
             }
         };
 
-        let events = match events_res {
-            Ok(e) => e,
-            Err(err) => {
-                tracing::warn!(market = %market.slug, error = %err, "tape load failed");
+        let from_cache = cached_ticks.is_some();
+        let ticks: Vec<BookTick> = if let Some(t) = cached_ticks {
+            t
+        } else {
+            let events = match events_res {
+                Ok(e) => e,
+                Err(err) => {
+                    tracing::warn!(market = %market.slug, error = %err, "tape load failed");
+                    return Item::SkipLoadError;
+                }
+            };
+            if events.is_empty() {
                 return Item::SkipLoadError;
             }
+            build_ticks(&events, &down_events)
         };
-        if events.is_empty() {
-            return Item::SkipLoadError;
+        if !from_cache && let Some(p) = cache_path {
+            write_tick_cache(p, &ticks);
         }
-
-        let mut down_idx = 0usize;
-        let mut last_no: Option<&pm_types::ReplayEvent> = None;
-        let ticks: Vec<BookTick> = events
-            .iter()
-            .filter(|e| e.yes_bid > 0.0 && e.yes_ask > 0.0 && e.yes_ask < 1.0)
-            .map(|e| {
-                while down_idx < down_events.len() && down_events[down_idx].ts_ns <= e.ts_ns {
-                    last_no = Some(&down_events[down_idx]);
-                    down_idx += 1;
-                }
-                let (no_bid, no_ask, no_bids, no_asks) = match last_no {
-                    Some(n) if n.yes_bid > 0.0 && n.yes_ask > 0.0 && n.yes_ask < 1.0 => {
-                        (n.yes_bid, n.yes_ask, n.bids, n.asks)
-                    }
-                    _ => (0.0, 0.0, Default::default(), Default::default()),
-                };
-                BookTick {
-                    ts_ns: e.ts_ns,
-                    yes_bid: e.yes_bid,
-                    yes_ask: e.yes_ask,
-                    bids: e.bids,
-                    asks: e.asks,
-                    no_bid,
-                    no_ask,
-                    no_bids,
-                    no_asks,
-                }
-            })
-            .collect();
         if ticks.is_empty() {
             return Item::SkipLoadError;
         }
@@ -450,6 +533,7 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
             args.replay_event_cache_dir.as_deref(),
             args.infer_outcome,
             &down_by_slug,
+            args.tick_cache_dir.as_deref(),
         )
         .await?;
         let mut cal = ExoCalibrator::default();
@@ -494,6 +578,7 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
         args.replay_event_cache_dir.as_deref(),
         args.infer_outcome,
         &down_by_slug,
+        args.tick_cache_dir.as_deref(),
     )
     .await?;
     if let Some(path) = &args.trades_out {

@@ -68,6 +68,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 # CLI
 clap          = { version = "4", features = ["derive"] }
 
+# Compact tick cache
+bincode       = "1"
+zstd          = "0.13"
+
+
 # HTTP (Telonex availability lookups)
 reqwest       = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 

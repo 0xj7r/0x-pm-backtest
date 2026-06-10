@@ -44,14 +44,30 @@ fn read_metrics_day(path: &Path) -> Result<Vec<(i64, f64)>> {
     let mut out = Vec::new();
     for row in reader.get_row_iter(None)? {
         let row = row?;
-        let ts = row.get_string(ct)?;
-        let oi: f64 = row.get_string(co)?.parse().unwrap_or(f64::NAN);
+        // pyarrow may have written create_time as either a string or a
+        // timestamp column depending on CSV inference; accept both.
+        let ts_ns = if let Ok(ts) = row.get_string(ct) {
+            NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S")
+                .with_context(|| format!("parse create_time {ts}"))?
+                .and_utc()
+                .timestamp_nanos_opt()
+                .unwrap_or(0)
+        } else if let Ok(ms) = row.get_timestamp_millis(ct) {
+            ms.saturating_mul(1_000_000)
+        } else if let Ok(us) = row.get_timestamp_micros(ct) {
+            us.saturating_mul(1_000)
+        } else {
+            continue;
+        };
+        let oi: f64 = match (row.get_string(co), row.get_double(co)) {
+            (Ok(v), _) => v.parse().unwrap_or(f64::NAN),
+            (_, Ok(v)) => v,
+            _ => continue,
+        };
         if !oi.is_finite() {
             continue;
         }
-        let dt = NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S")
-            .with_context(|| format!("parse create_time {ts}"))?;
-        out.push((dt.and_utc().timestamp_nanos_opt().unwrap_or(0), oi));
+        out.push((ts_ns, oi));
     }
     Ok(out)
 }

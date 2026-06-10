@@ -97,6 +97,16 @@ pub enum LogEvent {
         /// Settlement if held to resolution: 1-entry when won, -entry lost.
         settle_pnl_per_share: f64,
     },
+    /// Measure-only cross-venue telemetry: how far (ms) this venue's price
+    /// series leads our Binance ARRIVAL series (positive = venue first).
+    VenueLeadLag {
+        ts_utc: String,
+        venue: &'static str,
+        median_receipt_minus_exchange_ms: Option<i64>,
+        best_lead_ms: i64,
+        corr: f64,
+        n_samples: usize,
+    },
     Summary {
         ts_utc: String,
         n_active_markets: usize,
@@ -185,6 +195,96 @@ pub struct MarketWindow {
     pub entered: bool,
 }
 
+/// Rolling per-venue price prints on the local receipt clock, plus
+/// exchange-timestamp deltas where the venue provides event times.
+#[derive(Debug, Default)]
+pub struct VenueBuf {
+    ticks: VecDeque<(i64, f64)>, // (receipt_ms, price)
+    exch_deltas: VecDeque<i64>,
+}
+
+/// Venue tick retention (ms) for the lead-lag estimator window.
+const VENUE_KEEP_MS: i64 = 700_000;
+
+impl VenueBuf {
+    fn push(&mut self, receipt_ms: i64, price: f64, exchange_ms: Option<i64>) {
+        self.ticks.push_back((receipt_ms, price));
+        while let Some(&(t, _)) = self.ticks.front() {
+            if receipt_ms - t <= VENUE_KEEP_MS {
+                break;
+            }
+            self.ticks.pop_front();
+        }
+        if let Some(e) = exchange_ms {
+            self.exch_deltas.push_back(receipt_ms - e);
+            if self.exch_deltas.len() > LATENCY_SAMPLE_CAP {
+                self.exch_deltas.pop_front();
+            }
+        }
+    }
+}
+
+/// Sample a venue series on a fixed grid (forward-filled last price).
+fn grid_returns(ticks: &VecDeque<(i64, f64)>, start_ms: i64, step_ms: i64, n: usize) -> Vec<f64> {
+    let mut prices = Vec::with_capacity(n);
+    let mut it = ticks.iter().peekable();
+    let mut last: Option<f64> = None;
+    for k in 0..n {
+        let t = start_ms + k as i64 * step_ms;
+        while let Some(&&(ts, p)) = it.peek() {
+            if ts <= t {
+                last = Some(p);
+                it.next();
+            } else {
+                break;
+            }
+        }
+        prices.push(last.unwrap_or(0.0));
+    }
+    prices
+        .windows(2)
+        .map(|w| if w[0] > 0.0 && w[1] > 0.0 { (w[1] / w[0]).ln() } else { 0.0 })
+        .collect()
+}
+
+/// Best lead (ms) of `venue` over `reference` on the receipt clock:
+/// max-|corr| lag of 100ms-grid log-returns over the trailing 10 minutes.
+/// Positive = venue prints first. None until both series have signal.
+pub fn lead_lag_ms(
+    venue: &VenueBuf,
+    reference: &VenueBuf,
+    now_ms: i64,
+) -> Option<(i64, f64, usize)> {
+    const STEP: i64 = 100;
+    const SPAN: usize = 6_000; // 10 min of 100ms cells
+    const MAX_LAG_CELLS: i64 = 20; // +-2s
+    let start = now_ms - (SPAN as i64) * STEP;
+    let v = grid_returns(&venue.ticks, start, STEP, SPAN + 1);
+    let r = grid_returns(&reference.ticks, start, STEP, SPAN + 1);
+    let n = v.len().min(r.len());
+    let energy = |s: &[f64]| s.iter().map(|x| x * x).sum::<f64>();
+    let (ev, er) = (energy(&v[..n]), energy(&r[..n]));
+    if ev <= 0.0 || er <= 0.0 {
+        return None;
+    }
+    let mut best = (0i64, 0.0f64);
+    for lag in -MAX_LAG_CELLS..=MAX_LAG_CELLS {
+        // corr( venue[t], reference[t + lag] ): positive lag = venue leads.
+        let mut dot = 0.0;
+        for t in 0..n {
+            let rt = t as i64 + lag;
+            if rt >= 0 && (rt as usize) < n {
+                dot += v[t] * r[rt as usize];
+            }
+        }
+        let corr = dot / (ev.sqrt() * er.sqrt());
+        if corr.abs() > best.1.abs() {
+            best = (lag * STEP, corr);
+        }
+    }
+    Some((best.0, best.1, n))
+}
+
 /// An entry awaiting official resolution (crypto-price API, post-close).
 #[derive(Debug, Clone)]
 pub struct ResolutionWatch {
@@ -235,6 +335,11 @@ pub struct ShadowCore {
     pending: Vec<PendingTrade>,
     resolutions: Vec<ResolutionWatch>,
     stats: SummaryStats,
+    /// Measure-only cross-venue buffers: Binance on its ARRIVAL clock as the
+    /// reference, plus each candidate fast-trigger venue.
+    vbuf_binance: VenueBuf,
+    vbuf_kraken: VenueBuf,
+    vbuf_coinbase: VenueBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -269,6 +374,9 @@ impl ShadowCore {
             markets: HashMap::new(),
             pending: Vec::new(),
             resolutions: Vec::new(),
+            vbuf_binance: VenueBuf::default(),
+            vbuf_kraken: VenueBuf::default(),
+            vbuf_coinbase: VenueBuf::default(),
             stats: SummaryStats::default(),
         }
     }
@@ -286,6 +394,7 @@ impl ShadowCore {
         if !(price.is_finite() && price > 0.0) {
             return;
         }
+        self.vbuf_binance.push(receipt_ms, price, Some(exchange_ms));
         self.spot.push_back(SpotTick {
             ts_ns: exchange_ms * 1_000_000,
             price,
@@ -521,6 +630,44 @@ impl ShadowCore {
         out
     }
 
+    /// Record a print from a candidate fast-trigger venue (measure-only;
+    /// never enters the belief or the spot history).
+    pub fn push_venue(
+        &mut self,
+        venue: &'static str,
+        receipt_ms: i64,
+        price: f64,
+        exchange_ms: Option<i64>,
+    ) {
+        if !(price.is_finite() && price > 0.0) {
+            return;
+        }
+        match venue {
+            "kraken" => self.vbuf_kraken.push(receipt_ms, price, exchange_ms),
+            "coinbase" => self.vbuf_coinbase.push(receipt_ms, price, exchange_ms),
+            _ => {}
+        }
+    }
+
+    /// Per-venue lead-lag telemetry vs the Binance arrival series.
+    pub fn venue_events(&self, now_ns: i64, now_ms: i64) -> Vec<LogEvent> {
+        [("kraken", &self.vbuf_kraken), ("coinbase", &self.vbuf_coinbase)]
+            .into_iter()
+            .filter_map(|(venue, buf)| {
+                let (best_lead_ms, corr, n_samples) =
+                    lead_lag_ms(buf, &self.vbuf_binance, now_ms)?;
+                Some(LogEvent::VenueLeadLag {
+                    ts_utc: ts_utc(now_ns),
+                    venue,
+                    median_receipt_minus_exchange_ms: median(&buf.exch_deltas),
+                    best_lead_ms,
+                    corr,
+                    n_samples,
+                })
+            })
+            .collect()
+    }
+
     /// Resolution lookups due now; bumps each returned watch's retry clock
     /// (60s apart, 10 attempts max — exhausted watches are dropped).
     pub fn resolutions_due(&mut self, now_ns: i64) -> Vec<ResolutionWatch> {
@@ -712,6 +859,16 @@ pub async fn run_shadow(args: ShadowArgs) -> Result<()> {
         resolution_tx,
         shutdown_rx.clone(),
     ));
+    let kraken_task = tokio::spawn(feeds::venue_feed(
+        "kraken",
+        core.clone(),
+        shutdown_rx.clone(),
+    ));
+    let coinbase_task = tokio::spawn(feeds::venue_feed(
+        "coinbase",
+        core.clone(),
+        shutdown_rx.clone(),
+    ));
 
     // 10ms poll keeps the latency probe honest (~±10ms of the target);
     // decisions run on the harness's 1s cadence; summaries every 60s.
@@ -743,7 +900,9 @@ pub async fn run_shadow(args: ShadowArgs) -> Result<()> {
                     }
                     if now_ns >= next_summary_ns {
                         next_summary_ns = now_ns + 60_000_000_000;
-                        events.push(core.summary(now_ns, now_unix_ms()));
+                        let now_ms = now_unix_ms();
+                        events.push(core.summary(now_ns, now_ms));
+                        events.extend(core.venue_events(now_ns, now_ms));
                     }
                 }
                 for event in &events {
@@ -762,7 +921,14 @@ pub async fn run_shadow(args: ShadowArgs) -> Result<()> {
     let _ = shutdown_tx.send(true);
     let _ = tokio::time::timeout(
         std::time::Duration::from_secs(3),
-        futures::future::join_all([spot_task, discovery_task, book_task, marker_task]),
+        futures::future::join_all([
+            spot_task,
+            discovery_task,
+            book_task,
+            marker_task,
+            kraken_task,
+            coinbase_task,
+        ]),
     )
     .await;
     Ok(())
@@ -944,6 +1110,140 @@ mod feeds {
         core.lock()
             .expect("shadow core poisoned")
             .push_spot(exchange_ms, receipt_ms, price, qty, is_buyer_maker);
+        Ok(())
+    }
+
+    // Cross-venue measure-only feeds (Kraken, Coinbase)
+
+    const KRAKEN_WS_URL: &str = "wss://ws.kraken.com/v2";
+    const COINBASE_WS_URL: &str = "wss://ws-feed.exchange.coinbase.com";
+
+    fn iso_ms(v: Option<&Value>) -> Option<i64> {
+        let s = v?.as_str()?;
+        chrono::DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|t| t.timestamp_millis())
+    }
+
+    pub async fn venue_feed(
+        venue: &'static str,
+        core: Core,
+        mut shutdown: watch::Receiver<bool>,
+    ) {
+        let mut backoff = Duration::from_secs(1);
+        while !*shutdown.borrow() {
+            match venue_once(venue, &core, &mut shutdown).await {
+                Ok(()) => break,
+                Err(error) => {
+                    tracing::warn!(?error, venue, backoff_ms = backoff.as_millis() as u64,
+                        "venue feed failed; reconnecting");
+                    backoff_sleep(&mut backoff).await;
+                }
+            }
+        }
+    }
+
+    async fn venue_once(
+        venue: &'static str,
+        core: &Core,
+        shutdown: &mut watch::Receiver<bool>,
+    ) -> Result<()> {
+        let (url, subscribe) = match venue {
+            "kraken" => (
+                KRAKEN_WS_URL,
+                serde_json::json!({
+                    "method": "subscribe",
+                    "params": {"channel": "trade", "symbol": ["BTC/USD"]}
+                }),
+            ),
+            "coinbase" => (
+                COINBASE_WS_URL,
+                serde_json::json!({
+                    "type": "subscribe",
+                    "product_ids": ["BTC-USD"],
+                    "channels": ["matches"]
+                }),
+            ),
+            other => anyhow::bail!("unknown venue {other}"),
+        };
+        let (stream, _) = connect_async(url)
+            .await
+            .with_context(|| format!("connecting {venue} ws"))?;
+        tracing::info!(venue, "venue websocket connected");
+        let (mut write, mut read) = stream.split();
+        write
+            .send(Message::Text(subscribe.to_string().into()))
+            .await
+            .with_context(|| format!("{venue} subscribe"))?;
+        let mut pings = tokio::time::interval(Duration::from_secs(15));
+        pings.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut last_frame = tokio::time::Instant::now();
+
+        loop {
+            tokio::select! {
+                _ = shutdown.changed() => {
+                    let _ = write.send(Message::Close(None)).await;
+                    return Ok(());
+                }
+                _ = pings.tick() => {
+                    if last_frame.elapsed() > STALE_TIMEOUT {
+                        anyhow::bail!("{venue} ws stale (no frames)");
+                    }
+                    write.send(Message::Ping(Vec::new().into())).await
+                        .with_context(|| format!("{venue} ping"))?;
+                }
+                frame = read.next() => {
+                    last_frame = tokio::time::Instant::now();
+                    match frame {
+                        Some(Ok(Message::Text(text))) => {
+                            if let Err(error) = handle_venue_text(venue, core, &text) {
+                                tracing::warn!(?error, venue, "skipping malformed venue message");
+                            }
+                        }
+                        Some(Ok(Message::Ping(payload))) => {
+                            write.send(Message::Pong(payload)).await.ok();
+                        }
+                        Some(Ok(Message::Close(_))) => anyhow::bail!("{venue} ws closed by remote"),
+                        Some(Ok(_)) => {}
+                        Some(Err(error)) => return Err(error).context("venue ws frame error"),
+                        None => anyhow::bail!("{venue} ws stream ended"),
+                    }
+                }
+            }
+        }
+    }
+
+    fn handle_venue_text(venue: &'static str, core: &Core, text: &str) -> Result<()> {
+        let payload: Value = serde_json::from_str(text).context("decode venue payload")?;
+        let receipt_ms = now_unix_ms();
+        match venue {
+            "kraken" => {
+                if payload.get("channel").and_then(Value::as_str) != Some("trade") {
+                    return Ok(()); // status/heartbeat/subscription acks
+                }
+                let Some(data) = payload.get("data").and_then(Value::as_array) else {
+                    return Ok(());
+                };
+                let mut core = core.lock().expect("shadow core poisoned");
+                for t in data {
+                    if let Some(price) = value_f64(t.get("price")) {
+                        core.push_venue(venue, receipt_ms, price, iso_ms(t.get("timestamp")));
+                    }
+                }
+            }
+            "coinbase" => {
+                let kind = payload.get("type").and_then(Value::as_str);
+                if kind != Some("match") && kind != Some("last_match") {
+                    return Ok(());
+                }
+                if let Some(price) = value_f64(payload.get("price")) {
+                    core.lock()
+                        .expect("shadow core poisoned")
+                        .push_venue(venue, receipt_ms, price, iso_ms(payload.get("time")));
+                }
+            }
+            _ => {}
+        }
         Ok(())
     }
 
@@ -1655,6 +1955,41 @@ mod tests {
             t += 61 * NS;
         }
         assert!(core.resolutions_due(t).is_empty(), "watch expires after 10 attempts");
+    }
+
+    #[test]
+    fn lead_lag_detects_known_shift() {
+        // Same pseudo-random walk on both venues, the "fast" one printed
+        // 300ms earlier on the receipt clock; estimator must recover +300ms.
+        let mut fast = VenueBuf::default();
+        let mut slow = VenueBuf::default();
+        let mut price = 100_000.0f64;
+        let mut x = 0x2545F4914F6CDD1Du64;
+        let now_ms = 10_000_000i64;
+        for k in 0..3000i64 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let step = ((x % 2001) as f64 - 1000.0) / 50.0;
+            price += step;
+            let t = now_ms - 600_000 + k * 200;
+            fast.push(t, price, None);
+            slow.push(t + 300, price, None);
+        }
+        let (lead, corr, _) = lead_lag_ms(&fast, &slow, now_ms).unwrap();
+        assert_eq!(lead, 300, "expected +300ms lead, got {lead} (corr {corr})");
+        assert!(corr > 0.8, "shifted identical walks should correlate: {corr}");
+    }
+
+    #[test]
+    fn lead_lag_none_without_signal() {
+        let empty = VenueBuf::default();
+        let mut flat = VenueBuf::default();
+        for k in 0..100 {
+            flat.push(9_400_000 + k * 1000, 100.0, None);
+        }
+        assert!(lead_lag_ms(&empty, &flat, 10_000_000).is_none());
+        assert!(lead_lag_ms(&flat, &empty, 10_000_000).is_none());
     }
 
     #[test]

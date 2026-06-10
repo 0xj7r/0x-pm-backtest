@@ -541,11 +541,17 @@ impl ShadowCore {
             if m.entered || now_ns < open_ns || now_ns >= deadline_ns {
                 continue;
             }
+            // Binance-proxy strike FIRST: the official/gamma openPrice is a
+            // BTC/USD-index level ~14bps off Binance BTC/USDT (stable basis;
+            // 2026-06-10 study: mean -$91, sd $8). The belief's state is
+            // Binance, so the strike must share that basis — mixing in the
+            // official level injects a ~0.8-sigma phantom edge. Gamma is the
+            // fallback only when the spot buffer can't cover the open.
             let Some((strike, strike_source)) = ({
-                if let Some(s) = m.gamma_strike {
-                    Some((s, "gamma"))
+                if let Some(p) = spot.price_at_or_before(open_ns) {
+                    Some((p, "binance_proxy"))
                 } else {
-                    spot.price_at_or_before(open_ns).map(|p| (p, "binance_proxy"))
+                    m.gamma_strike.map(|s| (s, "gamma"))
                 }
             }) else {
                 continue;
@@ -1689,6 +1695,22 @@ mod tests {
         core
     }
 
+    /// Tape that plateaus at `pre_open` through the 1800s open (so the
+    /// Binance-proxy strike is exactly `pre_open`), then trades wavy ~100k.
+    fn core_with_spot_strike(pre_open: f64) -> ShadowCore {
+        let mut core = ShadowCore::new(cfg());
+        let mut price = 100_000.0;
+        for s in 0..2000i64 {
+            if s <= 1800 {
+                core.push_spot(s * 1_000, s * 1_000 + 25, pre_open, 1.0, false);
+            } else {
+                core.push_spot(s * 1_000, s * 1_000 + 25, price, 1.0, false);
+                price *= if s % 2 == 0 { 1.0001 } else { 0.9999 };
+            }
+        }
+        core
+    }
+
     fn market(strike: Option<f64>) -> MarketWindow {
         MarketWindow {
             slug: "btc-updown-5m-1800".to_string(),
@@ -1752,8 +1774,8 @@ mod tests {
 
     #[test]
     fn enters_up_side_once_on_threshold_crossing() {
-        let mut core = core_with_spot();
-        core.upsert_market(market(Some(99_000.0))); // strike far below: p_up ~ 1
+        let mut core = core_with_spot_strike(99_000.0); // proxy strike far below: p_up ~ 1
+        core.upsert_market(market(None));
         set_books(&mut core, 0.50, 0.50);
 
         let events = core.decide(1900 * NS);
@@ -1762,7 +1784,7 @@ mod tests {
             LogEvent::WouldEnter { side, edge, strike, strike_source, touch_price, touch_size, p_exo, .. } => {
                 assert_eq!(*side, "up");
                 assert_eq!(*strike, 99_000.0);
-                assert_eq!(*strike_source, "gamma");
+                assert_eq!(*strike_source, "binance_proxy");
                 assert_eq!(*touch_price, 0.50);
                 assert_eq!(*touch_size, 50.0);
                 assert!(*p_exo > 0.9, "p_exo={p_exo}");
@@ -1777,8 +1799,8 @@ mod tests {
 
     #[test]
     fn enters_down_side_using_real_down_book() {
-        let mut core = core_with_spot();
-        core.upsert_market(market(Some(101_000.0))); // strike far above: p_up ~ 0
+        let mut core = core_with_spot_strike(101_000.0); // proxy strike far above: p_up ~ 0
+        core.upsert_market(market(None));
         set_books(&mut core, 0.50, 0.50);
 
         let events = core.decide(1900 * NS);
@@ -1822,7 +1844,7 @@ mod tests {
 
     #[test]
     fn probe_and_exit_bookkeeping() {
-        let mut core = core_with_spot();
+        let mut core = core_with_spot_strike(99_000.0);
         core.upsert_market(market(Some(99_000.0)));
         set_books(&mut core, 0.50, 0.50);
         let entry_ns = 1900 * NS;
@@ -1883,7 +1905,7 @@ mod tests {
 
     #[test]
     fn probe_still_quoted_when_same_or_better_price_remains() {
-        let mut core = core_with_spot();
+        let mut core = core_with_spot_strike(99_000.0);
         core.upsert_market(market(Some(99_000.0)));
         set_books(&mut core, 0.50, 0.50);
         let entry_ns = 1900 * NS;
@@ -1904,7 +1926,7 @@ mod tests {
     #[test]
     fn exit_is_clamped_to_market_close() {
         // Long exit horizon so a deadline-legal entry still lands past close.
-        let mut core = core_with_spot();
+        let mut core = core_with_spot_strike(99_000.0);
         core.cfg.exit_after_s = 120;
         core.upsert_market(market(Some(99_000.0)));
         set_books(&mut core, 0.50, 0.50);
@@ -1920,7 +1942,7 @@ mod tests {
 
     #[test]
     fn resolution_watch_settles_and_clears() {
-        let mut core = core_with_spot();
+        let mut core = core_with_spot_strike(99_000.0);
         core.upsert_market(market(Some(99_000.0)));
         set_books(&mut core, 0.50, 0.50);
         assert_eq!(core.decide(1900 * NS).len(), 1);
@@ -1945,7 +1967,7 @@ mod tests {
 
     #[test]
     fn resolution_watch_retries_then_expires() {
-        let mut core = core_with_spot();
+        let mut core = core_with_spot_strike(99_000.0);
         core.upsert_market(market(Some(99_000.0)));
         set_books(&mut core, 0.50, 0.50);
         assert_eq!(core.decide(1900 * NS).len(), 1);
@@ -2008,7 +2030,7 @@ mod tests {
 
     #[test]
     fn no_entry_inside_stop_before_close_window() {
-        let mut core = core_with_spot();
+        let mut core = core_with_spot_strike(99_000.0);
         core.upsert_market(market(Some(99_000.0)));
         set_books(&mut core, 0.50, 0.50);
         assert!(core.decide(2095 * NS).is_empty(), "deadline is close - 90s");

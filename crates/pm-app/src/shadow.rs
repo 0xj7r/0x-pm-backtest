@@ -89,6 +89,14 @@ pub enum LogEvent {
         /// Side-oriented: exit_bid_for_our_side - entry_touch_price.
         mark_pnl_per_share: Option<f64>,
     },
+    Resolution {
+        ts_utc: String,
+        slug: String,
+        side: &'static str,
+        won: bool,
+        /// Settlement if held to resolution: 1-entry when won, -entry lost.
+        settle_pnl_per_share: f64,
+    },
     Summary {
         ts_utc: String,
         n_active_markets: usize,
@@ -177,6 +185,18 @@ pub struct MarketWindow {
     pub entered: bool,
 }
 
+/// An entry awaiting official resolution (crypto-price API, post-close).
+#[derive(Debug, Clone)]
+pub struct ResolutionWatch {
+    pub slug: String,
+    pub side: Side,
+    pub entry_touch_price: f64,
+    pub open_ts_s: i64,
+    pub close_ts_s: i64,
+    attempts: u32,
+    next_attempt_ns: i64,
+}
+
 /// A logged WOULD_ENTER awaiting its quote probe and mark-to-book exit.
 #[derive(Debug, Clone)]
 struct PendingTrade {
@@ -213,6 +233,7 @@ pub struct ShadowCore {
     book_receipt_deltas_ms: VecDeque<i64>,
     markets: HashMap<String, MarketWindow>,
     pending: Vec<PendingTrade>,
+    resolutions: Vec<ResolutionWatch>,
     stats: SummaryStats,
 }
 
@@ -247,6 +268,7 @@ impl ShadowCore {
             book_receipt_deltas_ms: VecDeque::new(),
             markets: HashMap::new(),
             pending: Vec::new(),
+            resolutions: Vec::new(),
             stats: SummaryStats::default(),
         }
     }
@@ -485,9 +507,54 @@ impl ShadowCore {
                     .min(close_ns),
                 exit_done: false,
             });
+            self.resolutions.push(ResolutionWatch {
+                slug: m.slug.clone(),
+                side,
+                entry_touch_price: touch.price,
+                open_ts_s: m.open_ts_s,
+                close_ts_s: m.close_ts_s,
+                attempts: 0,
+                next_attempt_ns: close_ns + 15_000_000_000,
+            });
         }
         self.pending.extend(entries);
         out
+    }
+
+    /// Resolution lookups due now; bumps each returned watch's retry clock
+    /// (60s apart, 10 attempts max — exhausted watches are dropped).
+    pub fn resolutions_due(&mut self, now_ns: i64) -> Vec<ResolutionWatch> {
+        self.resolutions.retain(|w| w.attempts < 10);
+        let mut due = Vec::new();
+        for w in &mut self.resolutions {
+            if now_ns >= w.next_attempt_ns {
+                w.attempts += 1;
+                w.next_attempt_ns = now_ns + 60_000_000_000;
+                due.push(w.clone());
+            }
+        }
+        due
+    }
+
+    /// Record an official outcome for a watched entry and emit the event.
+    pub fn apply_resolution(&mut self, slug: &str, side: Side, won: bool, now_ns: i64) -> Option<LogEvent> {
+        let idx = self
+            .resolutions
+            .iter()
+            .position(|w| w.slug == slug && w.side == side)?;
+        let w = self.resolutions.swap_remove(idx);
+        let settle = if won {
+            1.0 - w.entry_touch_price
+        } else {
+            -w.entry_touch_price
+        };
+        Some(LogEvent::Resolution {
+            ts_utc: ts_utc(now_ns),
+            slug: w.slug,
+            side: side.as_str(),
+            won,
+            settle_pnl_per_share: settle,
+        })
     }
 
     /// Emit due QUOTE_PROBE / WOULD_EXIT records. Call at fine cadence
@@ -638,6 +705,13 @@ pub async fn run_shadow(args: ShadowArgs) -> Result<()> {
         assets_rx,
         shutdown_rx.clone(),
     ));
+    let (resolution_tx, mut resolution_rx) =
+        tokio::sync::mpsc::unbounded_channel::<LogEvent>();
+    let marker_task = tokio::spawn(feeds::resolution_marker_feed(
+        core.clone(),
+        resolution_tx,
+        shutdown_rx.clone(),
+    ));
 
     // 10ms poll keeps the latency probe honest (~±10ms of the target);
     // decisions run on the harness's 1s cadence; summaries every 60s.
@@ -651,6 +725,10 @@ pub async fn run_shadow(args: ShadowArgs) -> Result<()> {
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("SIGINT: flushing shadow log and exiting");
                 break;
+            }
+            Some(event) = resolution_rx.recv() => {
+                tracing::info!(event = %serde_json::to_string(&event).unwrap_or_default(), "shadow");
+                logger.write(&event)?;
             }
             _ = tick.tick() => {
                 let now_ns = now_unix_ns();
@@ -684,7 +762,7 @@ pub async fn run_shadow(args: ShadowArgs) -> Result<()> {
     let _ = shutdown_tx.send(true);
     let _ = tokio::time::timeout(
         std::time::Duration::from_secs(3),
-        futures::future::join_all([spot_task, discovery_task, book_task]),
+        futures::future::join_all([spot_task, discovery_task, book_task, marker_task]),
     )
     .await;
     Ok(())
@@ -702,8 +780,12 @@ mod feeds {
     use tokio::sync::watch;
     use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-    const BINANCE_WS_URL: &str = "wss://stream.binance.com:9443/ws/btcusdt@aggTrade";
+    // Raw trade stream (not aggTrade: aggregation adds publish delay).
+    const BINANCE_WS_URL: &str = "wss://stream.binance.com:9443/ws/btcusdt@trade";
+    /// Parallel Binance connections; first arrival wins, dedup by trade id.
+    const BINANCE_CONNS: usize = 3;
     const PM_BOOK_WS_URL: &str = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
+    const CRYPTO_PRICE_URL: &str = "https://polymarket.com/api/crypto/crypto-price";
     const GAMMA_MARKETS_URL: &str = "https://gamma-api.polymarket.com/markets";
     const DISCOVERY_INTERVAL: Duration = Duration::from_secs(20);
     const STALE_TIMEOUT: Duration = Duration::from_secs(45);
@@ -734,21 +816,66 @@ mod feeds {
 
     // Binance spot
 
-    pub async fn binance_spot_feed(core: Core, mut shutdown: watch::Receiver<bool>) {
+    /// First-arrival dedup across the parallel connections, keyed by trade
+    /// id. Bounded ring so memory stays flat.
+    #[derive(Default)]
+    pub struct TradeDedup {
+        seen: std::collections::HashSet<i64>,
+        order: std::collections::VecDeque<i64>,
+    }
+
+    impl TradeDedup {
+        pub fn first_arrival(&mut self, trade_id: i64) -> bool {
+            if !self.seen.insert(trade_id) {
+                return false;
+            }
+            self.order.push_back(trade_id);
+            if self.order.len() > 8192
+                && let Some(old) = self.order.pop_front()
+            {
+                self.seen.remove(&old);
+            }
+            true
+        }
+    }
+
+    pub async fn binance_spot_feed(core: Core, shutdown: watch::Receiver<bool>) {
+        let dedup = Arc::new(Mutex::new(TradeDedup::default()));
+        let conns: Vec<_> = (0..BINANCE_CONNS)
+            .map(|idx| {
+                let core = core.clone();
+                let dedup = dedup.clone();
+                let shutdown = shutdown.clone();
+                tokio::spawn(binance_conn(idx, core, dedup, shutdown))
+            })
+            .collect();
+        futures::future::join_all(conns).await;
+    }
+
+    async fn binance_conn(
+        idx: usize,
+        core: Core,
+        dedup: Arc<Mutex<TradeDedup>>,
+        mut shutdown: watch::Receiver<bool>,
+    ) {
         let mut backoff = Duration::from_secs(1);
         while !*shutdown.borrow() {
-            match binance_once(&core, &mut shutdown).await {
+            match binance_once(&core, &dedup, &mut shutdown).await {
                 Ok(()) => break,
                 Err(error) => {
-                    tracing::warn!(?error, backoff_ms = backoff.as_millis() as u64,
-                        "binance spot feed failed; reconnecting");
+                    tracing::warn!(?error, conn = idx, backoff_ms = backoff.as_millis() as u64,
+                        "binance spot conn failed; reconnecting");
                     backoff_sleep(&mut backoff).await;
                 }
             }
         }
     }
 
-    async fn binance_once(core: &Core, shutdown: &mut watch::Receiver<bool>) -> Result<()> {
+    async fn binance_once(
+        core: &Core,
+        dedup: &Arc<Mutex<TradeDedup>>,
+        shutdown: &mut watch::Receiver<bool>,
+    ) -> Result<()> {
         let (stream, _) = connect_async(BINANCE_WS_URL)
             .await
             .context("connecting binance spot ws")?;
@@ -776,7 +903,7 @@ mod feeds {
                     match frame {
                         Some(Ok(Message::Text(text))) => {
                             // One malformed message must never kill the loop.
-                            if let Err(error) = handle_binance_text(core, &text) {
+                            if let Err(error) = handle_binance_text(core, dedup, &text) {
                                 tracing::warn!(?error, "skipping malformed binance message");
                             }
                         }
@@ -793,26 +920,109 @@ mod feeds {
         }
     }
 
-    fn handle_binance_text(core: &Core, text: &str) -> Result<()> {
+    fn handle_binance_text(core: &Core, dedup: &Arc<Mutex<TradeDedup>>, text: &str) -> Result<()> {
         let payload: Value = serde_json::from_str(text).context("decode binance payload")?;
-        if payload.get("e").and_then(Value::as_str) != Some("aggTrade") {
+        if payload.get("e").and_then(Value::as_str) != Some("trade") {
             return Ok(());
         }
+        let trade_id = value_i64(payload.get("t")).context("trade missing id")?;
         let (Some(price), Some(qty)) = (
             value_f64(payload.get("p")),
             value_f64(payload.get("q")),
         ) else {
-            anyhow::bail!("aggTrade missing price/quantity");
+            anyhow::bail!("trade missing price/quantity");
         };
         // Exchange event time: the stream's T field (trade time, ms).
         let exchange_ms = value_i64(payload.get("T"))
             .or_else(|| value_i64(payload.get("E")))
-            .context("aggTrade missing T/E timestamp")?;
+            .context("trade missing T/E timestamp")?;
         let is_buyer_maker = payload.get("m").and_then(Value::as_bool).unwrap_or(false);
+        let receipt_ms = now_unix_ms();
+        if !dedup.lock().expect("dedup poisoned").first_arrival(trade_id) {
+            return Ok(()); // a faster sibling connection already delivered it
+        }
         core.lock()
             .expect("shadow core poisoned")
-            .push_spot(exchange_ms, now_unix_ms(), price, qty, is_buyer_maker);
+            .push_spot(exchange_ms, receipt_ms, price, qty, is_buyer_maker);
         Ok(())
+    }
+
+    // Resolution marker
+
+    /// Settle watched entries against the official crypto-price API once
+    /// their windows complete; emits Resolution events over the channel.
+    pub async fn resolution_marker_feed(
+        core: Core,
+        events: tokio::sync::mpsc::UnboundedSender<super::LogEvent>,
+        mut shutdown: watch::Receiver<bool>,
+    ) {
+        let client = reqwest::Client::new();
+        let mut tick = tokio::time::interval(Duration::from_secs(20));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = shutdown.changed() => return,
+                _ = tick.tick() => {}
+            }
+            let now_ns = super::now_unix_ns();
+            let due = core.lock().expect("shadow core poisoned").resolutions_due(now_ns);
+            for w in due {
+                match fetch_resolution(&client, &w).await {
+                    Ok(Some(won)) => {
+                        let ev = core
+                            .lock()
+                            .expect("shadow core poisoned")
+                            .apply_resolution(&w.slug, w.side, won, super::now_unix_ns());
+                        if let Some(ev) = ev {
+                            let _ = events.send(ev);
+                        }
+                    }
+                    Ok(None) => {} // not completed yet; the watch retries
+                    Err(error) => {
+                        tracing::warn!(?error, slug = %w.slug, "resolution lookup failed")
+                    }
+                }
+            }
+        }
+    }
+
+    async fn fetch_resolution(
+        client: &reqwest::Client,
+        w: &super::ResolutionWatch,
+    ) -> Result<Option<bool>> {
+        let secs = w.close_ts_s - w.open_ts_s;
+        let variant = match secs {
+            300 => "fiveminute",
+            900 => "fifteen",
+            3600 => "hourly",
+            14400 => "fourhour",
+            _ => anyhow::bail!("unsupported window {secs}s"),
+        };
+        let symbol = w.slug.split('-').next().unwrap_or("btc").to_uppercase();
+        let url = format!(
+            "{CRYPTO_PRICE_URL}?symbol={symbol}&eventStartTime={}&variant={variant}&endDate={}",
+            w.open_ts_s, w.close_ts_s
+        );
+        let v: Value = client
+            .get(&url)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        if !v.get("completed").and_then(Value::as_bool).unwrap_or(false) {
+            return Ok(None);
+        }
+        let (Some(open), Some(close)) = (value_f64(v.get("openPrice")), value_f64(v.get("closePrice")))
+        else {
+            return Ok(None);
+        };
+        let up_won = close > open;
+        Ok(Some(match w.side {
+            super::Side::Up => up_won,
+            super::Side::Down => !up_won,
+        }))
     }
 
     // Gamma market discovery
@@ -1406,6 +1616,59 @@ mod tests {
         let exit = core.poll_due(2100 * NS);
         assert_eq!(exit.len(), 1);
         assert!(matches!(exit[0], LogEvent::WouldExit { .. }));
+    }
+
+    #[test]
+    fn resolution_watch_settles_and_clears() {
+        let mut core = core_with_spot();
+        core.upsert_market(market(Some(99_000.0)));
+        set_books(&mut core, 0.50, 0.50);
+        assert_eq!(core.decide(1900 * NS).len(), 1);
+        // Not due before close + 15s grace.
+        assert!(core.resolutions_due(2100 * NS).is_empty());
+        let due = core.resolutions_due(2116 * NS);
+        assert_eq!(due.len(), 1);
+        let w = &due[0];
+        // Spot 100k vs strike 99k => entry side was Up. A losing outcome
+        // settles at -entry; the watch is consumed.
+        let ev = core.apply_resolution(&w.slug, w.side, false, 2200 * NS).unwrap();
+        match ev {
+            LogEvent::Resolution { won, settle_pnl_per_share, .. } => {
+                assert!(!won);
+                assert!((settle_pnl_per_share - -w.entry_touch_price).abs() < 1e-12);
+            }
+            other => panic!("expected Resolution, got {other:?}"),
+        }
+        assert!(core.apply_resolution(&w.slug, w.side, false, 2300 * NS).is_none());
+        assert!(core.resolutions_due(2400 * NS).is_empty());
+    }
+
+    #[test]
+    fn resolution_watch_retries_then_expires() {
+        let mut core = core_with_spot();
+        core.upsert_market(market(Some(99_000.0)));
+        set_books(&mut core, 0.50, 0.50);
+        assert_eq!(core.decide(1900 * NS).len(), 1);
+        let mut t = 2116 * NS;
+        for _ in 0..10 {
+            assert_eq!(core.resolutions_due(t).len(), 1);
+            t += 61 * NS;
+        }
+        assert!(core.resolutions_due(t).is_empty(), "watch expires after 10 attempts");
+    }
+
+    #[test]
+    fn trade_dedup_first_arrival_only() {
+        let mut d = super::feeds::TradeDedup::default();
+        assert!(d.first_arrival(1));
+        assert!(!d.first_arrival(1));
+        assert!(d.first_arrival(2));
+        for id in 100..9000 {
+            d.first_arrival(id);
+        }
+        // Ring evicted id=1; re-arrival counts as new (acceptable: trade ids
+        // this stale never race between live connections).
+        assert!(d.first_arrival(1));
     }
 
     #[test]

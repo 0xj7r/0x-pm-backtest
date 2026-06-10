@@ -25,6 +25,10 @@ CREATE TABLE IF NOT EXISTS exits (
   ts_utc TEXT, slug TEXT, side TEXT, exit_touch_price REAL,
   mark_pnl_per_share REAL, PRIMARY KEY (slug, side, ts_utc)
 );
+CREATE TABLE IF NOT EXISTS resolutions (
+  ts_utc TEXT, slug TEXT, side TEXT, won INTEGER,
+  settle_pnl_per_share REAL, PRIMARY KEY (slug, side)
+);
 CREATE TABLE IF NOT EXISTS summaries (
   ts_utc TEXT PRIMARY KEY, n_active_markets INTEGER, n_entries_total INTEGER,
   probe_still_quoted_rate REAL, mean_mark_pnl_per_share REAL,
@@ -83,6 +87,11 @@ def main():
                         (r.get("ts_utc"), r.get("slug"), r.get("side"),
                          f(r, "exit_touch_price") or ((r.get("exit_touch") or {}).get("price") if isinstance(r.get("exit_touch"), dict) else None),
                          f(r, "mark_pnl_per_share")))
+                elif t == "resolution":
+                    db.execute(
+                        "INSERT OR IGNORE INTO resolutions VALUES (?,?,?,?,?)",
+                        (r.get("ts_utc"), r.get("slug"), r.get("side"),
+                         1 if r.get("won") else 0, f(r, "settle_pnl_per_share")))
                 elif t == "summary":
                     db.execute(
                         "INSERT OR IGNORE INTO summaries VALUES (?,?,?,?,?,?,?,?,?)",

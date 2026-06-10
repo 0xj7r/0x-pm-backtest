@@ -9,6 +9,4 @@ publish = false
 [dependencies]
 pm-types = { workspace = true }
 serde = { workspace = true }
-
-[dev-dependencies]
 serde_json = { workspace = true }

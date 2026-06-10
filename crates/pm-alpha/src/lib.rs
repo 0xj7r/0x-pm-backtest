@@ -18,7 +18,7 @@ pub mod state;
 pub mod vol;
 
 pub use calibrator::{ExoCalibrator, ExoCalibratorSnapshot, ExoFeatures, TrainingConfig, TrainingSample};
-pub use directional::{DIR_FEATURE_NAMES, DIR_FEATURES, DirFeatures, dir_features};
+pub use directional::{DIR_FEATURE_NAMES, DIR_FEATURES, DirFeatures, DirModel, dir_features};
 pub use fair_value::{FairValueEstimate, FairValueModel, NoSignalReason};
 pub use model::{AlphaModel, AlphaModelConfig, Belief, Evaluation};
 pub use regime::Regime;

@@ -201,6 +201,10 @@ enum Cmd {
         /// Load a calibrator snapshot instead of training.
         #[arg(long)]
         calibrator_in: Option<PathBuf>,
+        /// Trained continuation model JSON (scripts/dir_train.py); gates and
+        /// prices Aligned entries.
+        #[arg(long)]
+        dir_model: Option<PathBuf>,
         /// Dump directional continuation samples from the training pass.
         #[arg(long)]
         dir_samples_out: Option<PathBuf>,
@@ -1224,6 +1228,7 @@ async fn main() -> Result<()> {
             calibrate_split,
             calibrator_out,
             calibrator_in,
+            dir_model,
             dir_samples_out,
             trades_out,
             down_assets,
@@ -1278,6 +1283,7 @@ async fn main() -> Result<()> {
                     calibrate_split,
                     calibrator_out,
                     calibrator_in,
+                    dir_model,
                     dir_samples_out,
                     trades_out,
                     down_assets,

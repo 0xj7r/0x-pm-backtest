@@ -54,6 +54,9 @@ pub struct AlphaArgs {
     pub calibrate_split: Option<String>,
     pub calibrator_out: Option<PathBuf>,
     pub calibrator_in: Option<PathBuf>,
+    /// Trained continuation model JSON ({w,b,mu,sd} from
+    /// scripts/dir_train.py); gates and prices Aligned entries.
+    pub dir_model: Option<PathBuf>,
     /// Dump directional continuation samples (requires --calibrate-split or
     /// any training pass) to this JSONL path.
     pub dir_samples_out: Option<PathBuf>,
@@ -601,6 +604,7 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
         let base_model = AlphaModel {
             cfg: model_cfg,
             calibrator: None,
+            dir_model: None,
         };
         let train_out = process_markets(
             store,
@@ -656,9 +660,18 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
         println!("calibrator loaded: {}", path.display());
     }
 
+    let dir_model = match &args.dir_model {
+        Some(path) => {
+            let dm = pm_alpha::DirModel::load_json(path)?;
+            println!("dir model loaded: {}", path.display());
+            Some(dm)
+        }
+        None => None,
+    };
     let model = AlphaModel {
         cfg: model_cfg,
         calibrator,
+        dir_model,
     };
     let eval_out = process_markets(
         store,

@@ -129,6 +129,135 @@ pub fn dir_features(state: &ExoState, sigma_bar_bps: f64) -> DirFeatures {
     }
 }
 
+/// Trained P(continuation) logistic head over [`DirFeatures`], fit offline
+/// (scripts/dir_train.py) and loaded from JSON. Features are oriented
+/// move-relative before scoring: signed features flip with the move's
+/// direction, trend magnitudes enter as absolute values. Must stay in
+/// lockstep with the trainer's orientation.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct DirModel {
+    pub w: [f64; DIR_FEATURES],
+    pub b: f64,
+    pub mu: [f64; DIR_FEATURES],
+    pub sd: [f64; DIR_FEATURES],
+}
+
+/// Indices whose sign flips with move direction (funding, basis, flows,
+/// alignment); trend-sigma indices 8..=10 enter as magnitudes.
+const SIGNED: [usize; 5] = [0, 3, 4, 7, 11];
+
+impl DirModel {
+    pub fn load_json(path: &std::path::Path) -> std::io::Result<Self> {
+        let s = std::fs::read_to_string(path)?;
+        serde_json::from_str(&s).map_err(std::io::Error::other)
+    }
+
+    /// Probability the in-progress move continues to resolution.
+    pub fn p_continuation(&self, f: &DirFeatures, move_up: bool) -> f64 {
+        let sgn = if move_up { 1.0 } else { -1.0 };
+        let mut z = self.b;
+        for i in 0..DIR_FEATURES {
+            let v = f.values[i] as f64;
+            let x = if SIGNED.contains(&i) {
+                v * sgn
+            } else if (8..=10).contains(&i) {
+                v.abs()
+            } else {
+                v
+            };
+            z += self.w[i] * (x - self.mu[i]) / self.sd[i].max(1e-9);
+        }
+        1.0 / (1.0 + (-z).exp())
+    }
+
+    /// P(resolves Up) when a move is in progress (|trend_60s| >= 0.5 bar
+    /// sigma, the trainer's inclusion gate); `None` when no move.
+    pub fn p_up(&self, f: &DirFeatures) -> Option<f64> {
+        let t60 = f.values[8];
+        if t60.abs() < 0.5 {
+            return None;
+        }
+        let move_up = t60 > 0.0;
+        let p_cont = self.p_continuation(f, move_up);
+        Some(if move_up { p_cont } else { 1.0 - p_cont })
+    }
+}
+
+#[cfg(test)]
+mod dir_model_tests {
+    use super::*;
+
+    fn unit_model() -> DirModel {
+        DirModel {
+            w: [0.0; DIR_FEATURES],
+            b: 0.0,
+            mu: [0.0; DIR_FEATURES],
+            sd: [1.0; DIR_FEATURES],
+        }
+    }
+
+    #[test]
+    fn no_move_no_belief() {
+        let m = unit_model();
+        let mut f = DirFeatures { values: [0.0; DIR_FEATURES] };
+        f.values[8] = 0.3; // below the 0.5-sigma move gate
+        assert!(m.p_up(&f).is_none());
+    }
+
+    #[test]
+    fn orientation_is_symmetric() {
+        // With weight only on a signed feature, mirroring the move (flip
+        // trend sign AND signed features) must mirror the belief exactly.
+        let mut m = unit_model();
+        m.w[11] = 1.0; // trend_alignment (signed)
+        let mut up = DirFeatures { values: [0.0; DIR_FEATURES] };
+        up.values[8] = 1.0;
+        up.values[11] = 1.0;
+        let mut down = up;
+        down.values[8] = -1.0;
+        down.values[11] = -1.0;
+        let p_up = m.p_up(&up).unwrap();
+        let p_dn = m.p_up(&down).unwrap();
+        assert!((p_up - (1.0 - p_dn)).abs() < 1e-12, "{p_up} vs {p_dn}");
+        assert!(p_up > 0.5, "aligned up-move should favour YES: {p_up}");
+    }
+
+    #[test]
+    fn parity_with_python_trainer() {
+        // The trained Feb-Mar model scoring a fixed vector must match the
+        // python reference (scripts/dir_train.py orientation) to 1e-9; a
+        // drift here means trainer and DirModel orientations diverged.
+        let path = std::path::Path::new("../../data/runs/alpha/dir/dir_logistic.json");
+        if !path.exists() {
+            return; // model artifact not present on this checkout
+        }
+        let m = DirModel::load_json(path).unwrap();
+        let f = DirFeatures {
+            values: [
+                -3.0, -1.2, 0.5, 12.0, 0.4, 2.1, 0.0, 0.3, 1.7, 1.1, -0.4, 1.0, 0.8, 0.45,
+            ],
+        };
+        let p = m.p_up(&f).unwrap();
+        assert!((p - 0.7650203858472784).abs() < 1e-9, "got {p}");
+    }
+
+    #[test]
+    fn trend_magnitude_direction_invariant() {
+        // Weight on a magnitude feature (trend_60s) must contribute the
+        // SAME continuation push for up and down moves.
+        let mut m = unit_model();
+        m.w[8] = 1.0;
+        let mut up = DirFeatures { values: [0.0; DIR_FEATURES] };
+        up.values[8] = 2.0;
+        let mut down = up;
+        down.values[8] = -2.0;
+        let c_up = m.p_continuation(&up, true);
+        let c_dn = m.p_continuation(&down, false);
+        assert!((c_up - c_dn).abs() < 1e-12);
+        assert!(c_up > 0.5);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

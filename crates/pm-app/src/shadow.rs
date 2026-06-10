@@ -234,6 +234,7 @@ impl ShadowCore {
                 momentum_weight: 1.0,
             },
             calibrator: None,
+            dir_model: None,
         };
         Self {
             cfg,
@@ -1392,11 +1393,14 @@ mod tests {
 
     #[test]
     fn exit_is_clamped_to_market_close() {
+        // Long exit horizon so a deadline-legal entry still lands past close.
         let mut core = core_with_spot();
+        core.cfg.exit_after_s = 120;
         core.upsert_market(market(Some(99_000.0)));
         set_books(&mut core, 0.50, 0.50);
-        // Entry 15s before close: exit_after_s=30 would land past close.
-        let entry_ns = 2085 * NS;
+        // Entry 91s before close (inside the 90s deadline); exit_after=120s
+        // would land 29s past close and must clamp to close.
+        let entry_ns = 2009 * NS;
         assert_eq!(core.decide(entry_ns).len(), 1);
         assert!(core.poll_due(2099 * NS).iter().all(|e| matches!(e, LogEvent::QuoteProbe { .. })));
         let exit = core.poll_due(2100 * NS);
@@ -1409,7 +1413,7 @@ mod tests {
         let mut core = core_with_spot();
         core.upsert_market(market(Some(99_000.0)));
         set_books(&mut core, 0.50, 0.50);
-        assert!(core.decide(2095 * NS).is_empty(), "deadline is close - 10s");
+        assert!(core.decide(2095 * NS).is_empty(), "deadline is close - 90s");
         assert!(core.decide(1700 * NS).is_empty(), "not open yet");
     }
 

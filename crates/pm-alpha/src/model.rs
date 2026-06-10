@@ -108,6 +108,9 @@ fn finish(estimate: FairValueEstimate, sigma_bar_bps: f64, momentum_return: f64)
 pub struct AlphaModel {
     pub cfg: AlphaModelConfig,
     pub calibrator: Option<crate::calibrator::ExoCalibrator>,
+    /// Trained continuation head; consulted only for Aligned entries (the
+    /// fade's belief stays the pure exogenous fair value).
+    pub dir_model: Option<crate::directional::DirModel>,
 }
 
 #[derive(Debug, Clone, Copy)]

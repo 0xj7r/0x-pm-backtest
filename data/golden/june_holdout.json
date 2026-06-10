@@ -10,6 +10,7 @@
     "taker_fee_bps": 0.0,
     "edge_threshold": 0.16,
     "notional_usdc": 50.0,
+    "kelly_sizing": false,
     "depth_capture_frac": 1.0,
     "skip_touch_level": false,
     "decision_dt_ms": 1000,

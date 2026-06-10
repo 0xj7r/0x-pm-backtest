@@ -23,6 +23,9 @@ struct Decision {
     tick_idx: usize,
     ts_ns: i64,
     p_up: f64,
+    /// Continuation-model belief, present only when a dir model is loaded,
+    /// the run is Aligned-mode, and a move is in progress at this instant.
+    dir_p_up: Option<f64>,
     mid: f64,
     yes_ask: f64,
     no_buy: f64,
@@ -34,6 +37,8 @@ struct BeliefPass {
     train_samples: Vec<TrainingSample>,
     dir_samples: Vec<crate::directional::DirSample>,
     had_belief: bool,
+    /// True when a continuation model gates Aligned entries this run.
+    dir_model_active: bool,
 }
 
 fn belief_pass(
@@ -54,6 +59,7 @@ fn belief_pass(
         train_samples: Vec::new(),
         dir_samples: Vec::new(),
         had_belief: false,
+        dir_model_active: model.dir_model.is_some() && cfg.entry_mode == EntryMode::Aligned,
     };
     let mut next_decision_ns = open_ns;
     let mut next_sample = 0usize;
@@ -142,10 +148,17 @@ fn belief_pass(
         let Some(no_buy) = tick.no_buy_price() else {
             continue;
         };
+        let dir_p_up = match (&model.dir_model, cfg.entry_mode) {
+            (Some(dm), EntryMode::Aligned) => {
+                dm.p_up(&crate::directional::dir_features(&state, ev.raw.sigma_bar_bps))
+            }
+            _ => None,
+        };
         pass.decisions.push(Decision {
             tick_idx: i,
             ts_ns: tick.ts_ns,
             p_up: ev.p,
+            dir_p_up,
             mid,
             yes_ask: tick.yes_ask as f64,
             no_buy,
@@ -178,9 +191,16 @@ fn execute(
         if d.ts_ns < next_entry_ns {
             continue;
         }
+        // Aligned runs with a continuation model trade ITS belief, and only
+        // when a move is in progress; the fade keeps the exogenous belief.
+        let p_up = match (cfg.entry_mode, d.dir_p_up) {
+            (EntryMode::Aligned, Some(p)) => p,
+            (EntryMode::Aligned, None) if pass.dir_model_active => continue,
+            _ => d.p_up,
+        };
         // Edge per side against touch prices (entry test; fill walks depth).
-        let edge_yes = d.p_up - d.yes_ask;
-        let edge_no = (1.0 - d.p_up) - d.no_buy; // real NO ask when loaded
+        let edge_yes = p_up - d.yes_ask;
+        let edge_no = (1.0 - p_up) - d.no_buy; // real NO ask when loaded
         let (side, edge) = if edge_yes >= edge_no {
             (Side::Yes, edge_yes)
         } else {
@@ -208,8 +228,8 @@ fn execute(
             Side::No => d.no_buy,
         };
         let p_side = match side {
-            Side::Yes => d.p_up,
-            Side::No => 1.0 - d.p_up,
+            Side::Yes => p_up,
+            Side::No => 1.0 - p_up,
         };
         let notional = if cfg.kelly_sizing {
             // Half-trust the belief (shrink toward the market's price; the

@@ -56,7 +56,8 @@ rust_decimal  = "1"
 
 # Concurrency
 rayon         = "1"
-tokio         = { version = "1", features = ["rt-multi-thread", "macros", "signal", "fs", "time"] }
+tokio         = { version = "1", features = ["rt-multi-thread", "macros", "signal", "fs", "time", "sync"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 async-trait   = "0.1"
 
 # Errors & logging

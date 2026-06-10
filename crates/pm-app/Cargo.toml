@@ -25,6 +25,7 @@ bincode            = { workspace = true }
 zstd               = { workspace = true }
 clap               = { workspace = true }
 tokio              = { workspace = true }
+tokio-tungstenite  = { workspace = true }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
 chrono             = { workspace = true }

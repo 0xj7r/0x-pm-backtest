@@ -25,6 +25,7 @@ use std::time::Instant;
 mod alpha;
 mod discovery;
 mod perp;
+mod shadow;
 mod engine_driver;
 mod prep_cache;
 mod result_summary;
@@ -76,6 +77,29 @@ impl MarketRunMode {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
+    /// LOG-ONLY live shadow of the validated pm-alpha fade: streams Binance
+    /// spot + Polymarket books, computes the belief at 1s cadence and logs
+    /// WOULD_ENTER/QUOTE_PROBE/WOULD_EXIT/SUMMARY as JSONL. Places NO orders.
+    Shadow {
+        /// Market family slug prefix.
+        #[arg(long, default_value = "btc-updown-5m-")]
+        slug_prefix: String,
+        /// Entry edge threshold (champion config: 0.16).
+        #[arg(long, default_value = "0.16")]
+        edge_threshold: f64,
+        /// Trailing realized-vol window in seconds (champion config: 3600).
+        #[arg(long, default_value = "3600")]
+        vol_lookback_s: u32,
+        /// Mark-to-book exit horizon after entry, seconds.
+        #[arg(long, default_value = "30")]
+        exit_after_s: u32,
+        /// Quote-existence probe delay after entry, milliseconds.
+        #[arg(long, default_value = "150")]
+        latency_probe_ms: u64,
+        /// Directory for JSONL shadow logs (created if missing).
+        #[arg(long)]
+        out_dir: PathBuf,
+    },
     /// pm-alpha exogenous edge hunt: replay markets through the pm-alpha
     /// validation harness (latency-modeled, cost-aware, leakage-free belief).
     Alpha {
@@ -1144,6 +1168,24 @@ async fn main() -> Result<()> {
     init_tracing();
     let cli = Cli::parse();
     match cli.cmd {
+        Cmd::Shadow {
+            slug_prefix,
+            edge_threshold,
+            vol_lookback_s,
+            exit_after_s,
+            latency_probe_ms,
+            out_dir,
+        } => {
+            shadow::run_shadow(shadow::ShadowArgs {
+                slug_prefix,
+                edge_threshold,
+                vol_lookback_s,
+                exit_after_s,
+                latency_probe_ms,
+                out_dir,
+            })
+            .await
+        }
         Cmd::Alpha {
             markets,
             slug_prefix,

@@ -51,6 +51,10 @@ fn infer_spot_symbol_from_slug(slug: &str) -> Option<&'static str> {
         Some("BTCUSDT")
     } else if slug.starts_with("eth-updown-") {
         Some("ETHUSDT")
+    } else if slug.starts_with("sol-updown-") {
+        Some("SOLUSDT")
+    } else if slug.starts_with("xrp-updown-") {
+        Some("XRPUSDT")
     } else {
         None
     }

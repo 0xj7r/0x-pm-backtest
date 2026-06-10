@@ -541,12 +541,10 @@ impl ShadowCore {
             if m.entered || now_ns < open_ns || now_ns >= deadline_ns {
                 continue;
             }
-            // Binance-proxy strike FIRST: the official/gamma openPrice is a
-            // BTC/USD-index level ~14bps off Binance BTC/USDT (stable basis;
-            // 2026-06-10 study: mean -$91, sd $8). The belief's state is
-            // Binance, so the strike must share that basis — mixing in the
-            // official level injects a ~0.8-sigma phantom edge. Gamma is the
-            // fallback only when the spot buffer can't cover the open.
+            // The strike must share the belief state's price basis: gamma's
+            // openPrice is a BTC/USD-index level ~14bps off Binance BTC/USDT
+            // and injects a phantom edge if mixed with Binance state. Gamma is
+            // the fallback only when the spot buffer can't cover the open.
             let Some((strike, strike_source)) = ({
                 if let Some(p) = spot.price_at_or_before(open_ns) {
                     Some((p, "binance_proxy"))

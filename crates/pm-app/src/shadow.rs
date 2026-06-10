@@ -17,6 +17,8 @@ use std::path::PathBuf;
 const SPOT_KEEP_SECS: i64 = 7_800;
 /// Mirror of the harness entry deadline (`stop_before_close_s` default).
 const STOP_BEFORE_CLOSE_S: i64 = 90;
+/// Clip notional for the realistic laddered-fill telemetry (harness default).
+const SHADOW_NOTIONAL_USDC: f64 = 50.0;
 /// Rolling cap on receipt-minus-exchange latency samples.
 const LATENCY_SAMPLE_CAP: usize = 4_096;
 
@@ -78,6 +80,10 @@ pub enum LogEvent {
         current_touch: Option<Touch>,
         /// Displayed size at prices <= our entry touch (top-5 ladder).
         remaining_size: f64,
+        /// Realistic laddered entry at +latency: walking the current top-5
+        /// asks for the clip notional (avg price, shares filled).
+        ladder_avg_price: Option<f64>,
+        ladder_shares: Option<f64>,
     },
     WouldExit {
         ts_utc: String,
@@ -88,6 +94,13 @@ pub enum LogEvent {
         exit_touch: Option<Touch>,
         /// Side-oriented: exit_bid_for_our_side - entry_touch_price.
         mark_pnl_per_share: Option<f64>,
+        /// Realistic laddered round trip: entry from the probe-time walk,
+        /// exit selling those shares into the current top-5 bids. Unsold
+        /// remainder (thin bids) rides to resolution.
+        ladder_entry_avg: Option<f64>,
+        ladder_exit_avg: Option<f64>,
+        ladder_shares_sold: Option<f64>,
+        ladder_mark_pnl_usd: Option<f64>,
     },
     Resolution {
         ts_utc: String,
@@ -96,6 +109,8 @@ pub enum LogEvent {
         won: bool,
         /// Settlement if held to resolution: 1-entry when won, -entry lost.
         settle_pnl_per_share: f64,
+        /// Laddered-fill settlement for shares NOT sold at the exit walk.
+        ladder_settle_pnl_usd: Option<f64>,
     },
     /// Measure-only cross-venue telemetry: how far (ms) this venue's price
     /// series leads our Binance ARRIVAL series (positive = venue first).
@@ -178,6 +193,50 @@ impl Ladder {
             .filter(|(k, _)| **k <= limit)
             .map(|(_, s)| *s)
             .sum()
+    }
+
+    /// Walk the top-5 asks for `notional` dollars, the harness `fill()`
+    /// semantics. Returns (avg_price, shares) for whatever depth exists.
+    pub fn fill_buy(&self, notional: f64) -> Option<(f64, f64)> {
+        let mut remaining = notional;
+        let mut cost = 0.0;
+        let mut shares = 0.0;
+        for (k, size) in self.asks.iter().take(5) {
+            if remaining <= 1e-9 {
+                break;
+            }
+            let price = key_price(*k);
+            if price <= 0.0 || price >= 1.0 || *size <= 0.0 {
+                continue;
+            }
+            let take = remaining.min(price * size);
+            cost += take;
+            shares += take / price;
+            remaining -= take;
+        }
+        (shares > 1e-9).then(|| (cost / shares, shares))
+    }
+
+    /// Walk the top-5 bids selling `shares`; unsold remainder is the
+    /// caller's to settle. Returns (avg_price, shares_sold).
+    pub fn fill_sell(&self, shares: f64) -> Option<(f64, f64)> {
+        let mut remaining = shares;
+        let mut proceeds = 0.0;
+        let mut sold = 0.0;
+        for (k, size) in self.bids.iter().rev().take(5) {
+            if remaining <= 1e-9 {
+                break;
+            }
+            let price = key_price(*k);
+            if price <= 0.0 || price >= 1.0 || *size <= 0.0 {
+                continue;
+            }
+            let qty = remaining.min(*size);
+            proceeds += qty * price;
+            sold += qty;
+            remaining -= qty;
+        }
+        (sold > 1e-9).then(|| (proceeds / sold, sold))
     }
 }
 
@@ -295,6 +354,10 @@ pub struct ResolutionWatch {
     pub close_ts_s: i64,
     attempts: u32,
     next_attempt_ns: i64,
+    /// Laddered-fill bookkeeping: avg cost from the probe-time walk and the
+    /// shares still unsold after the exit walk (they settle at resolution).
+    ladder_avg_cost: Option<f64>,
+    ladder_unsold: f64,
 }
 
 /// A logged WOULD_ENTER awaiting its quote probe and mark-to-book exit.
@@ -308,6 +371,10 @@ struct PendingTrade {
     probe_done: bool,
     exit_due_ns: i64,
     exit_done: bool,
+    /// Realistic laddered fill captured at probe time (+latency): walking
+    /// the then-current top-5 asks for the full clip notional.
+    ladder_avg_cost: Option<f64>,
+    ladder_shares: Option<f64>,
 }
 
 #[derive(Debug, Default)]
@@ -619,6 +686,8 @@ impl ShadowCore {
                 exit_due_ns: (now_ns + self.cfg.exit_after_s as i64 * 1_000_000_000)
                     .min(close_ns),
                 exit_done: false,
+                ladder_avg_cost: None,
+                ladder_shares: None,
             });
             self.resolutions.push(ResolutionWatch {
                 slug: m.slug.clone(),
@@ -628,6 +697,8 @@ impl ShadowCore {
                 close_ts_s: m.close_ts_s,
                 attempts: 0,
                 next_attempt_ns: close_ns + 15_000_000_000,
+                ladder_avg_cost: None,
+                ladder_unsold: 0.0,
             });
         }
         self.pending.extend(entries);
@@ -699,12 +770,17 @@ impl ShadowCore {
         } else {
             -w.entry_touch_price
         };
+        let ladder_settle_pnl_usd = w.ladder_avg_cost.map(|avg| {
+            let per_share = if won { 1.0 - avg } else { -avg };
+            w.ladder_unsold * per_share
+        });
         Some(LogEvent::Resolution {
             ts_utc: ts_utc(now_ns),
             slug: w.slug,
             side: side.as_str(),
             won,
             settle_pnl_per_share: settle,
+            ladder_settle_pnl_usd,
         })
     }
 
@@ -721,6 +797,19 @@ impl ShadowCore {
                     .map(|l| l.ask_size_at_or_below(p.entry_touch_price))
                     .unwrap_or(0.0);
                 let still_quoted = remaining_size > 0.0;
+                let ladder_fill = ladder.and_then(|l| l.fill_buy(SHADOW_NOTIONAL_USDC));
+                if let Some((avg, shares)) = ladder_fill {
+                    p.ladder_avg_cost = Some(avg);
+                    p.ladder_shares = Some(shares);
+                    if let Some(w) = self
+                        .resolutions
+                        .iter_mut()
+                        .find(|w| w.slug == p.slug && w.side == p.side)
+                    {
+                        w.ladder_avg_cost = Some(avg);
+                        w.ladder_unsold = shares; // until the exit walk sells
+                    }
+                }
                 self.stats.probes_total += 1;
                 if still_quoted {
                     self.stats.probes_quoted += 1;
@@ -733,15 +822,36 @@ impl ShadowCore {
                     still_quoted,
                     current_touch,
                     remaining_size,
+                    ladder_avg_price: ladder_fill.map(|(a, _)| a),
+                    ladder_shares: ladder_fill.map(|(_, s)| s),
                 });
             }
             if !p.exit_done && now_ns >= p.exit_due_ns {
                 p.exit_done = true;
-                let exit_touch = self.books.get(&p.token).and_then(Ladder::best_bid);
+                let ladder = self.books.get(&p.token);
+                let exit_touch = ladder.and_then(Ladder::best_bid);
                 let mark_pnl_per_share = exit_touch.map(|t| t.price - p.entry_touch_price);
                 if let Some(pnl) = mark_pnl_per_share {
                     self.stats.mark_pnl_sum += pnl;
                     self.stats.mark_pnl_count += 1;
+                }
+                let mut ladder_exit_avg = None;
+                let mut ladder_shares_sold = None;
+                let mut ladder_mark_pnl_usd = None;
+                if let (Some(avg), Some(shares)) = (p.ladder_avg_cost, p.ladder_shares) {
+                    let sale = ladder.and_then(|l| l.fill_sell(shares));
+                    if let Some((sell_avg, sold)) = sale {
+                        ladder_exit_avg = Some(sell_avg);
+                        ladder_shares_sold = Some(sold);
+                        ladder_mark_pnl_usd = Some(sold * (sell_avg - avg));
+                        if let Some(w) = self
+                            .resolutions
+                            .iter_mut()
+                            .find(|w| w.slug == p.slug && w.side == p.side)
+                        {
+                            w.ladder_unsold = (shares - sold).max(0.0);
+                        }
+                    }
                 }
                 out.push(LogEvent::WouldExit {
                     ts_utc: ts_utc(now_ns),
@@ -750,6 +860,10 @@ impl ShadowCore {
                     entry_touch_price: p.entry_touch_price,
                     exit_touch,
                     mark_pnl_per_share,
+                    ladder_entry_avg: p.ladder_avg_cost,
+                    ladder_exit_avg,
+                    ladder_shares_sold,
+                    ladder_mark_pnl_usd,
                 });
             }
         }
@@ -1975,6 +2089,59 @@ mod tests {
             t += 61 * NS;
         }
         assert!(core.resolutions_due(t).is_empty(), "watch expires after 10 attempts");
+    }
+
+    #[test]
+    fn ladder_fill_round_trip_accounting() {
+        let mut core = core_with_spot_strike(99_000.0);
+        core.upsert_market(market(None));
+        // $50 across 0.50 (50 sh) then 0.52: 100 sh @0.50? no — 50*0.50=$25,
+        // remaining $25 at 0.52 = 48.08 sh. Bids hold 60 sh @0.48.
+        core.apply_book_snapshot(
+            "up-tok",
+            &[(0.48, 60.0)],
+            &[(0.50, 50.0), (0.52, 200.0)],
+            Some(1_899_000),
+            1_899_040,
+        );
+        core.apply_book_snapshot("down-tok", &[(0.40, 60.0)], &[(0.50, 70.0)], Some(1_899_000), 1_899_040);
+        let entry_ns = 1900 * NS;
+        assert_eq!(core.decide(entry_ns).len(), 1);
+
+        let probe = core.poll_due(entry_ns + 150_000_000);
+        let (avg, shares) = match &probe[0] {
+            LogEvent::QuoteProbe { ladder_avg_price, ladder_shares, .. } => {
+                (ladder_avg_price.unwrap(), ladder_shares.unwrap())
+            }
+            other => panic!("expected QuoteProbe, got {other:?}"),
+        };
+        let want_shares = 50.0 + 25.0 / 0.52;
+        assert!((shares - want_shares).abs() < 1e-9, "{shares} vs {want_shares}");
+        assert!((avg - 50.0 / want_shares).abs() < 1e-9);
+
+        // Exit: only 60 sh sellable at 0.48; remainder rides to resolution.
+        let exit = core.poll_due(entry_ns + 30 * NS);
+        match &exit[0] {
+            LogEvent::WouldExit { ladder_exit_avg, ladder_shares_sold, ladder_mark_pnl_usd, .. } => {
+                assert!((ladder_exit_avg.unwrap() - 0.48).abs() < 1e-9);
+                assert_eq!(ladder_shares_sold.unwrap(), 60.0);
+                let want = 60.0 * (ladder_exit_avg.unwrap() - avg);
+                assert!((ladder_mark_pnl_usd.unwrap() - want).abs() < 1e-9);
+            }
+            other => panic!("expected WouldExit, got {other:?}"),
+        }
+
+        // Resolution: unsold shares settle at 1-avg on a win.
+        let due = core.resolutions_due(2116 * NS);
+        let w = &due[0];
+        let unsold = shares - 60.0;
+        match core.apply_resolution(&w.slug, w.side, true, 2200 * NS).unwrap() {
+            LogEvent::Resolution { ladder_settle_pnl_usd, .. } => {
+                let want = unsold * (1.0 - avg);
+                assert!((ladder_settle_pnl_usd.unwrap() - want).abs() < 1e-9);
+            }
+            other => panic!("expected Resolution, got {other:?}"),
+        }
     }
 
     #[test]

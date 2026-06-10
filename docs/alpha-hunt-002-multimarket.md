@@ -61,3 +61,16 @@ All artifacts: `data/runs/alpha/overnight/` (8 risk configs + verify + 4 family 
 ## Appendix: momentum family (Family A) — rejected at the tune gate
 
 Momentum drift added to the belief (lookback {60, 300}s x weight {0.5, 1.0}, on the exit-30s champion, May 7-18): best variant +$1,356 vs the +$21,476 no-momentum baseline; the 60s variants were -$4.3k to -$5.9k. Rejected without spending test-window data. Interpretation: the validated edge fades book overreaction to spot moves; a drift term aligns the belief with the move and erases the disagreement signal. Momentum remains a candidate for a separate directional strategy in trending regimes (the Feb-Apr profile), not an overlay on this one.
+
+## Appendix 2: real NO-token ladders (2026-06-10)
+
+The Down-token books were already cached on disk; the loader now merges them so NO entries/fills/exits use the real ladder (synthetic `1 - yes` retired, fallback only). Frozen-config reruns:
+
+| window | synthetic NO | real NO | coverage |
+|---|---|---|---|
+| May 25-28 test | +$2,179 | +$2,167 | 100% |
+| June 1-7 holdout | +$11,726 | **+$12,039** (862 trades, 67.1%) | 99.8% |
+
+The validated edge is unchanged-to-slightly-better under the corrected execution model — synthetic NO was not flattering it.
+
+**Pair-cost discovery** (now observable): the minimum same-tick `yes_ask + no_ask` dips below $1.00 in 98% of May test markets (mean min 0.9657) and 99.4% of June markets (mean min 0.9601). A sub-parity two-leg buy redeems at $1 regardless of outcome. Tradeability depends on window duration, touch size, and two-leg fill latency — the next measurement module. This is the quantitative basis for the directional + pair-cost (bonereaper-style) strategy family.

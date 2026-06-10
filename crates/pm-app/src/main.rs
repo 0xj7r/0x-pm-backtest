@@ -184,6 +184,10 @@ enum Cmd {
         /// parquet re-decode, written through on miss).
         #[arg(long)]
         tick_cache_dir: Option<PathBuf>,
+        /// Official open prints JSONL (slug -> open_price) overriding the
+        /// Binance-open strike proxy.
+        #[arg(long)]
+        strikes: Option<PathBuf>,
         /// Load the perp complex for this symbol (e.g. BTCUSDT) into the
         /// belief's ExoState.
         #[arg(long)]
@@ -1173,6 +1177,7 @@ async fn main() -> Result<()> {
             trades_out,
             down_assets,
             tick_cache_dir,
+            strikes,
             perp_symbol,
             perp_cache_dir,
         } => {
@@ -1224,6 +1229,7 @@ async fn main() -> Result<()> {
                     trades_out,
                     down_assets,
                     tick_cache_dir,
+                    strikes,
                     perp_symbol,
                     perp_cache_dir,
                 },

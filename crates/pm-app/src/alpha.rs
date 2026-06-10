@@ -61,6 +61,10 @@ pub struct AlphaArgs {
     /// Compact merged-tick cache dir (bincode+zstd of the two-sided
     /// BookTick series; ~10x smaller and faster than re-decoding parquet).
     pub tick_cache_dir: Option<PathBuf>,
+    /// Official open prints (slug -> open_price JSONL from
+    /// scripts/polymarket_strikes_fetch.py); overrides the Binance-open
+    /// strike proxy where present.
+    pub strikes: Option<PathBuf>,
     /// Load the perp complex (futures prints, OI, funding) for this symbol
     /// and expose it to the belief via ExoState.perp.
     pub perp_symbol: Option<String>,
@@ -228,6 +232,7 @@ struct ProcessOutput {
 async fn process_markets(
     store: &TelonexStore,
     spot_cache: &mut SpotCache,
+    strikes_by_slug: &std::collections::HashMap<String, f64>,
     markets: &[MarketHandle],
     model: &AlphaModel,
     base_cfg: &HarnessConfig,
@@ -281,6 +286,7 @@ async fn process_markets(
         let down = down_by_slug.get(&market.slug).cloned();
         let cache_dir = replay_event_cache_dir.map(|p| p.to_path_buf());
         let spot = spot_by_market[idx].clone();
+        let official_strike = strikes_by_slug.get(&market.slug).copied();
         let market = market.clone();
         let model = model.clone();
         let base_cfg = base_cfg.clone();
@@ -336,6 +342,7 @@ async fn process_markets(
                     cached,
                     cache_path.as_deref(),
                     spot,
+                    official_strike,
                     perp,
                     infer_outcome,
                     &model,
@@ -379,6 +386,7 @@ fn compute_market(
     cached_ticks: Option<Vec<BookTick>>,
     cache_path: Option<&Path>,
     spot: Option<std::sync::Arc<pm_types::SpotHistory>>,
+    official_strike: Option<f64>,
     perp: Option<std::sync::Arc<pm_alpha::PerpState>>,
     infer_outcome: bool,
     model: &AlphaModel,
@@ -400,23 +408,24 @@ fn compute_market(
 
         let open_ns = market_open_ns(market);
         let close_ns = market_close_ns(market);
-        // Strike proxy: the LAST CEX trade at-or-before the open instant —
-        // exactly what a live system knows at open. (Audit 2026-06-10: the
-        // previous at-or-after variant admitted up to 5s of post-open price
-        // discovery into the strike, a look-ahead.) Require freshness: a
-        // trade within the 5s before open, else skip the market.
-        let strike = match spot.price_at_or_before(open_ns) {
-            Some(p)
-                if spot
-                    .range(open_ns - 5_000_000_000, open_ns)
-                    .last()
-                    .is_some() =>
-            {
-                p
-            }
-            _ => {
-                return Item::SkipNoStrike;
-            }
+        // Strike: the OFFICIAL Polymarket open print when backfilled, else
+        // the last CEX trade at-or-before the open instant (live-safe proxy;
+        // the at-or-after variant was a look-ahead, fixed 2026-06-10).
+        let strike = match official_strike {
+            Some(k) if k.is_finite() && k > 0.0 => k,
+            _ => match spot.price_at_or_before(open_ns) {
+                Some(p)
+                    if spot
+                        .range(open_ns - 5_000_000_000, open_ns)
+                        .last()
+                        .is_some() =>
+                {
+                    p
+                }
+                _ => {
+                    return Item::SkipNoStrike;
+                }
+            },
         };
 
         let from_cache = cached_ticks.is_some();
@@ -520,6 +529,22 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
         train_sample_dt_s: 15,
     };
     let mut spot_cache = SpotCache::default();
+    let strikes_by_slug: std::collections::HashMap<String, f64> = match &args.strikes {
+        Some(path) => {
+            let mut m = std::collections::HashMap::new();
+            for line in BufReader::new(std::fs::File::open(path)?).lines() {
+                let line = line?;
+                if line.trim().is_empty() { continue; }
+                let r: serde_json::Value = serde_json::from_str(&line)?;
+                if let (Some(slug), Some(px)) = (r["slug"].as_str(), r["open_price"].as_f64()) {
+                    m.insert(slug.to_string(), px);
+                }
+            }
+            tracing::info!(n = m.len(), "official strikes loaded");
+            m
+        }
+        None => Default::default(),
+    };
     let perp: Option<std::sync::Arc<pm_alpha::PerpState>> = match &args.perp_symbol {
         Some(symbol) => {
             let mut dates: Vec<String> = markets.iter().map(|m| m.date.clone()).collect();
@@ -572,6 +597,7 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
         let train_out = process_markets(
             store,
             &mut spot_cache,
+            &strikes_by_slug,
             train,
             &base_model,
             &train_cfg,
@@ -618,6 +644,7 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
     let eval_out = process_markets(
         store,
         &mut spot_cache,
+        &strikes_by_slug,
         eval_markets,
         &model,
         &base_cfg,

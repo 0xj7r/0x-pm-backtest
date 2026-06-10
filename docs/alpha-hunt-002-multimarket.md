@@ -89,3 +89,7 @@ Two adversarial audits (harness leakage; data-layer timestamps/labels) drove fou
 Timestamp semantics resolved offline: tape `timestamp_us` is Polymarket's own event time (collector receipt runs p50 +189ms / p99 +6.4s behind in a separate column) — the CEX-to-book lag is genuine exchange behavior, and the strategy's +EV at a simulated 1000ms covers any realistic input staleness. Remaining known-unknowns: live capture fraction (shadow pilot), NO-ladder staleness optimism (cutoff queued), Feb-Apr numbers pending their fixed-strike/true-label rerun.
 
 The canonical metadata parquet also expands the validated universe: six assets (btc/eth/sol/xrp/doge/hype) x 5m/15m/4h with true resolutions back to Oct 2025 (~45k BTC-5m markets alone), and the polymarket.com crypto-price API serves official historical open/close prints (strike proxy retired going forward; Chainlink `crypto_prices` channel available from Apr 2 for the oracle-lag study).
+
+## Appendix 4: hardened Feb-Apr final (2026-06-10)
+
+Full rerun under the hardened pipeline (canonical true resolutions, real NO ladders, look-ahead-free strike): **+$102,114 at thr 0.16** (+$97,733 at 0.12) across Feb 12 - Apr 30, ~13,100 trades at $50 clips, every ten-day shard positive except Feb 12-21 (-$313). Within 1-3% of the pre-hardening estimate in every shard — the fourth time the headline survived a correctness upgrade unchanged. The Feb-June record is now: Feb-Apr +$102.1k (validation, never tuned on), May 19-28 +$12.2k (test), June 1-7 +$11.9k (sealed holdout), with the only flat stretch being early February.

@@ -90,6 +90,9 @@ pub struct HarnessConfig {
     /// Capture stress: only this fraction of displayed size at each level is
     /// available to us (competitors take the rest). 1.0 = the optimistic sim.
     pub depth_capture_frac: f64,
+    /// Race stress: assume we ALWAYS lose the race to the touch — every
+    /// fill (entry and exit) skips the best level and starts one deeper.
+    pub skip_touch_level: bool,
     /// Re-evaluate the belief at this cadence.
     pub decision_dt_ms: u64,
     /// No entries within this many seconds of resolution.
@@ -127,6 +130,7 @@ impl Default for HarnessConfig {
             edge_threshold: 0.05,
             notional_usdc: 50.0,
             depth_capture_frac: 1.0,
+            skip_touch_level: false,
             decision_dt_ms: 1000,
             stop_before_close_s: 10,
             exit_after_s: 0,

@@ -117,6 +117,9 @@ enum Cmd {
         /// Capture stress: fraction of displayed depth available to us.
         #[arg(long, default_value = "1.0")]
         depth_capture_frac: f64,
+        /// Race stress: always lose the touch; fills start one level deeper.
+        #[arg(long)]
+        skip_touch_level: bool,
         #[arg(long, default_value = "1000")]
         decision_dt_ms: u64,
         #[arg(long, default_value = "10")]
@@ -1148,6 +1151,7 @@ async fn main() -> Result<()> {
             fee_bps,
             notional_usdc,
             depth_capture_frac,
+            skip_touch_level,
             decision_dt_ms,
             stop_before_close_s,
             max_clips,
@@ -1198,6 +1202,7 @@ async fn main() -> Result<()> {
                     fee_bps,
                     notional_usdc,
                     depth_capture_frac,
+                    skip_touch_level,
                     decision_dt_ms,
                     stop_before_close_s,
                     max_clips,

@@ -418,9 +418,10 @@ fn compute_market(
 
         let open_ns = market_open_ns(market);
         let close_ns = market_close_ns(market);
-        // Strike: the OFFICIAL Polymarket open print when backfilled, else
-        // the last CEX trade at-or-before the open instant (live-safe proxy;
-        // the at-or-after variant was a look-ahead, fixed 2026-06-10).
+        // Strike: the official Polymarket open print when supplied, else the
+        // last CEX trade at-or-before the open instant (at-or-after would be
+        // a look-ahead). Official strikes carry a USD-index basis vs Binance
+        // USDT state, so they are for verification studies, not beliefs.
         let strike = match official_strike {
             Some(k) if k.is_finite() && k > 0.0 => k,
             _ => match spot.price_at_or_before(open_ns) {

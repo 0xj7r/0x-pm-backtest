@@ -3,6 +3,7 @@
 //! runs fit in memory.
 
 use anyhow::{Context, Result, anyhow};
+use futures::StreamExt;
 use pm_alpha::harness::{BookTick, HarnessConfig, HuntReport, MarketRunOutput, MarketSeries, aggregate, run_market_grid};
 use pm_alpha::{AlphaModel, AlphaModelConfig, ExoCalibrator, MarketMeta, Token, TrainingConfig, TrainingSample};
 use pm_telonex_loader::TelonexStore;
@@ -144,7 +145,53 @@ async fn process_markets(
         &mut out.counters.n_load_error,
     );
 
-    for (idx, market) in markets.iter().enumerate() {
+    // Preload spot days serially (small set), then pipeline tape loads with
+    // a bounded prefetcher; `buffered` preserves order so results match the
+    // serial implementation exactly.
+    let mut spot_by_market: Vec<Option<std::sync::Arc<pm_types::SpotHistory>>> =
+        Vec::with_capacity(markets.len());
+    for market in markets {
+        let spot = match spot_symbol_for_market("auto", &market.slug) {
+            Ok(Some(symbol)) => spot_cache.get_or_load(store, &symbol, &market.date).await.ok(),
+            _ => None,
+        };
+        spot_by_market.push(spot);
+    }
+
+    const PREFETCH: usize = 24;
+    let mut tape_stream = futures::stream::iter(markets.iter().enumerate().map(|(idx, market)| {
+        let store = store.clone();
+        let store_inner = store_inner.clone();
+        let down = down_by_slug.get(&market.slug).cloned();
+        let cache_dir = replay_event_cache_dir.map(|p| p.to_path_buf());
+        async move {
+            let events = load_replay_events_for_market(
+                &store,
+                store_inner.clone(),
+                market,
+                MarketId(idx as u32),
+                cache_dir.as_deref(),
+            )
+            .await;
+            let down_events = match &down {
+                Some(d) => load_replay_events_for_market(
+                    &store,
+                    store_inner,
+                    d,
+                    MarketId(idx as u32 | 0x8000_0000),
+                    cache_dir.as_deref(),
+                )
+                .await
+                .unwrap_or_default(),
+                None => Vec::new(),
+            };
+            (idx, events, down_events)
+        }
+    }))
+    .buffered(PREFETCH);
+
+    while let Some((idx, events_res, down_events)) = tape_stream.next().await {
+        let market = &markets[idx];
         let outcome_label = outcome_label_resolved_yes(&market.outcome);
         if outcome_label.is_none() && !infer_outcome {
             *n_no_outcome += 1;
@@ -154,18 +201,9 @@ async fn process_markets(
             *n_no_outcome += 1;
             continue;
         };
-        let Ok(Some(symbol)) = spot_symbol_for_market("auto", &market.slug) else {
-            *n_no_outcome += 1;
+        let Some(spot) = spot_by_market[idx].clone() else {
+            *n_load_error += 1;
             continue;
-        };
-
-        let spot = match spot_cache.get_or_load(store, &symbol, &market.date).await {
-            Ok(s) => s,
-            Err(err) => {
-                tracing::warn!(market = %market.slug, error = %err, "spot load failed");
-                *n_load_error += 1;
-                continue;
-            }
         };
 
         let open_ns = market_open_ns(market);
@@ -188,15 +226,7 @@ async fn process_markets(
             }
         };
 
-        let events = match load_replay_events_for_market(
-            store,
-            store_inner.clone(),
-            market,
-            MarketId(idx as u32),
-            replay_event_cache_dir,
-        )
-        .await
-        {
+        let events = match events_res {
             Ok(e) => e,
             Err(err) => {
                 tracing::warn!(market = %market.slug, error = %err, "tape load failed");
@@ -208,21 +238,6 @@ async fn process_markets(
             *n_load_error += 1;
             continue;
         }
-
-        // Real NO ladder: load the Down-token sibling's tape and attach the
-        // latest NO state to each YES tick (pointer merge on timestamps).
-        let down_events = match down_by_slug.get(&market.slug) {
-            Some(down) => load_replay_events_for_market(
-                store,
-                store_inner.clone(),
-                down,
-                MarketId(idx as u32 | 0x8000_0000),
-                replay_event_cache_dir,
-            )
-            .await
-            .unwrap_or_default(),
-            None => Vec::new(),
-        };
 
         let mut down_idx = 0usize;
         let mut last_no: Option<&pm_types::ReplayEvent> = None;

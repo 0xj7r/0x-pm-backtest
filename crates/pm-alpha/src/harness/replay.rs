@@ -6,7 +6,8 @@
 //! fills do), which is what makes parameter sweeps affordable.
 
 use super::types::{
-    BookTick, HarnessConfig, MarketRunOutput, MarketSeries, ProbSample, Side, TradeRecord,
+    BookTick, EntryMode, HarnessConfig, MarketRunOutput, MarketSeries, ProbSample, Side,
+    TradeRecord,
 };
 use crate::calibrator::TrainingSample;
 use crate::model::AlphaModel;
@@ -170,6 +171,17 @@ fn execute(
         if edge < edge_threshold {
             continue;
         }
+        if cfg.entry_mode == EntryMode::Aligned {
+            // Directional entries require the book to already favour the
+            // same side (we ride agreement, not disagreement).
+            let side_mid = match side {
+                Side::Yes => d.mid,
+                Side::No => 1.0 - d.mid,
+            };
+            if side_mid < cfg.align_min_mid {
+                continue;
+            }
+        }
 
         // Latency: fill against the book as it actually is at T + latency.
         let fill_at_ns = d.ts_ns + latency_ns;
@@ -235,6 +247,41 @@ fn execute(
             exit_price,
             mark_60s,
         });
+
+        // Convexity hedge: buy the opposite cheap tail (held to resolution;
+        // it exists to bound the crossed-mid disaster, not to be traded).
+        if cfg.tail_max_price > 0.0 && cfg.tail_frac > 0.0 {
+            let tail_side = side.opposite();
+            let tail_touch = match tail_side {
+                Side::Yes => fill_tick.yes_ask as f64,
+                Side::No => fill_tick.no_buy_price().unwrap_or(1.0),
+            };
+            if tail_touch > 0.0 && tail_touch <= cfg.tail_max_price
+                && let Some((tail_price, tail_shares)) =
+                    fill(fill_tick, tail_side, cfg.notional_usdc * cfg.tail_frac)
+            {
+                let tail_fee = tail_price * tail_shares * cfg.taker_fee_bps / 10_000.0;
+                let tail_won = match tail_side {
+                    Side::Yes => series.resolved_yes,
+                    Side::No => !series.resolved_yes,
+                };
+                let tail_payout = if tail_won { 1.0 } else { 0.0 };
+                trades.push(TradeRecord {
+                    side: tail_side,
+                    decision_ts_ns: d.ts_ns,
+                    fill_ts_ns: fill_tick.ts_ns,
+                    avg_price: tail_price,
+                    shares: tail_shares,
+                    fee: tail_fee,
+                    p_exo: d.p_up,
+                    mid_at_decision: d.mid,
+                    pnl: tail_shares * (tail_payout - tail_price) - tail_fee,
+                    won: tail_won,
+                    exit_price: None,
+                    mark_60s: None,
+                });
+            }
+        }
     }
     trades
 }

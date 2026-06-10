@@ -4,7 +4,7 @@
 
 use anyhow::{Context, Result, anyhow};
 use futures::StreamExt;
-use pm_alpha::harness::{BookTick, HarnessConfig, HuntReport, MarketRunOutput, MarketSeries, aggregate, run_market_grid};
+use pm_alpha::harness::{BookTick, EntryMode, HarnessConfig, HuntReport, MarketRunOutput, MarketSeries, aggregate, run_market_grid};
 use pm_alpha::{AlphaModel, AlphaModelConfig, ExoCalibrator, MarketMeta, Token, TrainingConfig, TrainingSample};
 use pm_telonex_loader::TelonexStore;
 use pm_types::MarketId;
@@ -35,6 +35,10 @@ pub struct AlphaArgs {
     pub clip_cooldown_ms: u64,
     pub exit_after_s: u32,
     pub skip_calm: bool,
+    pub aligned_mode: bool,
+    pub align_min_mid: f64,
+    pub tail_max_price: f64,
+    pub tail_frac: f64,
     /// Use the final tape mid as the outcome when the manifest label is
     /// missing/Unknown (skips markets whose final mid is ambiguous).
     pub infer_outcome: bool,
@@ -484,6 +488,10 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
         clip_cooldown_ms: args.clip_cooldown_ms,
         exit_after_s: args.exit_after_s,
         skip_calm: args.skip_calm,
+        entry_mode: if args.aligned_mode { EntryMode::Aligned } else { EntryMode::Fade },
+        align_min_mid: args.align_min_mid,
+        tail_max_price: args.tail_max_price,
+        tail_frac: args.tail_frac,
         collect_training: false,
         train_sample_dt_s: 15,
     };

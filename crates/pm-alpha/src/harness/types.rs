@@ -67,6 +67,17 @@ pub struct MarketSeries {
     pub date: String,
 }
 
+/// How entries are selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum EntryMode {
+    /// Enter when the belief disagrees with the book (the validated fade).
+    #[default]
+    Fade,
+    /// Enter when the belief and book agree on direction and the belief
+    /// still clears the touch by the threshold (directional/momentum).
+    Aligned,
+}
+
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct HarnessConfig {
     /// Decision at T fills against the book at the first tick >= T + latency.
@@ -87,6 +98,14 @@ pub struct HarnessConfig {
     /// Take no entries when the open-time regime is calm_low_vol (the cells
     /// show ~no edge there; calm trades are variance without pay).
     pub skip_calm: bool,
+    pub entry_mode: EntryMode,
+    /// Aligned mode: the side's book mid must exceed this (book agreement).
+    pub align_min_mid: f64,
+    /// Buy the opposite cheap tail as a convexity hedge when its ask is at
+    /// or below this price (0 disables).
+    pub tail_max_price: f64,
+    /// Tail hedge notional as a fraction of the main clip.
+    pub tail_frac: f64,
     /// Max laddered clip entries per market (1 = single entry).
     pub max_clips: u32,
     /// Minimum time between clip entries.
@@ -108,6 +127,10 @@ impl Default for HarnessConfig {
             stop_before_close_s: 10,
             exit_after_s: 0,
             skip_calm: false,
+            entry_mode: EntryMode::Fade,
+            align_min_mid: 0.55,
+            tail_max_price: 0.0,
+            tail_frac: 0.25,
             max_clips: 1,
             clip_cooldown_ms: 5000,
             collect_training: false,
@@ -120,6 +143,15 @@ impl Default for HarnessConfig {
 pub enum Side {
     Yes,
     No,
+}
+
+impl Side {
+    pub fn opposite(self) -> Self {
+        match self {
+            Self::Yes => Self::No,
+            Self::No => Self::Yes,
+        }
+    }
 }
 
 /// One executed simulated trade, held to resolution.

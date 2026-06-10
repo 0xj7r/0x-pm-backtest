@@ -129,6 +129,20 @@ enum Cmd {
         /// Skip entries in calm_low_vol regime.
         #[arg(long)]
         skip_calm: bool,
+        /// Directional mode: enter only when the book already agrees with
+        /// the belief (default is the fade: enter on disagreement).
+        #[arg(long)]
+        aligned_mode: bool,
+        /// Aligned mode: minimum side mid for book agreement.
+        #[arg(long, default_value = "0.55")]
+        align_min_mid: f64,
+        /// Buy the opposite tail as a convexity hedge when its ask <= this
+        /// (0 disables).
+        #[arg(long, default_value = "0")]
+        tail_max_price: f64,
+        /// Tail hedge notional as a fraction of the clip.
+        #[arg(long, default_value = "0.25")]
+        tail_frac: f64,
         /// Infer missing outcome labels from the final tape mid.
         #[arg(long)]
         infer_outcome: bool,
@@ -1128,6 +1142,10 @@ async fn main() -> Result<()> {
             clip_cooldown_ms,
             exit_after_s,
             skip_calm,
+            aligned_mode,
+            align_min_mid,
+            tail_max_price,
+            tail_frac,
             infer_outcome,
             vol_lookback_s,
             momentum_lookback_s,
@@ -1171,6 +1189,10 @@ async fn main() -> Result<()> {
                     clip_cooldown_ms,
                     exit_after_s,
                     skip_calm,
+                    aligned_mode,
+                    align_min_mid,
+                    tail_max_price,
+                    tail_frac,
                     infer_outcome,
                     vol_lookback_s,
                     momentum_lookback_s,

@@ -11,7 +11,8 @@ mod types;
 pub use metrics::{CellReport, HuntReport, aggregate};
 pub use replay::{run_market, run_market_grid};
 pub use types::{
-    BookTick, HarnessConfig, MarketRunOutput, MarketSeries, ProbSample, Side, TradeRecord,
+    BookTick, EntryMode, HarnessConfig, MarketRunOutput, MarketSeries, ProbSample, Side,
+    TradeRecord,
 };
 
 use crate::model::AlphaModel;
@@ -375,6 +376,102 @@ mod tests {
         );
         assert!(blocked.trades.is_empty());
         assert!(!open.trades.is_empty());
+    }
+
+    #[test]
+    fn aligned_mode_requires_book_agreement() {
+        // Spot jumped +1% (belief very bullish) but the book still prices
+        // YES at 0.50/0.52: a fade fires; an aligned entry must NOT.
+        let (series, spot) = dislocation_market(i64::MAX); // book never reprices
+        let fade = run_market(
+            &series,
+            &spot,
+            &AlphaModel::default(),
+            &HarnessConfig {
+                latency_ms: 0,
+                entry_mode: EntryMode::Fade,
+                ..HarnessConfig::default()
+            },
+        );
+        let aligned = run_market(
+            &series,
+            &spot,
+            &AlphaModel::default(),
+            &HarnessConfig {
+                latency_ms: 0,
+                entry_mode: EntryMode::Aligned,
+                align_min_mid: 0.55,
+                ..HarnessConfig::default()
+            },
+        );
+        assert!(!fade.trades.is_empty());
+        assert!(aligned.trades.is_empty());
+
+        // Once the book agrees (reprices to 0.93/0.95), aligned fires when
+        // the belief still clears the ask.
+        let (series2, spot2) = dislocation_market(2001); // repriced immediately
+        let aligned2 = run_market(
+            &series2,
+            &spot2,
+            &AlphaModel::default(),
+            &HarnessConfig {
+                latency_ms: 0,
+                entry_mode: EntryMode::Aligned,
+                align_min_mid: 0.55,
+                edge_threshold: 0.01,
+                ..HarnessConfig::default()
+            },
+        );
+        assert!(!aligned2.trades.is_empty());
+        assert_eq!(aligned2.trades[0].side, Side::Yes);
+    }
+
+    #[test]
+    fn tail_hedge_buys_the_cheap_opposite_side() {
+        // Aligned YES entry at 0.95 ask; NO tail available at 0.04 via the
+        // real NO ladder => hedge leg should fill.
+        let spot = spot_with_jump(2400, 2050);
+        let open_s = 2000_i64;
+        let close_s = 2300_i64;
+        let mut ticks: Vec<BookTick> = Vec::new();
+        for s in open_s..close_s {
+            let mut t = book_tick(s, 0.93, 0.95);
+            t.no_bid = 0.03;
+            t.no_ask = 0.04;
+            t.no_bids = book_levels(0.03);
+            t.no_asks = book_levels(0.04);
+            ticks.push(t);
+        }
+        let series = MarketSeries {
+            meta: MarketMeta {
+                token: Token::Btc,
+                window_secs: 300,
+                open_ts_ns: open_s * 1_000_000_000,
+                close_ts_ns: close_s * 1_000_000_000,
+                strike: 100_000.0,
+            },
+            resolved_yes: true,
+            ticks,
+            date: "2026-05-01".into(),
+        };
+        let out = run_market(
+            &series,
+            &spot,
+            &AlphaModel::default(),
+            &HarnessConfig {
+                latency_ms: 0,
+                entry_mode: EntryMode::Aligned,
+                align_min_mid: 0.55,
+                edge_threshold: 0.01,
+                tail_max_price: 0.05,
+                tail_frac: 0.25,
+                ..HarnessConfig::default()
+            },
+        );
+        assert_eq!(out.trades.len(), 2, "main + tail");
+        assert_eq!(out.trades[1].side, Side::No);
+        assert!((out.trades[1].avg_price - 0.04).abs() < 1e-6);
+        assert!(!out.trades[1].won); // resolved YES, tail loses its premium
     }
 
     #[test]

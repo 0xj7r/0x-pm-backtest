@@ -161,6 +161,7 @@ mod tests {
     fn state(spot: &SpotHistory, now_s: i64, strike: f64) -> ExoState<'_> {
         ExoState {
             spot,
+            perp: None,
             market: MarketMeta {
                 token: Token::Btc,
                 window_secs: 300,

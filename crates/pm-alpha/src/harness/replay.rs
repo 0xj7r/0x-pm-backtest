@@ -38,6 +38,7 @@ struct BeliefPass {
 fn belief_pass(
     series: &MarketSeries,
     spot: &SpotHistory,
+    perp: Option<&crate::state::PerpState>,
     model: &AlphaModel,
     cfg: &HarnessConfig,
 ) -> BeliefPass {
@@ -69,6 +70,7 @@ fn belief_pass(
         {
             let state = ExoState {
                 spot,
+                perp,
                 market: series.meta,
                 now_ns: tick.ts_ns,
             };
@@ -90,6 +92,7 @@ fn belief_pass(
             next_train_ns = tick.ts_ns + train_dt_ns;
             let state = ExoState {
                 spot,
+                perp,
                 market: series.meta,
                 now_ns: tick.ts_ns,
             };
@@ -111,6 +114,7 @@ fn belief_pass(
 
         let state = ExoState {
             spot,
+            perp,
             market: series.meta,
             now_ns: tick.ts_ns,
         };
@@ -340,6 +344,7 @@ fn sell_fill(tick: &BookTick, side: Side, shares: f64, capture_frac: f64) -> Opt
 pub fn run_market_grid(
     series: &MarketSeries,
     spot: &SpotHistory,
+    perp: Option<&crate::state::PerpState>,
     model: &AlphaModel,
     cfg: &HarnessConfig,
     latencies_ms: &[u64],
@@ -352,7 +357,7 @@ pub fn run_market_grid(
         }
         return outputs;
     }
-    let pass = belief_pass(series, spot, model, cfg);
+    let pass = belief_pass(series, spot, perp, model, cfg);
     let regime = crate::regime::classify(spot, series.meta.open_ts_ns);
     let mut min_pair_cost: Option<f64> = None;
     let mut real_no_ticks = 0usize;
@@ -405,6 +410,7 @@ pub fn run_market(
     run_market_grid(
         series,
         spot,
+        None,
         model,
         cfg,
         &[cfg.latency_ms],

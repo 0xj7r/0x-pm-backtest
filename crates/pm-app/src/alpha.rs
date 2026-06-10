@@ -462,7 +462,7 @@ fn compute_market(
             date: market.date.clone(),
         };
 
-        let outputs = run_market_grid(&series, &spot, model, base_cfg, latencies_ms, edge_thresholds);
+        let outputs = run_market_grid(&series, &spot, None, model, base_cfg, latencies_ms, edge_thresholds);
         Item::Done(Box::new((series.meta, outputs)))
     }
 }

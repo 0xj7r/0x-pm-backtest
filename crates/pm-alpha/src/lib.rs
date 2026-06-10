@@ -20,4 +20,4 @@ pub use calibrator::{ExoCalibrator, ExoCalibratorSnapshot, ExoFeatures, Training
 pub use fair_value::{FairValueEstimate, FairValueModel, NoSignalReason};
 pub use model::{AlphaModel, AlphaModelConfig, Belief, Evaluation};
 pub use regime::Regime;
-pub use state::{ExoState, MarketMeta, Token};
+pub use state::{ExoState, MarketMeta, PerpState, Token};

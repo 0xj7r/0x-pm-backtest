@@ -54,9 +54,54 @@ pub struct MarketMeta {
     pub strike: f64,
 }
 
+/// Perp-complex history for the underlying (Binance USD-M futures):
+/// taker prints, 5-minute open interest, 8h funding events. All series are
+/// sorted by timestamp; queries must use at-or-before semantics.
+#[derive(Debug, Default, Clone)]
+pub struct PerpState {
+    pub trades: SpotHistory,
+    /// (ts_ns, open interest in contracts), 5-minute cadence.
+    pub oi: Vec<(i64, f64)>,
+    /// (ts_ns, funding rate), one row per funding event.
+    pub funding: Vec<(i64, f64)>,
+}
+
+impl PerpState {
+    fn at_or_before(series: &[(i64, f64)], ts_ns: i64) -> Option<f64> {
+        let idx = series.partition_point(|(t, _)| *t <= ts_ns);
+        if idx == 0 { None } else { Some(series[idx - 1].1) }
+    }
+
+    pub fn oi_at(&self, ts_ns: i64) -> Option<f64> {
+        Self::at_or_before(&self.oi, ts_ns)
+    }
+
+    /// Relative OI change over the trailing window, e.g. -0.02 = 2% drop.
+    pub fn oi_delta_frac(&self, ts_ns: i64, lookback_ns: i64) -> Option<f64> {
+        let now = self.oi_at(ts_ns)?;
+        let then = Self::at_or_before(&self.oi, ts_ns - lookback_ns)?;
+        if then.abs() < 1e-9 { return None; }
+        Some(now / then - 1.0)
+    }
+
+    pub fn funding_at(&self, ts_ns: i64) -> Option<f64> {
+        Self::at_or_before(&self.funding, ts_ns)
+    }
+
+    /// Perp-minus-spot basis as a fraction of spot, at-or-before ts.
+    pub fn basis_frac(&self, spot: &SpotHistory, ts_ns: i64) -> Option<f64> {
+        let perp = self.trades.price_at_or_before(ts_ns)?;
+        let s = spot.price_at_or_before(ts_ns)?;
+        if s <= 0.0 { return None; }
+        Some(perp / s - 1.0)
+    }
+}
+
 /// Everything an exogenous signal may see at one decision instant.
 pub struct ExoState<'a> {
     pub spot: &'a SpotHistory,
+    /// Perp complex (None when not loaded; features must degrade gracefully).
+    pub perp: Option<&'a PerpState>,
     pub market: MarketMeta,
     pub now_ns: i64,
 }
@@ -101,6 +146,7 @@ mod tests {
         let spot = SpotHistory::default();
         let s = ExoState {
             spot: &spot,
+            perp: None,
             market: meta(0, 300_000_000_000),
             now_ns: 400_000_000_000,
         };
@@ -113,6 +159,7 @@ mod tests {
         let spot = SpotHistory::default();
         let s = ExoState {
             spot: &spot,
+            perp: None,
             market: meta(0, 300_000_000_000),
             now_ns: 150_000_000_000,
         };
@@ -121,6 +168,7 @@ mod tests {
         // Before the open, remaining exceeds the window: clamp to 1.
         let early = ExoState {
             spot: &spot,
+            perp: None,
             market: meta(0, 300_000_000_000),
             now_ns: -100_000_000_000,
         };
@@ -144,6 +192,7 @@ mod tests {
         }]);
         let s = ExoState {
             spot: &spot,
+            perp: None,
             market: meta(0, 300_000_000_000),
             now_ns: 20,
         };

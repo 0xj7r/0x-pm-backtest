@@ -8,15 +8,12 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 BIN=./target/fast/pm-app
-MAN=data/manifests/ingest0608
-OUT=data/runs/alpha/hunt003
+MAN=data/manifests/canonical
+OUT=data/runs/alpha/hunt003b
 mkdir -p "$OUT"
 log() { echo "[$(date -u +%H:%M:%S)] $*"; }
 
-until [ "$(ls data/runs/alpha/febapr/*.json 2>/dev/null | wc -l | tr -d ' ')" -ge 8 ] \
-   || ! pgrep -f "date-start 2026-0[234]" > /dev/null; do
-  sleep 120
-done
+true
 log "feb-apr shards finished; starting hunt 003"
 
 mint() {
@@ -47,7 +44,7 @@ run_family() {
   fi
   log "family $fam tune"
   "$BIN" alpha "${STORE[@]+"${STORE[@]}"}" \
-    --markets "$MAN/${fam}_up.jsonl" --slug-prefix "${fam}-" --infer-outcome \
+    --markets "$MAN/${fam}_up.jsonl" --slug-prefix "${fam}-" \
     --down-assets "$MAN/down_all.jsonl" --tick-cache-dir data/cache/ticks \
     --date-start 2026-05-21 --date-end 2026-05-24 \
     --latency-ms 150 --edge-thresholds 0.08,0.12,0.16 --vol-lookback-s 3600 \
@@ -58,7 +55,7 @@ run_family() {
   THR=$(python3 scripts/alpha_overnight_pick.py best-thr "$OUT/${safe}_tune.json") || return 1
   log "family $fam thr=$THR test"
   "$BIN" alpha "${STORE[@]+"${STORE[@]}"}" \
-    --markets "$MAN/${fam}_up.jsonl" --slug-prefix "${fam}-" --infer-outcome \
+    --markets "$MAN/${fam}_up.jsonl" --slug-prefix "${fam}-" \
     --down-assets "$MAN/down_all.jsonl" --tick-cache-dir data/cache/ticks \
     --date-start 2026-05-25 --date-end 2026-05-28 \
     --latency-ms 150 --edge-thresholds "$THR" --vol-lookback-s 3600 \
@@ -67,7 +64,7 @@ run_family() {
     > "$OUT/${safe}_test.log" 2>&1 || log "WARN test $fam failed"
   log "family $fam june"
   "$BIN" alpha "${STORE[@]+"${STORE[@]}"}" \
-    --markets "$MAN/${fam}_up.jsonl" --slug-prefix "${fam}-" --infer-outcome \
+    --markets "$MAN/${fam}_up.jsonl" --slug-prefix "${fam}-" \
     --down-assets "$MAN/down_all.jsonl" --tick-cache-dir data/cache/ticks \
     --date-start 2026-06-01 --date-end 2026-06-07 \
     --latency-ms 150 --edge-thresholds "$THR" --vol-lookback-s 3600 \

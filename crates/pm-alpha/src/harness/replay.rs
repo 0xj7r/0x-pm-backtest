@@ -192,7 +192,9 @@ fn execute(
             continue;
         };
 
-        let Some((avg_price, shares)) = fill(fill_tick, side, cfg.notional_usdc) else {
+        let Some((avg_price, shares)) =
+            fill(fill_tick, side, cfg.notional_usdc, cfg.depth_capture_frac)
+        else {
             continue;
         };
         let entry_fee = avg_price * shares * cfg.taker_fee_bps / 10_000.0;
@@ -212,7 +214,8 @@ fn execute(
             if let Some(exit_tick) = series.ticks[d.tick_idx..]
                 .iter()
                 .find(|t| t.ts_ns >= exit_at_ns && t.ts_ns <= close_ns)
-                && let Some((px, sold)) = sell_fill(exit_tick, side, shares)
+                && let Some((px, sold)) =
+                    sell_fill(exit_tick, side, shares, cfg.depth_capture_frac)
             {
                 exit_fee = px * sold * cfg.taker_fee_bps / 10_000.0;
                 let remainder = (shares - sold).max(0.0);
@@ -258,7 +261,7 @@ fn execute(
             };
             if tail_touch > 0.0 && tail_touch <= cfg.tail_max_price
                 && let Some((tail_price, tail_shares)) =
-                    fill(fill_tick, tail_side, cfg.notional_usdc * cfg.tail_frac)
+                    fill(fill_tick, tail_side, cfg.notional_usdc * cfg.tail_frac, cfg.depth_capture_frac)
             {
                 let tail_fee = tail_price * tail_shares * cfg.taker_fee_bps / 10_000.0;
                 let tail_won = match tail_side {
@@ -289,7 +292,7 @@ fn execute(
 /// Sell `shares` by crossing the spread: selling YES walks the YES bids;
 /// selling NO (synthesized) means buying back YES, i.e. proceeds per share
 /// are `1 - ask` walking the YES asks. Returns (avg_proceeds_price, sold).
-fn sell_fill(tick: &BookTick, side: Side, shares: f64) -> Option<(f64, f64)> {
+fn sell_fill(tick: &BookTick, side: Side, shares: f64, capture_frac: f64) -> Option<(f64, f64)> {
     let levels: Vec<(f64, f64)> = match side {
         Side::Yes => tick
             .bids
@@ -313,6 +316,7 @@ fn sell_fill(tick: &BookTick, side: Side, shares: f64) -> Option<(f64, f64)> {
     if levels.is_empty() {
         return None;
     }
+    let capture = capture_frac.clamp(0.0, 1.0);
     let mut remaining = shares;
     let mut proceeds = 0.0;
     let mut sold = 0.0;
@@ -320,7 +324,7 @@ fn sell_fill(tick: &BookTick, side: Side, shares: f64) -> Option<(f64, f64)> {
         if remaining <= 1e-9 {
             break;
         }
-        let qty = remaining.min(size);
+        let qty = remaining.min(size * capture);
         proceeds += qty * price;
         sold += qty;
         remaining -= qty;
@@ -414,7 +418,7 @@ pub fn run_market(
 /// Walk depth on the relevant side for `notional` dollars. Buying YES walks
 /// the YES asks; buying NO is synthesized as `1 - yes_bid` walking the YES
 /// bids (the NO leg is not in the tape). Returns (avg_price, shares).
-fn fill(tick: &BookTick, side: Side, notional: f64) -> Option<(f64, f64)> {
+fn fill(tick: &BookTick, side: Side, notional: f64, capture_frac: f64) -> Option<(f64, f64)> {
     let levels: Vec<(f64, f64)> = match side {
         Side::Yes => tick
             .asks
@@ -440,6 +444,7 @@ fn fill(tick: &BookTick, side: Side, notional: f64) -> Option<(f64, f64)> {
         return None;
     }
 
+    let capture = capture_frac.clamp(0.0, 1.0);
     let mut remaining = notional;
     let mut cost = 0.0;
     let mut shares = 0.0;
@@ -447,7 +452,7 @@ fn fill(tick: &BookTick, side: Side, notional: f64) -> Option<(f64, f64)> {
         if remaining <= 1e-9 || price <= 0.0 {
             break;
         }
-        let level_notional = price * size;
+        let level_notional = price * size * capture;
         let take = remaining.min(level_notional);
         let qty = take / price;
         cost += take;

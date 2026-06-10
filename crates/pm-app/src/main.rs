@@ -113,6 +113,9 @@ enum Cmd {
         fee_bps: f64,
         #[arg(long, default_value = "50.0")]
         notional_usdc: f64,
+        /// Capture stress: fraction of displayed depth available to us.
+        #[arg(long, default_value = "1.0")]
+        depth_capture_frac: f64,
         #[arg(long, default_value = "1000")]
         decision_dt_ms: u64,
         #[arg(long, default_value = "10")]
@@ -1136,6 +1139,7 @@ async fn main() -> Result<()> {
             edge_thresholds,
             fee_bps,
             notional_usdc,
+            depth_capture_frac,
             decision_dt_ms,
             stop_before_close_s,
             max_clips,
@@ -1183,6 +1187,7 @@ async fn main() -> Result<()> {
                     edge_thresholds,
                     fee_bps,
                     notional_usdc,
+                    depth_capture_frac,
                     decision_dt_ms,
                     stop_before_close_s,
                     max_clips,

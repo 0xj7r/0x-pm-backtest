@@ -17,3 +17,6 @@ pm-risk     = { workspace = true }
 pm-model    = { workspace = true }
 serde_json  = { workspace = true }
 anyhow      = { workspace = true }
+
+[dev-dependencies]
+pm-engine = { path = ".", features = ["testkit"] }

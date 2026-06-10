@@ -1910,6 +1910,7 @@ name = "pm-engine"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "pm-engine",
  "pm-model",
  "pm-risk",
  "pm-strategy",

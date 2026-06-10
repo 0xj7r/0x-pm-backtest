@@ -1,0 +1,132 @@
+{
+  "model_cfg": {
+    "vol_lookback_s": 3600,
+    "vol_sample_dt_s": 1,
+    "momentum_lookback_s": 0,
+    "momentum_weight": 1.0
+  },
+  "harness_cfg": {
+    "latency_ms": 150,
+    "taker_fee_bps": 0.0,
+    "edge_threshold": 0.16,
+    "notional_usdc": 50.0,
+    "depth_capture_frac": 1.0,
+    "skip_touch_level": false,
+    "decision_dt_ms": 1000,
+    "stop_before_close_s": 10,
+    "exit_after_s": 30,
+    "skip_calm": false,
+    "entry_mode": "Fade",
+    "align_min_mid": 0.55,
+    "tail_max_price": 0.0,
+    "tail_frac": 0.25,
+    "max_clips": 1,
+    "clip_cooldown_ms": 5000,
+    "collect_training": false,
+    "train_sample_dt_s": 15
+  },
+  "slug_prefix": "btc-updown-5m-",
+  "date_start": "2026-06-01",
+  "date_end": "2026-06-07",
+  "n_markets_considered": 2016,
+  "n_markets_run": 2008,
+  "n_skipped_no_strike": 3,
+  "n_skipped_no_outcome": 0,
+  "n_skipped_load_error": 5,
+  "sweep": [
+    {
+      "latency_ms": 150,
+      "edge_threshold": 0.16,
+      "report": {
+        "cells": {
+          "BTC-300s": {
+            "n_markets": 2008,
+            "n_with_belief": 2007,
+            "n_markets_traded": 879,
+            "n_trades": 879,
+            "n_wins": 582,
+            "total_pnl": 11911.646600730763,
+            "mean_pnl_per_trade": 13.551361320512813,
+            "hit_rate": 0.6621160409556314,
+            "total_fees": 0.0,
+            "log_loss_exo": 0.49621797761837405,
+            "log_loss_book": 0.49507740577906245,
+            "n_samples": 7570
+          }
+        },
+        "regime_cells": {
+          "BTC-300s|calm_low_vol": {
+            "n_markets": 62,
+            "n_with_belief": 62,
+            "n_markets_traded": 40,
+            "n_trades": 40,
+            "n_wins": 20,
+            "total_pnl": 76.56485225617524,
+            "mean_pnl_per_trade": 1.9141213064043812,
+            "hit_rate": 0.5,
+            "total_fees": 0.0,
+            "log_loss_exo": 0.4678498952667354,
+            "log_loss_book": 0.4835146295044061,
+            "n_samples": 237
+          },
+          "BTC-300s|clean_directional": {
+            "n_markets": 7,
+            "n_with_belief": 7,
+            "n_markets_traded": 2,
+            "n_trades": 2,
+            "n_wins": 1,
+            "total_pnl": 46.40998932964761,
+            "mean_pnl_per_trade": 23.204994664823804,
+            "hit_rate": 0.5,
+            "total_fees": 0.0,
+            "log_loss_exo": 0.17026285473282415,
+            "log_loss_book": 0.19853036730967355,
+            "n_samples": 26
+          },
+          "BTC-300s|expanded_high_flip": {
+            "n_markets": 75,
+            "n_with_belief": 75,
+            "n_markets_traded": 27,
+            "n_trades": 27,
+            "n_wins": 19,
+            "total_pnl": 330.98913376874873,
+            "mean_pnl_per_trade": 12.258856806249954,
+            "hit_rate": 0.7037037037037037,
+            "total_fees": 0.0,
+            "log_loss_exo": 0.4660541928104341,
+            "log_loss_book": 0.4580144272910556,
+            "n_samples": 276
+          },
+          "BTC-300s|expanded_mixed": {
+            "n_markets": 1864,
+            "n_with_belief": 1863,
+            "n_markets_traded": 810,
+            "n_trades": 810,
+            "n_wins": 542,
+            "total_pnl": 11457.682625376188,
+            "mean_pnl_per_trade": 14.145287191822455,
+            "hit_rate": 0.6691358024691358,
+            "total_fees": 0.0,
+            "log_loss_exo": 0.4995636287802785,
+            "log_loss_book": 0.4980186635005802,
+            "n_samples": 7031
+          }
+        },
+        "aggregate": {
+          "n_markets": 2008,
+          "n_with_belief": 2007,
+          "n_markets_traded": 879,
+          "n_trades": 879,
+          "n_wins": 582,
+          "total_pnl": 11911.646600730763,
+          "mean_pnl_per_trade": 13.551361320512813,
+          "hit_rate": 0.6621160409556314,
+          "total_fees": 0.0,
+          "log_loss_exo": 0.49621797761837405,
+          "log_loss_book": 0.49507740577906245,
+          "n_samples": 7570
+        }
+      }
+    }
+  ]
+}

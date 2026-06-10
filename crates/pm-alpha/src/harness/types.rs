@@ -13,9 +13,41 @@ pub struct BookTick {
     pub yes_ask: f32,
     pub bids: [BookLevel; TAPE_DEPTH],
     pub asks: [BookLevel; TAPE_DEPTH],
+    /// Real NO-token ladder (zeros when not loaded; fills then fall back to
+    /// the synthetic `1 - yes` complement).
+    pub no_bid: f32,
+    pub no_ask: f32,
+    pub no_bids: [BookLevel; TAPE_DEPTH],
+    pub no_asks: [BookLevel; TAPE_DEPTH],
 }
 
 impl BookTick {
+    pub fn has_real_no(&self) -> bool {
+        self.no_ask > 0.0 && self.no_ask < 1.0 && self.no_bid > 0.0 && self.no_bid < 1.0
+    }
+
+    /// Cost of buying one NO share: real Down-token ask when loaded, else
+    /// the synthetic complement of the YES bid.
+    pub fn no_buy_price(&self) -> Option<f64> {
+        if self.has_real_no() {
+            Some(self.no_ask as f64)
+        } else if self.yes_bid > 0.0 && self.yes_bid < 1.0 {
+            Some(1.0 - self.yes_bid as f64)
+        } else {
+            None
+        }
+    }
+
+    /// Combined cost of one YES + one NO at the touch (the pair-cost / arb
+    /// observable). Only meaningful with the real NO ladder.
+    pub fn pair_cost(&self) -> Option<f64> {
+        if self.has_real_no() && self.yes_ask > 0.0 && self.yes_ask < 1.0 {
+            Some(self.yes_ask as f64 + self.no_ask as f64)
+        } else {
+            None
+        }
+    }
+
     pub fn mid(&self) -> Option<f64> {
         if self.yes_bid > 0.0 && self.yes_ask > 0.0 && self.yes_ask < 1.0 && self.yes_bid < 1.0 {
             Some(((self.yes_bid + self.yes_ask) / 2.0) as f64)
@@ -135,4 +167,8 @@ pub struct MarketRunOutput {
     pub had_belief: bool,
     /// Calibrator training samples (only when `collect_training` is set).
     pub train_samples: Vec<crate::calibrator::TrainingSample>,
+    /// Minimum YES+NO touch cost observed in-window (real NO ladder only).
+    pub min_pair_cost: Option<f64>,
+    /// Fraction of ticks carrying a real NO ladder.
+    pub real_no_coverage: f64,
 }

@@ -155,6 +155,10 @@ enum Cmd {
         /// Dump per-trade records (first grid cell) to this JSONL path.
         #[arg(long)]
         trades_out: Option<PathBuf>,
+        /// JSONL of Down-token assets (metadata discovery, --token-outcome
+        /// Down); enables real NO ladders instead of the synthetic 1-yes.
+        #[arg(long)]
+        down_assets: Option<PathBuf>,
     },
     /// Stream a Telonex book_snapshot parquet from S3 and print sanity stats.
     InspectS3 {
@@ -1129,6 +1133,7 @@ async fn main() -> Result<()> {
             calibrator_out,
             calibrator_in,
             trades_out,
+            down_assets,
         } => {
             let store = if let Some(ref dir) = local_cache_dir {
                 tracing::info!(?dir, "using local cache");
@@ -1170,6 +1175,7 @@ async fn main() -> Result<()> {
                     calibrator_out,
                     calibrator_in,
                     trades_out,
+                    down_assets,
                 },
             )
             .await

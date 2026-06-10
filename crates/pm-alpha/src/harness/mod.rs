@@ -92,7 +92,59 @@ mod tests {
             yes_ask: ask,
             bids: book_levels(bid),
             asks: book_levels(ask),
+            no_bid: 0.0,
+            no_ask: 0.0,
+            no_bids: [BookLevel::default(); TAPE_DEPTH],
+            no_asks: [BookLevel::default(); TAPE_DEPTH],
         }
+    }
+
+    #[test]
+    fn real_no_ladder_preferred_over_synthetic_and_pair_cost_reported() {
+        // YES book 0.50/0.52; real NO book asks at 0.45 (cheaper than the
+        // synthetic 1 - 0.50 = 0.50). Belief is bearish after a -1% jump...
+        // simpler: force entry with threshold -1 and a flat-ish belief; the
+        // NO side should fill at 0.45, and pair cost = 0.52 + 0.45 = 0.97.
+        let spot = spot_with_jump(2400, i64::MAX);
+        let open_s = 2000_i64;
+        let close_s = 2300_i64;
+        let mut ticks: Vec<BookTick> = Vec::new();
+        for s in open_s..close_s {
+            let mut t = book_tick(s, 0.60, 0.62); // YES rich => NO side wins edge
+            t.no_bid = 0.43;
+            t.no_ask = 0.45;
+            t.no_bids = book_levels(0.43);
+            t.no_asks = book_levels(0.45);
+            ticks.push(t);
+        }
+        let series = MarketSeries {
+            meta: MarketMeta {
+                token: Token::Btc,
+                window_secs: 300,
+                open_ts_ns: open_s * 1_000_000_000,
+                close_ts_ns: close_s * 1_000_000_000,
+                strike: 100_000.0,
+            },
+            resolved_yes: false,
+            ticks,
+            date: "2026-05-01".into(),
+        };
+        let out = run_market(
+            &series,
+            &spot,
+            &AlphaModel::default(),
+            &HarnessConfig {
+                edge_threshold: -1.0,
+                latency_ms: 0,
+                exit_after_s: 0,
+                ..HarnessConfig::default()
+            },
+        );
+        let t = &out.trades[0];
+        assert_eq!(t.side, Side::No);
+        assert!((t.avg_price - 0.45).abs() < 1e-6, "real NO ask, got {}", t.avg_price);
+        assert!((out.min_pair_cost.unwrap() - 1.07).abs() < 1e-6);
+        assert!(out.real_no_coverage > 0.99);
     }
 
     /// Market opens at t=2000s (so vol warmup exists), closes at t=2300s.

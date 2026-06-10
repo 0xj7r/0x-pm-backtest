@@ -188,6 +188,8 @@ mod tests {
             had_belief: true,
             train_samples: Vec::new(),
             regime: None,
+            min_pair_cost: None,
+            real_no_coverage: 0.0,
         }
     }
 

@@ -48,6 +48,9 @@ pub struct AlphaArgs {
     pub calibrator_in: Option<PathBuf>,
     /// Dump per-trade records (first grid cell only) to this JSONL path.
     pub trades_out: Option<PathBuf>,
+    /// JSONL of Down-token MarketHandle rows (metadata discovery with
+    /// --token-outcome Down); enables the real NO ladder, keyed by slug.
+    pub down_assets: Option<PathBuf>,
 }
 
 #[derive(serde::Serialize)]
@@ -125,6 +128,7 @@ async fn process_markets(
     edge_thresholds: &[f64],
     replay_event_cache_dir: Option<&Path>,
     infer_outcome: bool,
+    down_by_slug: &std::collections::HashMap<String, MarketHandle>,
 ) -> Result<ProcessOutput> {
     let store_inner = store.store();
     let n_cells = latencies_ms.len() * edge_thresholds.len();
@@ -205,15 +209,48 @@ async fn process_markets(
             continue;
         }
 
+        // Real NO ladder: load the Down-token sibling's tape and attach the
+        // latest NO state to each YES tick (pointer merge on timestamps).
+        let down_events = match down_by_slug.get(&market.slug) {
+            Some(down) => load_replay_events_for_market(
+                store,
+                store_inner.clone(),
+                down,
+                MarketId(idx as u32 | 0x8000_0000),
+                replay_event_cache_dir,
+            )
+            .await
+            .unwrap_or_default(),
+            None => Vec::new(),
+        };
+
+        let mut down_idx = 0usize;
+        let mut last_no: Option<&pm_types::ReplayEvent> = None;
         let ticks: Vec<BookTick> = events
             .iter()
             .filter(|e| e.yes_bid > 0.0 && e.yes_ask > 0.0 && e.yes_ask < 1.0)
-            .map(|e| BookTick {
-                ts_ns: e.ts_ns,
-                yes_bid: e.yes_bid,
-                yes_ask: e.yes_ask,
-                bids: e.bids,
-                asks: e.asks,
+            .map(|e| {
+                while down_idx < down_events.len() && down_events[down_idx].ts_ns <= e.ts_ns {
+                    last_no = Some(&down_events[down_idx]);
+                    down_idx += 1;
+                }
+                let (no_bid, no_ask, no_bids, no_asks) = match last_no {
+                    Some(n) if n.yes_bid > 0.0 && n.yes_ask > 0.0 && n.yes_ask < 1.0 => {
+                        (n.yes_bid, n.yes_ask, n.bids, n.asks)
+                    }
+                    _ => (0.0, 0.0, Default::default(), Default::default()),
+                };
+                BookTick {
+                    ts_ns: e.ts_ns,
+                    yes_bid: e.yes_bid,
+                    yes_ask: e.yes_ask,
+                    bids: e.bids,
+                    asks: e.asks,
+                    no_bid,
+                    no_ask,
+                    no_bids,
+                    no_asks,
+                }
             })
             .collect();
         if ticks.is_empty() {
@@ -304,6 +341,16 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
         train_sample_dt_s: 15,
     };
     let mut spot_cache = SpotCache::default();
+    let down_by_slug: std::collections::HashMap<String, MarketHandle> = match &args.down_assets {
+        Some(path) => read_markets(path)?
+            .into_iter()
+            .map(|m| (m.slug.clone(), m))
+            .collect(),
+        None => Default::default(),
+    };
+    if !down_by_slug.is_empty() {
+        tracing::info!(n = down_by_slug.len(), "real NO ladders enabled (down-asset map loaded)");
+    }
 
     // Resolve the model: optionally train a calibrator on the pre-split days.
     let mut calibrator: Option<ExoCalibrator> = None;
@@ -338,6 +385,7 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
             &[f64::INFINITY],
             args.replay_event_cache_dir.as_deref(),
             args.infer_outcome,
+            &down_by_slug,
         )
         .await?;
         let mut cal = ExoCalibrator::default();
@@ -381,6 +429,7 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
         &args.edge_thresholds,
         args.replay_event_cache_dir.as_deref(),
         args.infer_outcome,
+        &down_by_slug,
     )
     .await?;
     if let Some(path) = &args.trades_out {
@@ -429,6 +478,23 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
         "\nalpha run: {} markets run / {} considered (skipped: {} no-strike, {} no-outcome, {} load-error)",
         n_run, n_considered, n_no_strike, n_no_outcome, n_load_error
     );
+    if !per_cell.is_empty() {
+        let outs = &per_cell[0];
+        let cov: f64 = outs.iter().map(|(_, o)| o.real_no_coverage).sum::<f64>()
+            / outs.len().max(1) as f64;
+        let pcs: Vec<f64> = outs.iter().filter_map(|(_, o)| o.min_pair_cost).collect();
+        if cov > 0.0 && !pcs.is_empty() {
+            let sub1 = pcs.iter().filter(|p| **p < 1.0).count();
+            let mean_min = pcs.iter().sum::<f64>() / pcs.len() as f64;
+            println!(
+                "real-NO coverage {:.1}% | min pair cost: mean {:.4}, sub-$1 in {}/{} markets",
+                cov * 100.0,
+                mean_min,
+                sub1,
+                pcs.len()
+            );
+        }
+    }
     println!(
         "model: vol_lookback={}s momentum_lookback={}s weight={} | fee={}bps notional=${}",
         args.vol_lookback_s,

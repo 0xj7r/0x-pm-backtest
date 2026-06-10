@@ -23,8 +23,8 @@ struct Decision {
     ts_ns: i64,
     p_up: f64,
     mid: f64,
-    yes_bid: f64,
     yes_ask: f64,
+    no_buy: f64,
 }
 
 struct BeliefPass {
@@ -120,13 +120,16 @@ fn belief_pass(
         let (Some(mid), true) = (tick.mid(), tick.yes_ask > tick.yes_bid) else {
             continue;
         };
+        let Some(no_buy) = tick.no_buy_price() else {
+            continue;
+        };
         pass.decisions.push(Decision {
             tick_idx: i,
             ts_ns: tick.ts_ns,
             p_up: ev.p,
             mid,
-            yes_bid: tick.yes_bid as f64,
             yes_ask: tick.yes_ask as f64,
+            no_buy,
         });
     }
 
@@ -158,7 +161,7 @@ fn execute(
         }
         // Edge per side against touch prices (entry test; fill walks depth).
         let edge_yes = d.p_up - d.yes_ask;
-        let edge_no = d.yes_bid - d.p_up; // buy NO at 1 - bid
+        let edge_no = (1.0 - d.p_up) - d.no_buy; // real NO ask when loaded
         let (side, edge) = if edge_yes >= edge_no {
             (Side::Yes, edge_yes)
         } else {
@@ -247,6 +250,12 @@ fn sell_fill(tick: &BookTick, side: Side, shares: f64) -> Option<(f64, f64)> {
             .filter(|l| valid(l))
             .map(|l| (l.price as f64, l.size as f64))
             .collect(),
+        Side::No if tick.has_real_no() => tick
+            .no_bids
+            .iter()
+            .filter(|l| valid(l))
+            .map(|l| (l.price as f64, l.size as f64))
+            .collect(),
         Side::No => tick
             .asks
             .iter()
@@ -294,6 +303,17 @@ pub fn run_market_grid(
     }
     let pass = belief_pass(series, spot, model, cfg);
     let regime = crate::regime::classify(spot, series.meta.open_ts_ns);
+    let mut min_pair_cost: Option<f64> = None;
+    let mut real_no_ticks = 0usize;
+    for t in &series.ticks {
+        if t.has_real_no() {
+            real_no_ticks += 1;
+        }
+        if let Some(pc) = t.pair_cost() {
+            min_pair_cost = Some(min_pair_cost.map_or(pc, |m: f64| m.min(pc)));
+        }
+    }
+    let real_no_coverage = real_no_ticks as f64 / series.ticks.len().max(1) as f64;
     let calm_blocked =
         cfg.skip_calm && regime == Some(crate::regime::Regime::CalmLowVol);
     let mut first = true;
@@ -317,6 +337,8 @@ pub fn run_market_grid(
                 had_belief: pass.had_belief,
                 train_samples,
                 regime,
+                min_pair_cost,
+                real_no_coverage,
             });
         }
     }
@@ -349,6 +371,13 @@ fn fill(tick: &BookTick, side: Side, notional: f64) -> Option<(f64, f64)> {
     let levels: Vec<(f64, f64)> = match side {
         Side::Yes => tick
             .asks
+            .iter()
+            .filter(|l| valid(l))
+            .map(|l| (l.price as f64, l.size as f64))
+            .collect(),
+        // Real Down-token asks when loaded; synthetic complement otherwise.
+        Side::No if tick.has_real_no() => tick
+            .no_asks
             .iter()
             .filter(|l| valid(l))
             .map(|l| (l.price as f64, l.size as f64))

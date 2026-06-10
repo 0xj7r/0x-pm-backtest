@@ -60,6 +60,11 @@ pub struct AlphaArgs {
     /// Compact merged-tick cache dir (bincode+zstd of the two-sided
     /// BookTick series; ~10x smaller and faster than re-decoding parquet).
     pub tick_cache_dir: Option<PathBuf>,
+    /// Load the perp complex (futures prints, OI, funding) for this symbol
+    /// and expose it to the belief via ExoState.perp.
+    pub perp_symbol: Option<String>,
+    /// Cache root for the perp parquets (defaults to the local cache dir).
+    pub perp_cache_dir: Option<PathBuf>,
 }
 
 #[derive(serde::Serialize)]
@@ -231,6 +236,7 @@ async fn process_markets(
     infer_outcome: bool,
     down_by_slug: &std::collections::HashMap<String, MarketHandle>,
     tick_cache_dir: Option<&Path>,
+    perp: Option<std::sync::Arc<pm_alpha::PerpState>>,
 ) -> Result<ProcessOutput> {
     let store_inner = store.store();
     let n_cells = latencies_ms.len() * edge_thresholds.len();
@@ -280,6 +286,7 @@ async fn process_markets(
         let latencies = latencies.clone();
         let thresholds = thresholds.clone();
         let tick_cache = tick_cache_dir.map(|p| p.to_path_buf());
+        let perp = perp.clone();
         async move {
             let has_down = down.is_some();
             let cache_path = tick_cache
@@ -328,6 +335,7 @@ async fn process_markets(
                     cached,
                     cache_path.as_deref(),
                     spot,
+                    perp,
                     infer_outcome,
                     &model,
                     &base_cfg,
@@ -370,6 +378,7 @@ fn compute_market(
     cached_ticks: Option<Vec<BookTick>>,
     cache_path: Option<&Path>,
     spot: Option<std::sync::Arc<pm_types::SpotHistory>>,
+    perp: Option<std::sync::Arc<pm_alpha::PerpState>>,
     infer_outcome: bool,
     model: &AlphaModel,
     base_cfg: &HarnessConfig,
@@ -462,7 +471,7 @@ fn compute_market(
             date: market.date.clone(),
         };
 
-        let outputs = run_market_grid(&series, &spot, None, model, base_cfg, latencies_ms, edge_thresholds);
+        let outputs = run_market_grid(&series, &spot, perp.as_deref(), model, base_cfg, latencies_ms, edge_thresholds);
         Item::Done(Box::new((series.meta, outputs)))
     }
 }
@@ -509,6 +518,21 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
         train_sample_dt_s: 15,
     };
     let mut spot_cache = SpotCache::default();
+    let perp: Option<std::sync::Arc<pm_alpha::PerpState>> = match &args.perp_symbol {
+        Some(symbol) => {
+            let mut dates: Vec<String> = markets.iter().map(|m| m.date.clone()).collect();
+            dates.sort();
+            dates.dedup();
+            let cache_root = args
+                .perp_cache_dir
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("data/cache"));
+            Some(std::sync::Arc::new(
+                crate::perp::load_perp_state(store, &cache_root, symbol, &dates).await?,
+            ))
+        }
+        None => None,
+    };
     let down_by_slug: std::collections::HashMap<String, MarketHandle> = match &args.down_assets {
         Some(path) => read_markets(path)?
             .into_iter()
@@ -555,6 +579,7 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
             args.infer_outcome,
             &down_by_slug,
             args.tick_cache_dir.as_deref(),
+            perp.clone(),
         )
         .await?;
         let mut cal = ExoCalibrator::default();
@@ -600,6 +625,7 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
         args.infer_outcome,
         &down_by_slug,
         args.tick_cache_dir.as_deref(),
+        perp,
     )
     .await?;
     if let Some(path) = &args.trades_out {

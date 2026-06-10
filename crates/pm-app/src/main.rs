@@ -24,6 +24,7 @@ use std::time::Instant;
 
 mod alpha;
 mod discovery;
+mod perp;
 mod engine_driver;
 mod prep_cache;
 mod result_summary;
@@ -180,6 +181,13 @@ enum Cmd {
         /// parquet re-decode, written through on miss).
         #[arg(long)]
         tick_cache_dir: Option<PathBuf>,
+        /// Load the perp complex for this symbol (e.g. BTCUSDT) into the
+        /// belief's ExoState.
+        #[arg(long)]
+        perp_symbol: Option<String>,
+        /// Cache root for perp parquets (default: data/cache).
+        #[arg(long)]
+        perp_cache_dir: Option<PathBuf>,
     },
     /// Stream a Telonex book_snapshot parquet from S3 and print sanity stats.
     InspectS3 {
@@ -1161,6 +1169,8 @@ async fn main() -> Result<()> {
             trades_out,
             down_assets,
             tick_cache_dir,
+            perp_symbol,
+            perp_cache_dir,
         } => {
             let store = if let Some(ref dir) = local_cache_dir {
                 tracing::info!(?dir, "using local cache");
@@ -1209,6 +1219,8 @@ async fn main() -> Result<()> {
                     trades_out,
                     down_assets,
                     tick_cache_dir,
+                    perp_symbol,
+                    perp_cache_dir,
                 },
             )
             .await

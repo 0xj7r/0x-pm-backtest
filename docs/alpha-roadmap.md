@@ -36,3 +36,6 @@ E3. close_ts->open_ts rename (audit latent trap), duration-from-slug hardening, 
 
 ## Deployment naming convention (2026-06-10)
 New stack units are `pm-alpha-*`: `pm-alpha-shadow.service` (log-only), future `pm-alpha-live.service` (pilot). Logs under `~/data/pm-alpha/<mode>/`. Legacy `polymarket-exec@*` instances stay MASKED (strongest off state; unit files kept for the execution-adapter reference); `mm-live-logger` and `poly-daily-summary` stopped/disabled 2026-06-10. Kill-switch file restored at ~/.config/polymarket-exec/live.kill as a belt-and-braces layer. The pm-alpha units read nothing from ~/.config/polymarket-exec/.
+
+## Sizing (user direction, 2026-06-10 evening)
+Flat-$ clips mis-size the cheap-entry cohort (live shadow: five 0.04-0.17 entries all lost full premium at $50 flat). Next harness knob after the deadline verdict: fractional-Kelly sizing on a belief-reliability-discounted edge (shrink p toward price where the belief is least calibrated: tau small, extreme moneyness), capped at the flat clip. Tune {deadline} x {flat, kelly-frac} jointly on May 7-18, verify once on May 19-28, judge on daily Sharpe + worst day. Kelly subtlety recorded: naive Kelly OVER-allocates to cheap asymmetric entries; the discount is the point.

@@ -25,10 +25,9 @@ print('export AWS_REGION=us-east-1')
   chmod 600 data/.aws_session.env
 }
 
-run_shard() {
+run_shard_parallel() {
   local name=$1 start=$2 end=$3
   if [ -f "$OUT/$name.json" ]; then log "shard $name exists, skipping"; return; fi
-  mint || { log "cred mint failed for $name"; return 1; }
   # shellcheck disable=SC1091
   source data/.aws_session.env
   log "shard $name ($start..$end) starting"
@@ -41,8 +40,15 @@ run_shard() {
   log "shard $name done"
 }
 
-run_shard feb 2026-02-12 2026-02-28
-run_shard mar 2026-03-01 2026-03-31
-run_shard apr 2026-04-01 2026-04-30
+# 8 parallel sub-shards: S3 GETs serialize within one process, so wall clock
+# scales with shard count.
+mint || { log "initial mint failed"; exit 1; }
+pids=()
+for SPEC in   "feb1 2026-02-12 2026-02-21"   "feb2 2026-02-22 2026-02-28"   "mar1 2026-03-01 2026-03-10"   "mar2 2026-03-11 2026-03-20"   "mar3 2026-03-21 2026-03-31"   "apr1 2026-04-01 2026-04-10"   "apr2 2026-04-11 2026-04-20"   "apr3 2026-04-21 2026-04-30"; do
+  set -- $SPEC
+  run_shard_parallel "$1" "$2" "$3" &
+  pids+=($!)
+done
+for p in "${pids[@]}"; do wait "$p" || log "WARN a shard failed"; done
 python3 scripts/alpha_overnight_pick.py summary "$OUT" > "$OUT/SUMMARY.txt" 2>&1 || true
 log FEBAPR_DONE

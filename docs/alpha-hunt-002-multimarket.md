@@ -74,3 +74,18 @@ The Down-token books were already cached on disk; the loader now merges them so 
 The validated edge is unchanged-to-slightly-better under the corrected execution model — synthetic NO was not flattering it.
 
 **Pair-cost discovery** (now observable): the minimum same-tick `yes_ask + no_ask` dips below $1.00 in 98% of May test markets (mean min 0.9657) and 99.4% of June markets (mean min 0.9601). A sub-parity two-leg buy redeems at $1 regardless of outcome. Tradeability depends on window duration, touch size, and two-leg fill latency — the next measurement module. This is the quantitative basis for the directional + pair-cost (bonereaper-style) strategy family.
+
+## Appendix 3: data-quality hardening (2026-06-10 audits)
+
+Two adversarial audits (harness leakage; data-layer timestamps/labels) drove four corrections, each re-validated on the frozen June holdout:
+
+| state | June 1-7 |
+|---|---|
+| original | +$11,726 |
+| + real NO ladders | +$12,039 |
+| + look-ahead-free strike (last trade at-or-before open; audit CRITICAL finding fixed) | +$12,106 |
+| + canonical true resolutions (Telonex markets parquet result_id; inference retired) | **+$11,912** |
+
+Timestamp semantics resolved offline: tape `timestamp_us` is Polymarket's own event time (collector receipt runs p50 +189ms / p99 +6.4s behind in a separate column) — the CEX-to-book lag is genuine exchange behavior, and the strategy's +EV at a simulated 1000ms covers any realistic input staleness. Remaining known-unknowns: live capture fraction (shadow pilot), NO-ladder staleness optimism (cutoff queued), Feb-Apr numbers pending their fixed-strike/true-label rerun.
+
+The canonical metadata parquet also expands the validated universe: six assets (btc/eth/sol/xrp/doge/hype) x 5m/15m/4h with true resolutions back to Oct 2025 (~45k BTC-5m markets alone), and the polymarket.com crypto-price API serves official historical open/close prints (strike proxy retired going forward; Chainlink `crypto_prices` channel available from Apr 2 for the oracle-lag study).

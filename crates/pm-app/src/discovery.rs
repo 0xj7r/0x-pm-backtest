@@ -675,6 +675,14 @@ mod tests {
             spot_symbol_for_market("", "eth-updown-15m-1778587500").unwrap(),
             None
         );
-        assert!(spot_symbol_for_market("auto", "sol-updown-5m-1778587500").is_err());
+        assert_eq!(
+            spot_symbol_for_market("auto", "sol-updown-5m-1778587500").unwrap(),
+            Some("SOLUSDT".to_string())
+        );
+        assert_eq!(
+            spot_symbol_for_market("auto", "xrp-updown-15m-1778587500").unwrap(),
+            Some("XRPUSDT".to_string())
+        );
+        assert!(spot_symbol_for_market("auto", "doge-updown-5m-1778587500").is_err());
     }
 }

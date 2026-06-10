@@ -104,6 +104,13 @@ fn in_date_range(date: &str, start: Option<&str>, end: Option<&str>) -> bool {
     true
 }
 
+enum Item {
+    SkipNoOutcome,
+    SkipNoStrike,
+    SkipLoadError,
+    Done(Box<(MarketMeta, Vec<MarketRunOutput>)>),
+}
+
 #[derive(Default)]
 struct ProcessCounters {
     n_run: usize,
@@ -159,16 +166,30 @@ async fn process_markets(
     }
 
     const PREFETCH: usize = 24;
-    let mut tape_stream = futures::stream::iter(markets.iter().enumerate().map(|(idx, market)| {
+    let compute_lanes = std::thread::available_parallelism()
+        .map(|n| n.get().saturating_sub(2).max(2))
+        .unwrap_or(4);
+    let model = std::sync::Arc::new(model.clone());
+    let base_cfg = std::sync::Arc::new(*base_cfg);
+    let latencies: std::sync::Arc<Vec<u64>> = std::sync::Arc::new(latencies_ms.to_vec());
+    let thresholds: std::sync::Arc<Vec<f64>> = std::sync::Arc::new(edge_thresholds.to_vec());
+
+    let mut result_stream = futures::stream::iter(markets.iter().enumerate().map(|(idx, market)| {
         let store = store.clone();
         let store_inner = store_inner.clone();
         let down = down_by_slug.get(&market.slug).cloned();
         let cache_dir = replay_event_cache_dir.map(|p| p.to_path_buf());
+        let spot = spot_by_market[idx].clone();
+        let market = market.clone();
+        let model = model.clone();
+        let base_cfg = base_cfg.clone();
+        let latencies = latencies.clone();
+        let thresholds = thresholds.clone();
         async move {
             let events = load_replay_events_for_market(
                 &store,
                 store_inner.clone(),
-                market,
+                &market,
                 MarketId(idx as u32),
                 cache_dir.as_deref(),
             )
@@ -185,25 +206,68 @@ async fn process_markets(
                 .unwrap_or_default(),
                 None => Vec::new(),
             };
-            (idx, events, down_events)
+            tokio::task::spawn_blocking(move || {
+                compute_market(
+                    &market,
+                    events,
+                    down_events,
+                    spot,
+                    infer_outcome,
+                    &model,
+                    &base_cfg,
+                    &latencies,
+                    &thresholds,
+                )
+            })
+            .await
+            .unwrap_or(Item::SkipLoadError)
         }
     }))
-    .buffered(PREFETCH);
+    .buffered(PREFETCH.max(compute_lanes));
 
-    while let Some((idx, events_res, down_events)) = tape_stream.next().await {
-        let market = &markets[idx];
+    while let Some(item) = result_stream.next().await {
+        match item {
+            Item::SkipNoOutcome => *n_no_outcome += 1,
+            Item::SkipNoStrike => *n_no_strike += 1,
+            Item::SkipLoadError => *n_load_error += 1,
+            Item::Done(boxed) => {
+                let (meta, outputs) = *boxed;
+                for (cell, mut market_out) in outputs.into_iter().enumerate() {
+                    out.train_samples.append(&mut market_out.train_samples);
+                    out.per_cell[cell].push((meta, market_out));
+                }
+                *n_run += 1;
+                if *n_run % 500 == 0 {
+                    tracing::info!(n_run = *n_run, total = markets.len(), "alpha progress");
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compute_market(
+    market: &MarketHandle,
+    events_res: Result<Vec<pm_types::ReplayEvent>>,
+    down_events: Vec<pm_types::ReplayEvent>,
+    spot: Option<std::sync::Arc<pm_types::SpotHistory>>,
+    infer_outcome: bool,
+    model: &AlphaModel,
+    base_cfg: &HarnessConfig,
+    latencies_ms: &[u64],
+    edge_thresholds: &[f64],
+) -> Item {
+    {
         let outcome_label = outcome_label_resolved_yes(&market.outcome);
         if outcome_label.is_none() && !infer_outcome {
-            *n_no_outcome += 1;
-            continue;
+            return Item::SkipNoOutcome;
         }
         let Some(token) = Token::from_slug(&market.slug) else {
-            *n_no_outcome += 1;
-            continue;
+            return Item::SkipNoOutcome;
         };
-        let Some(spot) = spot_by_market[idx].clone() else {
-            *n_load_error += 1;
-            continue;
+        let Some(spot) = spot else {
+            return Item::SkipLoadError;
         };
 
         let open_ns = market_open_ns(market);
@@ -221,8 +285,7 @@ async fn process_markets(
                 p
             }
             _ => {
-                *n_no_strike += 1;
-                continue;
+                return Item::SkipNoStrike;
             }
         };
 
@@ -230,13 +293,11 @@ async fn process_markets(
             Ok(e) => e,
             Err(err) => {
                 tracing::warn!(market = %market.slug, error = %err, "tape load failed");
-                *n_load_error += 1;
-                continue;
+                return Item::SkipLoadError;
             }
         };
         if events.is_empty() {
-            *n_load_error += 1;
-            continue;
+            return Item::SkipLoadError;
         }
 
         let mut down_idx = 0usize;
@@ -269,8 +330,7 @@ async fn process_markets(
             })
             .collect();
         if ticks.is_empty() {
-            *n_load_error += 1;
-            continue;
+            return Item::SkipLoadError;
         }
 
         // Inferred label: final in-window mid, ambiguous finals skipped.
@@ -285,10 +345,7 @@ async fn process_markets(
                 match last_mid {
                     Some(m) if m >= 0.55 => true,
                     Some(m) if m <= 0.45 => false,
-                    _ => {
-                        *n_no_outcome += 1;
-                        continue;
-                    }
+                    _ => return Item::SkipNoOutcome,
                 }
             }
         };
@@ -307,16 +364,8 @@ async fn process_markets(
         };
 
         let outputs = run_market_grid(&series, &spot, model, base_cfg, latencies_ms, edge_thresholds);
-        for (cell, mut market_out) in outputs.into_iter().enumerate() {
-            out.train_samples.append(&mut market_out.train_samples);
-            out.per_cell[cell].push((series.meta, market_out));
-        }
-        *n_run += 1;
-        if *n_run % 500 == 0 {
-            tracing::info!(n_run = *n_run, total = markets.len(), "alpha progress");
-        }
+        Item::Done(Box::new((series.meta, outputs)))
     }
-    Ok(out)
 }
 
 pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {

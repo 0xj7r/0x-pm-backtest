@@ -33,3 +33,6 @@ D5. Engine integration: agent consumes pm-alpha (SSOT endgame), portfolio guards
 E1. EC2 co-location runs for any new full-history sweep (existing launcher; write tick caches there, sync back).
 E2. Oct-Dec 2025 history extension (canonical manifests cover it; books on S3) once tick-cache + EC2 path is smooth.
 E3. close_ts->open_ts rename (audit latent trap), duration-from-slug hardening, tick-cache key including down-map hash.
+
+## Deployment naming convention (2026-06-10)
+New stack units are `pm-alpha-*`: `pm-alpha-shadow.service` (log-only), future `pm-alpha-live.service` (pilot). Logs under `~/data/pm-alpha/<mode>/`. Legacy `polymarket-exec@*` instances stay MASKED (strongest off state; unit files kept for the execution-adapter reference); `mm-live-logger` and `poly-daily-summary` stopped/disabled 2026-06-10. Kill-switch file restored at ~/.config/polymarket-exec/live.kill as a belt-and-braces layer. The pm-alpha units read nothing from ~/.config/polymarket-exec/.

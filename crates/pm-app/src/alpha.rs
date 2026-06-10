@@ -380,14 +380,16 @@ fn compute_market(
 
         let open_ns = market_open_ns(market);
         let close_ns = market_close_ns(market);
-        // Strike proxy: CEX spot at the open instant (no oracle history in
-        // our data). Skip when the first sample is >5s late — a stale strike
-        // poisons the moneyness more than dropping the market costs.
-        let strike = match spot.price_at_or_after(open_ns) {
+        // Strike proxy: the LAST CEX trade at-or-before the open instant —
+        // exactly what a live system knows at open. (Audit 2026-06-10: the
+        // previous at-or-after variant admitted up to 5s of post-open price
+        // discovery into the strike, a look-ahead.) Require freshness: a
+        // trade within the 5s before open, else skip the market.
+        let strike = match spot.price_at_or_before(open_ns) {
             Some(p)
                 if spot
-                    .range(open_ns, open_ns + 5_000_000_000)
-                    .first()
+                    .range(open_ns - 5_000_000_000, open_ns)
+                    .last()
                     .is_some() =>
             {
                 p

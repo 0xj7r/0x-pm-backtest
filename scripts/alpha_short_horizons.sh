@@ -48,7 +48,7 @@ run_family() {
   log "family $fam tune"
   "$BIN" alpha "${STORE[@]+"${STORE[@]}"}" \
     --markets "$MAN/${fam}_up.jsonl" --slug-prefix "${fam}-" --infer-outcome \
-    --down-assets "$MAN/down_all.jsonl" \
+    --down-assets "$MAN/down_all.jsonl" --tick-cache-dir data/cache/ticks \
     --date-start 2026-05-21 --date-end 2026-05-24 \
     --latency-ms 150 --edge-thresholds 0.08,0.12,0.16 --vol-lookback-s 3600 \
     --exit-after-s 30 \
@@ -59,7 +59,7 @@ run_family() {
   log "family $fam thr=$THR test"
   "$BIN" alpha "${STORE[@]+"${STORE[@]}"}" \
     --markets "$MAN/${fam}_up.jsonl" --slug-prefix "${fam}-" --infer-outcome \
-    --down-assets "$MAN/down_all.jsonl" \
+    --down-assets "$MAN/down_all.jsonl" --tick-cache-dir data/cache/ticks \
     --date-start 2026-05-25 --date-end 2026-05-28 \
     --latency-ms 150 --edge-thresholds "$THR" --vol-lookback-s 3600 \
     --exit-after-s 30 \
@@ -68,7 +68,7 @@ run_family() {
   log "family $fam june"
   "$BIN" alpha "${STORE[@]+"${STORE[@]}"}" \
     --markets "$MAN/${fam}_up.jsonl" --slug-prefix "${fam}-" --infer-outcome \
-    --down-assets "$MAN/down_all.jsonl" \
+    --down-assets "$MAN/down_all.jsonl" --tick-cache-dir data/cache/ticks \
     --date-start 2026-06-01 --date-end 2026-06-07 \
     --latency-ms 150 --edge-thresholds "$THR" --vol-lookback-s 3600 \
     --exit-after-s 30 \

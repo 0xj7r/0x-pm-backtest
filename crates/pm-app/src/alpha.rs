@@ -122,7 +122,7 @@ enum Item {
 // Compact merged-tick cache: post-merge two-sided BookTick series per
 // market, bincode + zstd, versioned. ~10x smaller than re-decoding the
 // up+down parquets and skips the merge entirely on repeat runs.
-const TICK_CACHE_MAGIC: &[u8; 4] = b"PTC1";
+const TICK_CACHE_MAGIC: &[u8; 4] = b"PTC2";
 
 fn tick_cache_path(dir: &Path, market: &MarketHandle, has_down: bool) -> PathBuf {
     let suffix = if has_down { "2s" } else { "1s" };
@@ -164,6 +164,10 @@ fn build_ticks(
     events: &[pm_types::ReplayEvent],
     down_events: &[pm_types::ReplayEvent],
 ) -> Vec<BookTick> {
+    // Audit finding: a stale Down-token ladder prices NO fills optimistically.
+    // Only attach the NO state when it is recent; beyond the cutoff the
+    // harness falls back to the synthetic complement (conservative).
+    const NO_STALENESS_CUTOFF_NS: i64 = 30_000_000_000;
     let mut down_idx = 0usize;
     let mut last_no: Option<&pm_types::ReplayEvent> = None;
     events
@@ -175,7 +179,12 @@ fn build_ticks(
                 down_idx += 1;
             }
             let (no_bid, no_ask, no_bids, no_asks) = match last_no {
-                Some(n) if n.yes_bid > 0.0 && n.yes_ask > 0.0 && n.yes_ask < 1.0 => {
+                Some(n)
+                    if n.yes_bid > 0.0
+                        && n.yes_ask > 0.0
+                        && n.yes_ask < 1.0
+                        && e.ts_ns - n.ts_ns <= NO_STALENESS_CUTOFF_NS =>
+                {
                     (n.yes_bid, n.yes_ask, n.bids, n.asks)
                 }
                 _ => (0.0, 0.0, Default::default(), Default::default()),

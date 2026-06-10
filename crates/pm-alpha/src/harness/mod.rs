@@ -475,6 +475,73 @@ mod tests {
     }
 
     #[test]
+    fn kelly_sizing_shrinks_lottery_entries() {
+        // Same dislocation; flat vs kelly sizing. The fade entry here is a
+        // confident convergence trade (p high, cost ~0.52), so kelly keeps
+        // most of the clip; a synthetic cheap entry must shrink hard.
+        let (series, spot) = dislocation_market(i64::MAX);
+        let flat = run_market(
+            &series,
+            &spot,
+            &AlphaModel::default(),
+            &HarnessConfig { latency_ms: 0, ..HarnessConfig::default() },
+        );
+        let kelly = run_market(
+            &series,
+            &spot,
+            &AlphaModel::default(),
+            &HarnessConfig {
+                latency_ms: 0,
+                kelly_sizing: true,
+                ..HarnessConfig::default()
+            },
+        );
+        let flat_notional = flat.trades[0].avg_price * flat.trades[0].shares;
+        let kelly_notional = kelly.trades[0].avg_price * kelly.trades[0].shares;
+        assert!(flat_notional > 49.0, "flat fills the clip: {flat_notional}");
+        assert!(
+            kelly_notional > 15.0 && kelly_notional <= flat_notional,
+            "confident trade keeps substantial size: {kelly_notional}"
+        );
+
+        // Cheap lottery: book at 0.10/0.12 with a mildly-bullish belief.
+        let open_s = 2000_i64;
+        let close_s = 2300_i64;
+        let ticks = (open_s..close_s).map(|s| book_tick(s, 0.10, 0.12)).collect();
+        let lottery = MarketSeries {
+            meta: MarketMeta {
+                token: Token::Btc,
+                window_secs: 300,
+                open_ts_ns: open_s * 1_000_000_000,
+                close_ts_ns: close_s * 1_000_000_000,
+                strike: 100_000.0,
+            },
+            resolved_yes: false,
+            ticks,
+            date: "2026-05-01".into(),
+        };
+        let spot2 = spot_with_jump(2400, i64::MAX);
+        let kelly_lottery = run_market(
+            &lottery,
+            &spot2,
+            &AlphaModel::default(),
+            &HarnessConfig {
+                latency_ms: 0,
+                edge_threshold: 0.16,
+                kelly_sizing: true,
+                ..HarnessConfig::default()
+            },
+        );
+        for t in &kelly_lottery.trades {
+            let notional = t.avg_price * t.shares;
+            assert!(
+                notional < 15.0,
+                "lottery entries must size small: {notional}"
+            );
+        }
+    }
+
+    #[test]
     fn no_entries_inside_stop_window() {
         let (mut series, spot) = dislocation_market(2053);
         // Keep only ticks in the final 10 seconds.

@@ -201,6 +201,32 @@ fn execute(
             }
         }
 
+        // Sizing: flat clip, or Kelly-style scaling on the
+        // reliability-discounted edge with per-trade variance equalized.
+        let entry_cost = match side {
+            Side::Yes => d.yes_ask,
+            Side::No => d.no_buy,
+        };
+        let p_side = match side {
+            Side::Yes => d.p_up,
+            Side::No => 1.0 - d.p_up,
+        };
+        let notional = if cfg.kelly_sizing {
+            // Half-trust the belief (shrink toward the market's price; the
+            // belief's claimed edge historically realizes at roughly half).
+            let p_eff = entry_cost + 0.5 * (p_side - entry_cost);
+            let kelly = ((p_eff - entry_cost) / (1.0 - entry_cost).max(1e-6)).max(0.0);
+            let edge_factor = (kelly / 0.16).clamp(0.0, 1.0);
+            let var_factor =
+                (entry_cost / (p_eff * (1.0 - p_eff)).sqrt().max(1e-6)).clamp(0.0, 1.0);
+            (cfg.notional_usdc * edge_factor * var_factor).max(0.0)
+        } else {
+            cfg.notional_usdc
+        };
+        if notional < 1.0 {
+            continue; // sized below the venue's practical minimum
+        }
+
         // Latency: fill against the book as it actually is at T + latency.
         let fill_at_ns = d.ts_ns + latency_ns;
         let Some(fill_tick) = series.ticks[d.tick_idx..]
@@ -213,7 +239,7 @@ fn execute(
         let Some((avg_price, shares)) = fill(
             fill_tick,
             side,
-            cfg.notional_usdc,
+            notional,
             cfg.depth_capture_frac,
             cfg.skip_touch_level,
         ) else {

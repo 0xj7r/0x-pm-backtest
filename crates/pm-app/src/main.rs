@@ -138,6 +138,10 @@ enum Cmd {
         fee_bps: f64,
         #[arg(long, default_value = "50.0")]
         notional_usdc: f64,
+        /// Kelly-style per-entry sizing (reliability-discounted edge +
+        /// variance equalization); default is flat clips.
+        #[arg(long)]
+        kelly_sizing: bool,
         /// Capture stress: fraction of displayed depth available to us.
         #[arg(long, default_value = "1.0")]
         depth_capture_frac: f64,
@@ -1199,6 +1203,7 @@ async fn main() -> Result<()> {
             edge_thresholds,
             fee_bps,
             notional_usdc,
+            kelly_sizing,
             depth_capture_frac,
             skip_touch_level,
             decision_dt_ms,
@@ -1252,6 +1257,7 @@ async fn main() -> Result<()> {
                     edge_thresholds,
                     fee_bps,
                     notional_usdc,
+                    kelly_sizing,
                     depth_capture_frac,
                     skip_touch_level,
                     decision_dt_ms,

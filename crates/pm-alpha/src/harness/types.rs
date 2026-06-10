@@ -87,6 +87,10 @@ pub struct HarnessConfig {
     pub edge_threshold: f64,
     /// Dollar notional per entry, walked through book depth.
     pub notional_usdc: f64,
+    /// Kelly-style per-entry sizing: notional scales with the
+    /// reliability-discounted edge and equalizes per-trade variance
+    /// (cheap lottery entries shrink hard). false = flat clips.
+    pub kelly_sizing: bool,
     /// Capture stress: only this fraction of displayed size at each level is
     /// available to us (competitors take the rest). 1.0 = the optimistic sim.
     pub depth_capture_frac: f64,
@@ -129,6 +133,7 @@ impl Default for HarnessConfig {
             taker_fee_bps: 0.0,
             edge_threshold: 0.05,
             notional_usdc: 50.0,
+            kelly_sizing: false,
             depth_capture_frac: 1.0,
             skip_touch_level: false,
             decision_dt_ms: 1000,

@@ -32,6 +32,7 @@ struct BeliefPass {
     decisions: Vec<Decision>,
     samples: Vec<ProbSample>,
     train_samples: Vec<TrainingSample>,
+    dir_samples: Vec<crate::directional::DirSample>,
     had_belief: bool,
 }
 
@@ -51,6 +52,7 @@ fn belief_pass(
         decisions: Vec::new(),
         samples: Vec::new(),
         train_samples: Vec::new(),
+        dir_samples: Vec::new(),
         had_belief: false,
     };
     let mut next_decision_ns = open_ns;
@@ -104,6 +106,18 @@ fn belief_pass(
                     base_side_probability: ev.raw.p_up as f32,
                     side_observed: series.resolved_yes,
                 });
+                // Directional sample only when a move is actually in
+                // progress (>= 0.5 bar-sigma over the trailing 60s).
+                let dirf = crate::directional::dir_features(&state, ev.raw.sigma_bar_bps);
+                let t60 = dirf.values[8];
+                if t60.abs() >= 0.5 {
+                    pass.dir_samples.push(crate::directional::DirSample {
+                        ts_ns: tick.ts_ns,
+                        features: dirf,
+                        move_up: t60 > 0.0,
+                        resolved_yes: series.resolved_yes,
+                    });
+                }
             }
         }
 
@@ -407,6 +421,11 @@ pub fn run_market_grid(
             } else {
                 Vec::new()
             };
+            let dir_samples = if first {
+                pass.dir_samples.clone()
+            } else {
+                Vec::new()
+            };
             first = false;
             outputs.push(MarketRunOutput {
                 trades: if calm_blocked {
@@ -417,6 +436,7 @@ pub fn run_market_grid(
                 samples: pass.samples.clone(),
                 had_belief: pass.had_belief,
                 train_samples,
+                dir_samples,
                 regime,
                 min_pair_cost,
                 real_no_coverage,

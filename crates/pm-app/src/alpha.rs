@@ -53,6 +53,9 @@ pub struct AlphaArgs {
     pub calibrate_split: Option<String>,
     pub calibrator_out: Option<PathBuf>,
     pub calibrator_in: Option<PathBuf>,
+    /// Dump directional continuation samples (requires --calibrate-split or
+    /// any training pass) to this JSONL path.
+    pub dir_samples_out: Option<PathBuf>,
     /// Dump per-trade records (first grid cell only) to this JSONL path.
     pub trades_out: Option<PathBuf>,
     /// JSONL of Down-token MarketHandle rows (metadata discovery with
@@ -226,6 +229,7 @@ struct ProcessOutput {
     per_cell: Vec<Vec<(MarketMeta, MarketRunOutput)>>,
     counters: ProcessCounters,
     train_samples: Vec<TrainingSample>,
+    dir_samples: Vec<pm_alpha::directional::DirSample>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -250,6 +254,7 @@ async fn process_markets(
         per_cell: vec![Vec::with_capacity(markets.len()); n_cells],
         counters: ProcessCounters::default(),
         train_samples: Vec::new(),
+        dir_samples: Vec::new(),
     };
     let (n_run, n_no_strike, n_no_outcome, n_load_error) = (
         &mut out.counters.n_run,
@@ -366,6 +371,7 @@ async fn process_markets(
                 let (meta, outputs) = *boxed;
                 for (cell, mut market_out) in outputs.into_iter().enumerate() {
                     out.train_samples.append(&mut market_out.train_samples);
+                    out.dir_samples.append(&mut market_out.dir_samples);
                     out.per_cell[cell].push((meta, market_out));
                 }
                 *n_run += 1;
@@ -610,6 +616,17 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
             perp.clone(),
         )
         .await?;
+        if let Some(path) = &args.dir_samples_out {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut f = std::fs::File::create(path)?;
+            use std::io::Write as _;
+            for d in &train_out.dir_samples {
+                writeln!(f, "{}", serde_json::to_string(d)?)?;
+            }
+            println!("dir samples written: {} -> {}", train_out.dir_samples.len(), path.display());
+        }
         let mut cal = ExoCalibrator::default();
         let stats = cal.fit_batch(&train_out.train_samples, TrainingConfig::default());
         println!(

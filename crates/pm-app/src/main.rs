@@ -173,6 +173,9 @@ enum Cmd {
         /// Load a calibrator snapshot instead of training.
         #[arg(long)]
         calibrator_in: Option<PathBuf>,
+        /// Dump directional continuation samples from the training pass.
+        #[arg(long)]
+        dir_samples_out: Option<PathBuf>,
         /// Dump per-trade records (first grid cell) to this JSONL path.
         #[arg(long)]
         trades_out: Option<PathBuf>,
@@ -1174,6 +1177,7 @@ async fn main() -> Result<()> {
             calibrate_split,
             calibrator_out,
             calibrator_in,
+            dir_samples_out,
             trades_out,
             down_assets,
             tick_cache_dir,
@@ -1226,6 +1230,7 @@ async fn main() -> Result<()> {
                     calibrate_split,
                     calibrator_out,
                     calibrator_in,
+                    dir_samples_out,
                     trades_out,
                     down_assets,
                     tick_cache_dir,

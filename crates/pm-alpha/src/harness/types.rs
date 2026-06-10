@@ -207,6 +207,9 @@ pub struct MarketRunOutput {
     pub had_belief: bool,
     /// Calibrator training samples (only when `collect_training` is set).
     pub train_samples: Vec<crate::calibrator::TrainingSample>,
+    /// Directional continuation samples (only when `collect_training` is
+    /// set and a >=0.5-sigma move is in progress at the sample instant).
+    pub dir_samples: Vec<crate::directional::DirSample>,
     /// Minimum YES+NO touch cost observed in-window (real NO ladder only).
     pub min_pair_cost: Option<f64>,
     /// Fraction of ticks carrying a real NO ladder.

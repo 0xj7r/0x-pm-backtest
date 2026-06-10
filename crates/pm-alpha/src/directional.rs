@@ -31,6 +31,17 @@ pub struct DirFeatures {
     pub values: [f32; DIR_FEATURES],
 }
 
+/// One supervised continuation sample: the feature vector at a decision
+/// instant plus the direction of the move then in progress and the window's
+/// resolution. Label downstream: continuation = (move_up == resolved_yes).
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct DirSample {
+    pub ts_ns: i64,
+    pub features: DirFeatures,
+    pub move_up: bool,
+    pub resolved_yes: bool,
+}
+
 /// Trailing return in remaining-bar sigma units (shared with the calibrator's
 /// convention): r_w / (sigma_bar * sqrt(w/bar)).
 fn trend_sigma(state: &ExoState, sigma_bar_bps: f64, w_s: i64) -> f64 {

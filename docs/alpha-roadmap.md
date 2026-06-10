@@ -39,3 +39,19 @@ New stack units are `pm-alpha-*`: `pm-alpha-shadow.service` (log-only), future `
 
 ## Sizing (user direction, 2026-06-10 evening)
 Flat-$ clips mis-size the cheap-entry cohort (live shadow: five 0.04-0.17 entries all lost full premium at $50 flat). Next harness knob after the deadline verdict: fractional-Kelly sizing on a belief-reliability-discounted edge (shrink p toward price where the belief is least calibrated: tau small, extreme moneyness), capped at the flat clip. Tune {deadline} x {flat, kelly-frac} jointly on May 7-18, verify once on May 19-28, judge on daily Sharpe + worst day. Kelly subtlety recorded: naive Kelly OVER-allocates to cheap asymmetric entries; the discount is the point.
+
+## Regime playbook v1 (overnight matrix, Feb-May, full capture $50 clips)
+
+Three windows (Feb12-Mar31 trend / Apr mixed / May7-18 whipsaw) x five
+directional-taker families. Findings:
+- The fade dominates EVERY regime (40.5k / 35.3k / 20.3k at best thr) — it is
+  not whipsaw-only; strongest in trend. Regime-robust core.
+- Aligned-hold (m0.55, thr0.04) is profitable everywhere but strictly
+  dominated standalone. As a SLEEVE it diversifies only in trend (daily corr
+  +0.10 there vs +0.67 in whipsaw): combo Sharpe 1.78 vs fade 1.50 in trend,
+  dilutive elsewhere. Router rule: fade always-on; aligned sleeve on only in
+  trend regime. Tail hedge on aligned is ~free (+-$250) — keep for crash risk.
+- Momentum-drift belief: rejected in ALL THREE regimes (to -$37k as fade in
+  trend). Final; do not revisit as a belief term.
+- Aligned sleeve adoption needs a fresh trend-regime holdout (June 8-14 or
+  forward shadow) — May 19-28 is the wrong exam for a trend-only sleeve.

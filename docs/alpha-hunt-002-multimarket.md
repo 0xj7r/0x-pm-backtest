@@ -101,3 +101,7 @@ For 500 June entries, the real trades channel shows whether the targeted quote w
 ## Appendix 6: entry deadline adopted (2026-06-10 evening)
 
 Live shadow data (five late-window lottery entries, all full-premium losses) triggered tuning the long-recommended entry deadline. May 7-18 tune: Sharpe 1.85 -> 2.61 gating the final 90s (-24% EV). May 19-28 verification: +$10,101 with ZERO negative days, worst day +$273 (baseline +$12,152, worst -$189). Adopted into the frozen config; golden re-baselined; shadow redeployed with the gate. This is the first config change driven by live shadow evidence and validated by the offline protocol — the loop working in both directions.
+
+## Appendix 7: Kelly sizing — rejected (2026-06-10)
+
+Joint {deadline 10s/90s} x {flat/Kelly} tune (May 7-18): Kelly-instead-of-gate scores Sharpe 2.26 at $17.5k (vs the gate's 2.61 at $20.3k — worse on both axes); Kelly-plus-gate drops to 2.45 at $14.7k (only good trades left to shrink). The late-window cohort's EV is inseparable from its variance: sizing shrinks both proportionally, the gate removes both. Champion remains 90s deadline + flat clips. (One parameterization tested — half-trust belief discount + variance equalization; not iterated further to avoid tune-window mining.)

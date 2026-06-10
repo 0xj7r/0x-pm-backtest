@@ -16,7 +16,7 @@ use std::path::PathBuf;
 /// Spot ticks retained in the rolling buffer (>= 2h required for vol3600).
 const SPOT_KEEP_SECS: i64 = 7_800;
 /// Mirror of the harness entry deadline (`stop_before_close_s` default).
-const STOP_BEFORE_CLOSE_S: i64 = 10;
+const STOP_BEFORE_CLOSE_S: i64 = 90;
 /// Rolling cap on receipt-minus-exchange latency samples.
 const LATENCY_SAMPLE_CAP: usize = 4_096;
 

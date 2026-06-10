@@ -30,6 +30,7 @@ run_june() {
     --down-assets data/manifests/canonical/down_all.jsonl --tick-cache-dir data/cache/ticks \
     --date-start 2026-06-01 --date-end 2026-06-07 \
     --latency-ms 150 --edge-thresholds 0.16 --vol-lookback-s 3600 --exit-after-s 30 \
+    --stop-before-close-s 90 \
     --out-json "$1" > /dev/null 2>&1
 }
 

@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Feb-Apr regime validation of the FROZEN hunt-002 champion (no selection):
+# btc-5m, vol3600, exit30s, 150ms, thresholds {0.12, 0.16} both disclosed.
+# Streams book data from S3 using instance-role creds minted via SSH per shard.
+set -uo pipefail
+cd "$(dirname "$0")/.."
+BIN=./target/fast/pm-app
+MANIFEST=data/manifests/fullhist/btc5m-20260212-20260520-full-28205.jsonl
+OUT=data/runs/alpha/febapr
+mkdir -p "$OUT"
+log() { echo "[$(date -u +%H:%M:%S)] $*"; }
+
+mint() {
+  ssh -i ~/.ssh/whale_pair_dublin_ed25519.pem -o ConnectTimeout=15 ubuntu@34.242.101.97 '
+    TOK=$(curl -s -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+    curl -s -H "X-aws-ec2-metadata-token: $TOK" http://169.254.169.254/latest/meta-data/iam/security-credentials/instanceRole' \
+  | python3 -c "
+import json,sys
+c=json.load(sys.stdin)
+print('export AWS_ACCESS_KEY_ID='+c['AccessKeyId'])
+print('export AWS_SECRET_ACCESS_KEY='+c['SecretAccessKey'])
+print('export AWS_SESSION_TOKEN='+c['Token'])
+print('export AWS_REGION=us-east-1')
+" > data/.aws_session.env
+  chmod 600 data/.aws_session.env
+}
+
+run_shard() {
+  local name=$1 start=$2 end=$3
+  if [ -f "$OUT/$name.json" ]; then log "shard $name exists, skipping"; return; fi
+  mint || { log "cred mint failed for $name"; return 1; }
+  # shellcheck disable=SC1091
+  source data/.aws_session.env
+  log "shard $name ($start..$end) starting"
+  "$BIN" alpha --markets "$MANIFEST" \
+    --date-start "$start" --date-end "$end" \
+    --latency-ms 150 --edge-thresholds 0.12,0.16 --vol-lookback-s 3600 \
+    --exit-after-s 30 \
+    --out-json "$OUT/$name.json" --trades-out "$OUT/$name.trades.jsonl" \
+    > "$OUT/$name.log" 2>&1 || log "WARN shard $name failed"
+  log "shard $name done"
+}
+
+run_shard feb 2026-02-12 2026-02-28
+run_shard mar 2026-03-01 2026-03-31
+run_shard apr 2026-04-01 2026-04-30
+python3 scripts/alpha_overnight_pick.py summary "$OUT" > "$OUT/SUMMARY.txt" 2>&1 || true
+log FEBAPR_DONE

@@ -996,4 +996,168 @@ mod tests {
         );
         assert!(out.trades.is_empty());
     }
+
+    #[test]
+    fn fee_curve_math_at_half_is_175_cents_per_hundred_shares() {
+        // Polymarket crypto takers: 0.07 * p * (1-p) per share. At p = 0.5
+        // that is 1.75c/share; at the extremes it vanishes; at rate 0 it is
+        // exactly zero (the parity guarantee).
+        assert!((super::replay::curve_fee(0.07, 0.5, 1.0) - 0.0175).abs() < 1e-15);
+        assert!((super::replay::curve_fee(0.07, 0.5, 100.0) - 1.75).abs() < 1e-12);
+        assert_eq!(super::replay::curve_fee(0.0, 0.52, 96.0), 0.0);
+        assert!(super::replay::curve_fee(0.07, 0.99, 1.0) < 0.001);
+    }
+
+    #[test]
+    fn fee_features_default_off_and_byte_identical() {
+        // Defaults must be off, and a run with both features explicitly
+        // disabled must produce byte-identical trades to the default config.
+        let base = HarnessConfig::default();
+        assert_eq!(base.fee_curve_rate, 0.0);
+        assert!(!base.fee_aware_exit);
+        assert_eq!(base.fee_exit_margin, 0.0);
+        let (series, spot) = dislocation_market(2053);
+        let model = AlphaModel::default();
+        let cfg = HarnessConfig { exit_after_s: 30, latency_ms: 0, ..base };
+        let a = serde_json::to_string(&run_market(&series, &spot, &model, &cfg).trades).unwrap();
+        let b = serde_json::to_string(
+            &run_market(
+                &series,
+                &spot,
+                &model,
+                &HarnessConfig {
+                    fee_curve_rate: 0.0,
+                    fee_aware_exit: false,
+                    fee_exit_margin: 0.0,
+                    ..cfg
+                },
+            )
+            .trades,
+        )
+        .unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn fee_curve_charges_entry_and_exit_legs_at_their_own_prices() {
+        // Entry fills at the stale 0.52 ask, exit crosses at the 0.93 bid
+        // 30s later: the curve fee must be rate*p*(1-p)*shares at EACH leg's
+        // own price, and pnl must drop by exactly the total fee vs rate 0.
+        let (series, spot) = dislocation_market(2053);
+        let model = AlphaModel::default();
+        let cfg = HarnessConfig {
+            exit_after_s: 30,
+            latency_ms: 0,
+            ..HarnessConfig::default()
+        };
+        let gross = run_market(&series, &spot, &model, &cfg);
+        let net = run_market(
+            &series,
+            &spot,
+            &model,
+            &HarnessConfig { fee_curve_rate: 0.07, ..cfg },
+        );
+        assert_eq!(gross.trades.len(), 1);
+        assert_eq!(net.trades.len(), 1);
+        let (g, n) = (&gross.trades[0], &net.trades[0]);
+        assert_eq!(g.avg_price, n.avg_price);
+        assert_eq!(g.shares, n.shares);
+        assert_eq!(g.exit_price, n.exit_price);
+        let px_exit = n.exit_price.unwrap();
+        let expect_fee = super::replay::curve_fee(0.07, n.avg_price, n.shares)
+            + super::replay::curve_fee(0.07, px_exit, n.shares);
+        assert!((n.fee - expect_fee).abs() < 1e-9, "fee {} != {expect_fee}", n.fee);
+        assert!((g.pnl - n.pnl - expect_fee).abs() < 1e-9);
+        assert_eq!(g.fee, 0.0);
+    }
+
+    /// Spot jumps +1% at 2050s and reverts at `revert_at_s`; wavy otherwise.
+    fn spot_jump_revert(secs: i64, jump_at_s: i64, revert_at_s: i64) -> SpotHistory {
+        let mut ticks = Vec::new();
+        let base = 100_000.0;
+        for s in 0..secs {
+            let wave = if s % 2 == 0 { 1.00005 } else { 0.99995 };
+            let level = if s >= jump_at_s && s < revert_at_s { base * 1.01 } else { base };
+            ticks.push(tick_spot(s, level * wave));
+        }
+        SpotHistory::new(ticks)
+    }
+
+    #[test]
+    fn fee_aware_exit_holds_when_belief_beats_net_proceeds() {
+        // Sustained dislocation, resolves YES: at the exit instant the belief
+        // is ~1.0 while the bid nets 0.93 minus the exit fee, so the rule
+        // must skip the sell and settle at resolution paying entry fee only.
+        let (series, spot) = dislocation_market(2053);
+        let model = AlphaModel::default();
+        let cfg = HarnessConfig {
+            exit_after_s: 30,
+            latency_ms: 0,
+            fee_curve_rate: 0.07,
+            fee_aware_exit: true,
+            ..HarnessConfig::default()
+        };
+        let out = run_market(&series, &spot, &model, &cfg);
+        assert_eq!(out.trades.len(), 1);
+        let t = &out.trades[0];
+        assert!(t.fee_hold, "rule must convert the exit into a hold");
+        assert!(t.exit_price.is_none());
+        assert!(t.won, "held to resolution and resolved with the side");
+        let entry_fee = super::replay::curve_fee(0.07, t.avg_price, t.shares);
+        assert!((t.fee - entry_fee).abs() < 1e-9, "holds pay the entry fee only");
+        assert!((t.pnl - (t.shares * (1.0 - t.avg_price) - entry_fee)).abs() < 1e-9);
+        let alt = t.hold_alt_sell_pnl.unwrap();
+        assert!(t.pnl > alt, "here holding realizes more than the sell would have");
+        assert!(t.hold_alt_exit_fee.unwrap() > 0.0);
+    }
+
+    #[test]
+    fn fee_aware_exit_sells_when_belief_dropped_below_net_proceeds() {
+        // Spot reverts before the exit horizon: the belief collapses to ~0.5
+        // while the book still bids 0.93, so net proceeds beat the hold EV
+        // and the rule must take the champion crossing exit.
+        let spot = spot_jump_revert(2400, 2050, 2065);
+        let open_s = 2000_i64;
+        let close_s = 2300_i64;
+        let ticks = (open_s..close_s)
+            .map(|s| {
+                if s < 2053 { book_tick(s, 0.50, 0.52) } else { book_tick(s, 0.93, 0.95) }
+            })
+            .collect();
+        let series = MarketSeries {
+            meta: MarketMeta {
+                token: Token::Btc,
+                window_secs: 300,
+                open_ts_ns: open_s * 1_000_000_000,
+                close_ts_ns: close_s * 1_000_000_000,
+                strike: 100_000.0,
+            },
+            resolved_yes: false,
+            ticks,
+            date: "2026-05-01".into(),
+        };
+        let model = AlphaModel::default();
+        let base = HarnessConfig {
+            exit_after_s: 30,
+            latency_ms: 0,
+            fee_curve_rate: 0.07,
+            fee_aware_exit: true,
+            ..HarnessConfig::default()
+        };
+        let out = run_market(&series, &spot, &model, &base);
+        assert_eq!(out.trades.len(), 1);
+        let t = &out.trades[0];
+        assert!(!t.fee_hold);
+        assert!((t.exit_price.unwrap() - 0.93).abs() < 1e-6, "sold at the bid");
+        // The variance premium makes holds rarer in reverse: a margin larger
+        // than the remaining edge must flip the same exit into a hold.
+        let strict = run_market(
+            &series,
+            &spot,
+            &model,
+            &HarnessConfig { fee_exit_margin: 0.5, ..base },
+        );
+        assert!(strict.trades[0].fee_hold, "margin flips the sell into a hold");
+        assert!(strict.trades[0].exit_price.is_none());
+    }
 }

@@ -83,6 +83,20 @@ pub struct HarnessConfig {
     /// Decision at T fills against the book at the first tick >= T + latency.
     pub latency_ms: u64,
     pub taker_fee_bps: f64,
+    /// Polymarket crypto taker fee curve: fee = rate * p * (1-p) per share on
+    /// every aggressive fill (entry, spread-crossing exit, tail hedge, pair
+    /// completion). Resolution redemption is free. 0 disables (parity).
+    #[serde(default)]
+    pub fee_curve_rate: f64,
+    /// Fee-aware exit: at the exit instant, sell only when the depth-walked
+    /// net proceeds beat the belief's hold-to-resolution EV; otherwise hold
+    /// (entry fee only). Applies to the spread-crossing exit path.
+    #[serde(default)]
+    pub fee_aware_exit: bool,
+    /// Variance-aversion premium for `fee_aware_exit`: sell only if
+    /// exit_net >= hold_ev + margin * shares (higher = holds rarer).
+    #[serde(default)]
+    pub fee_exit_margin: f64,
     /// Enter when the chosen side's edge exceeds this.
     pub edge_threshold: f64,
     /// Dollar notional per entry, walked through book depth.
@@ -170,6 +184,9 @@ impl Default for HarnessConfig {
         Self {
             latency_ms: 150,
             taker_fee_bps: 0.0,
+            fee_curve_rate: 0.0,
+            fee_aware_exit: false,
+            fee_exit_margin: 0.0,
             edge_threshold: 0.05,
             notional_usdc: 50.0,
             kelly_sizing: false,
@@ -248,6 +265,17 @@ pub struct TradeRecord {
     /// settled when no tick remained); None = hybrid off or no exit horizon.
     #[serde(default)]
     pub exit_filled_at_mid: Option<bool>,
+    /// True when `fee_aware_exit` converted the scheduled exit into a hold
+    /// to resolution (sell proceeds net of fees did not beat the hold EV).
+    #[serde(default)]
+    pub fee_hold: bool,
+    /// Counterfactual P&L had the fee-held trade sold at the exit tick
+    /// (net of entry fee and the exit-leg fee). Set only when `fee_hold`.
+    #[serde(default)]
+    pub hold_alt_sell_pnl: Option<f64>,
+    /// Exit-leg fee the fee-held trade avoided. Set only when `fee_hold`.
+    #[serde(default)]
+    pub hold_alt_exit_fee: Option<f64>,
 }
 
 /// A probability sample at a fixed checkpoint, for log-loss scoring of the

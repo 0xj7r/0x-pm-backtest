@@ -140,6 +140,18 @@ enum Cmd {
         edge_thresholds: Vec<f64>,
         #[arg(long, default_value = "0.0")]
         fee_bps: f64,
+        /// Polymarket taker fee curve rate: fee = rate * p * (1-p) per share
+        /// on every aggressive fill (0 disables; crypto markets = 0.07).
+        #[arg(long, default_value = "0.0")]
+        fee_curve_rate: f64,
+        /// Fee-aware exit: at the exit instant, sell only when net proceeds
+        /// beat the belief's hold-to-resolution EV; otherwise hold.
+        #[arg(long)]
+        fee_aware_exit: bool,
+        /// Variance-aversion premium for --fee-aware-exit: sell only if
+        /// exit_net >= hold_ev + margin * shares.
+        #[arg(long, default_value = "0.0")]
+        fee_exit_margin: f64,
         #[arg(long, default_value = "50.0")]
         notional_usdc: f64,
         /// Kelly-style per-entry sizing (reliability-discounted edge +
@@ -1265,6 +1277,9 @@ async fn main() -> Result<()> {
             latency_sweep,
             edge_thresholds,
             fee_bps,
+            fee_curve_rate,
+            fee_aware_exit,
+            fee_exit_margin,
             notional_usdc,
             kelly_sizing,
             depth_capture_frac,
@@ -1333,6 +1348,9 @@ async fn main() -> Result<()> {
                     latencies_ms,
                     edge_thresholds,
                     fee_bps,
+                    fee_curve_rate,
+                    fee_aware_exit,
+                    fee_exit_margin,
                     notional_usdc,
                     kelly_sizing,
                     depth_capture_frac,

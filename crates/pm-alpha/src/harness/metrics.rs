@@ -181,6 +181,9 @@ mod tests {
                 pnl_exit_mid_optimistic: None,
                 is_completion: false,
                 exit_filled_at_mid: None,
+                fee_hold: false,
+                hold_alt_sell_pnl: None,
+                hold_alt_exit_fee: None,
             }],
             samples: vec![ProbSample {
                 ts_ns: 60_000_000_000,

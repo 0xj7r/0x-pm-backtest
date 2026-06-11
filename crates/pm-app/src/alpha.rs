@@ -28,6 +28,13 @@ pub struct AlphaArgs {
     pub latencies_ms: Vec<u64>,
     pub edge_thresholds: Vec<f64>,
     pub fee_bps: f64,
+    /// Polymarket taker fee curve: rate * p * (1-p) per share on every
+    /// aggressive fill (0 disables; crypto = 0.07).
+    pub fee_curve_rate: f64,
+    /// Sell at the exit horizon only when net proceeds beat the hold EV.
+    pub fee_aware_exit: bool,
+    /// Variance premium per share on the fee-aware sell test.
+    pub fee_exit_margin: f64,
     pub notional_usdc: f64,
     pub kelly_sizing: bool,
     pub depth_capture_frac: f64,
@@ -665,6 +672,9 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
     let base_cfg = HarnessConfig {
         latency_ms: *args.latencies_ms.first().unwrap_or(&150),
         taker_fee_bps: args.fee_bps,
+        fee_curve_rate: args.fee_curve_rate,
+        fee_aware_exit: args.fee_aware_exit,
+        fee_exit_margin: args.fee_exit_margin,
         edge_threshold: *args.edge_thresholds.first().unwrap_or(&0.05),
         notional_usdc: args.notional_usdc,
         kelly_sizing: args.kelly_sizing,
@@ -881,6 +891,10 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
                     "pnl_exit_mid_optimistic": t.pnl_exit_mid_optimistic,
                     "is_completion": t.is_completion,
                     "exit_filled_at_mid": t.exit_filled_at_mid,
+                    "fee": t.fee,
+                    "fee_hold": t.fee_hold,
+                    "hold_alt_sell_pnl": t.hold_alt_sell_pnl,
+                    "hold_alt_exit_fee": t.hold_alt_exit_fee,
                 });
                 writeln!(f, "{row}")?;
             }

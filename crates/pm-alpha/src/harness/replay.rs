@@ -172,6 +172,12 @@ fn belief_pass(
     pass
 }
 
+/// Polymarket crypto taker fee curve: rate * p * (1-p) per share, charged on
+/// every aggressive fill at that leg's own fill price. 0 rate = exactly 0.
+pub(crate) fn curve_fee(rate: f64, price: f64, shares: f64) -> f64 {
+    rate * price * (1.0 - price) * shares
+}
+
 /// First entry of a market while it can still be pair-completed.
 struct OpenLeg {
     trade_idx: usize,
@@ -231,7 +237,8 @@ fn execute(
                     cfg.skip_touch_level,
                 )
             {
-                let fee2 = px2 * sh2 * cfg.taker_fee_bps / 10_000.0;
+                let fee2 = px2 * sh2 * cfg.taker_fee_bps / 10_000.0
+                    + curve_fee(cfg.fee_curve_rate, px2, sh2);
                 let won2 = match opp {
                     Side::Yes => series.resolved_yes,
                     Side::No => !series.resolved_yes,
@@ -247,6 +254,9 @@ fn execute(
                 t1.exit_price = None;
                 t1.pnl_exit_mid_optimistic = None;
                 t1.exit_filled_at_mid = None;
+                t1.fee_hold = false;
+                t1.hold_alt_sell_pnl = None;
+                t1.hold_alt_exit_fee = None;
                 trades.push(TradeRecord {
                     side: opp,
                     decision_ts_ns: d.ts_ns,
@@ -263,6 +273,9 @@ fn execute(
                     pnl_exit_mid_optimistic: None,
                     is_completion: true,
                     exit_filled_at_mid: None,
+                    fee_hold: false,
+                    hold_alt_sell_pnl: None,
+                    hold_alt_exit_fee: None,
                 });
                 leg1 = None;
                 continue;
@@ -368,7 +381,8 @@ fn execute(
         ) else {
             continue;
         };
-        let entry_fee = avg_price * shares * cfg.taker_fee_bps / 10_000.0;
+        let entry_fee = avg_price * shares * cfg.taker_fee_bps / 10_000.0
+            + curve_fee(cfg.fee_curve_rate, avg_price, shares);
         let won = match side {
             Side::Yes => series.resolved_yes,
             Side::No => !series.resolved_yes,
@@ -386,6 +400,9 @@ fn execute(
         let mut proceeds_pnl = None;
         let mut pnl_exit_mid_optimistic = None;
         let mut exit_filled_at_mid = None;
+        let mut fee_hold = false;
+        let mut hold_alt_sell_pnl = None;
+        let mut hold_alt_exit_fee = None;
         if cfg.exit_after_s > 0 {
             let exit_at_ns = fill_tick.ts_ns + cfg.exit_after_s as i64 * 1_000_000_000;
             if cfg.passive_exit_timeout_s > 0 {
@@ -427,7 +444,8 @@ fn execute(
                                     cfg.skip_touch_level,
                                 )
                             {
-                                exit_fee = px * sold * cfg.taker_fee_bps / 10_000.0;
+                                exit_fee = px * sold * cfg.taker_fee_bps / 10_000.0
+                                    + curve_fee(cfg.fee_curve_rate, px, sold);
                                 let remainder = (shares - sold).max(0.0);
                                 proceeds_pnl = Some(
                                     sold * (px - avg_price) + remainder * (payout - avg_price),
@@ -445,7 +463,8 @@ fn execute(
                                 cfg.depth_capture_frac,
                                 cfg.skip_touch_level,
                             ) {
-                                exit_fee = px * sold * cfg.taker_fee_bps / 10_000.0;
+                                exit_fee = px * sold * cfg.taker_fee_bps / 10_000.0
+                                    + curve_fee(cfg.fee_curve_rate, px, sold);
                                 let remainder = (shares - sold).max(0.0);
                                 proceeds_pnl = Some(
                                     sold * (px - avg_price) + remainder * (payout - avg_price),
@@ -485,11 +504,44 @@ fn execute(
                     cfg.skip_touch_level,
                 )
             {
-                exit_fee = px * sold * cfg.taker_fee_bps / 10_000.0;
+                let leg_fee = px * sold * cfg.taker_fee_bps / 10_000.0
+                    + curve_fee(cfg.fee_curve_rate, px, sold);
                 let remainder = (shares - sold).max(0.0);
-                proceeds_pnl =
-                    Some(sold * (px - avg_price) + remainder * (payout - avg_price));
-                exit_price = Some(px);
+                let sell_now = if cfg.fee_aware_exit {
+                    // Belief at the most recent decision at-or-before the
+                    // exit tick (the entry decision is the floor).
+                    let p_up_exit = pass
+                        .decisions
+                        .iter()
+                        .rev()
+                        .find(|dd| dd.ts_ns <= exit_tick.ts_ns)
+                        .map_or(d.p_up, |dd| dd.p_up);
+                    let p_side_exit = match side {
+                        Side::Yes => p_up_exit,
+                        Side::No => 1.0 - p_up_exit,
+                    };
+                    // The unsold remainder settles either way, so it cancels
+                    // from both sides: compare net proceeds vs hold EV on
+                    // the sellable portion (+ the variance premium).
+                    sold * px - leg_fee
+                        >= p_side_exit * sold + cfg.fee_exit_margin * sold
+                } else {
+                    true
+                };
+                if sell_now {
+                    exit_fee = leg_fee;
+                    proceeds_pnl =
+                        Some(sold * (px - avg_price) + remainder * (payout - avg_price));
+                    exit_price = Some(px);
+                } else {
+                    fee_hold = true;
+                    hold_alt_exit_fee = Some(leg_fee);
+                    hold_alt_sell_pnl = Some(
+                        sold * (px - avg_price) + remainder * (payout - avg_price)
+                            - entry_fee
+                            - leg_fee,
+                    );
+                }
             }
         }
         let fee = entry_fee + exit_fee;
@@ -524,6 +576,9 @@ fn execute(
             pnl_exit_mid_optimistic,
             is_completion: false,
             exit_filled_at_mid,
+            fee_hold,
+            hold_alt_sell_pnl,
+            hold_alt_exit_fee,
         });
         if pair_completion && !first_entry_done {
             first_entry_done = true;
@@ -559,7 +614,8 @@ fn execute(
                     None,
                 )
             {
-                let tail_fee = tail_price * tail_shares * cfg.taker_fee_bps / 10_000.0;
+                let tail_fee = tail_price * tail_shares * cfg.taker_fee_bps / 10_000.0
+                    + curve_fee(cfg.fee_curve_rate, tail_price, tail_shares);
                 let tail_won = match tail_side {
                     Side::Yes => series.resolved_yes,
                     Side::No => !series.resolved_yes,
@@ -581,6 +637,9 @@ fn execute(
                     pnl_exit_mid_optimistic: None,
                     is_completion: false,
                     exit_filled_at_mid: None,
+                    fee_hold: false,
+                    hold_alt_sell_pnl: None,
+                    hold_alt_exit_fee: None,
                 });
             }
         }

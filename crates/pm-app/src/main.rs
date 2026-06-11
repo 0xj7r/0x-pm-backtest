@@ -203,6 +203,10 @@ enum Cmd {
         /// Skip entries when realized vol (bps/bar) exceeds this (0 = off).
         #[arg(long, default_value = "0.0")]
         max_entry_sigma_bps: f64,
+        /// Post-entry selldown stop (hold mode only): sell taker when the
+        /// entry side's ask prints at-or-below fill - eps. Negative = off.
+        #[arg(long, default_value = "-1.0", allow_hyphen_values = true)]
+        selldown_stop_eps: f64,
         /// Entry fills walk depth only while each level retains this much
         /// edge vs the belief (0 = unconditional; live limit = belief-floor).
         #[arg(long, default_value = "0.0")]
@@ -1330,6 +1334,7 @@ async fn main() -> Result<()> {
             stop_before_close_s,
             enter_within_close_s,
             max_entry_sigma_bps,
+            selldown_stop_eps,
             min_marginal_edge,
             max_clips,
             clip_cooldown_ms,
@@ -1402,6 +1407,7 @@ async fn main() -> Result<()> {
                     stop_before_close_s,
                     enter_within_close_s,
                     max_entry_sigma_bps,
+                    selldown_stop_eps,
                     min_marginal_edge,
                     max_clips,
                     clip_cooldown_ms,

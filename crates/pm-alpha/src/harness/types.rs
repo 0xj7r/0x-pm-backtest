@@ -162,6 +162,12 @@ pub struct HarnessConfig {
     /// Skip entries when sigma_bar_bps at decision exceeds this (regime
     /// gate for vol-sensitive lanes; 0 disables).
     pub max_entry_sigma_bps: f64,
+    /// Post-entry selldown stop (hold mode only, `exit_after_s == 0`):
+    /// after the fill, sell (taker, crossing the bid, exit-leg fee) at the
+    /// first subsequent tick where the entry side's ask prints at-or-below
+    /// `avg_fill_price - eps`. Negative disables (parity).
+    #[serde(default = "default_selldown_stop_eps")]
+    pub selldown_stop_eps: f64,
     /// Entry fills walk depth only while the marginal level retains at
     /// least this much edge vs the belief (0 = walk unconditionally). Sets
     /// the live marketable-limit price: belief - floor.
@@ -180,6 +186,10 @@ pub struct HarnessConfig {
     pub collect_training: bool,
     /// Cadence of training-sample collection (seconds into the window).
     pub train_sample_dt_s: u32,
+}
+
+fn default_selldown_stop_eps() -> f64 {
+    -1.0
 }
 
 impl Default for HarnessConfig {
@@ -209,6 +219,7 @@ impl Default for HarnessConfig {
             tail_max_price: 0.0,
             tail_frac: 0.25,
             max_entry_sigma_bps: 0.0,
+            selldown_stop_eps: -1.0,
             min_marginal_edge: 0.0,
             max_clips: 1,
             clip_cooldown_ms: 5000,
@@ -283,6 +294,13 @@ pub struct TradeRecord {
     /// Exit-leg fee the fee-held trade avoided. Set only when `fee_hold`.
     #[serde(default)]
     pub hold_alt_exit_fee: Option<f64>,
+    /// True when the post-entry selldown stop fired (sold before close).
+    #[serde(default)]
+    pub stopped: bool,
+    /// Counterfactual P&L had the stopped trade been held to resolution
+    /// (entry fee only). Set only when `stopped`.
+    #[serde(default)]
+    pub stop_hold_pnl: Option<f64>,
 }
 
 /// A probability sample at a fixed checkpoint, for log-loss scoring of the

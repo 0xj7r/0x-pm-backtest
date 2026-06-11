@@ -455,8 +455,8 @@ pub fn run_market_grid(
         }
     }
     let real_no_coverage = real_no_ticks as f64 / series.ticks.len().max(1) as f64;
-    let calm_blocked =
-        cfg.skip_calm && regime == Some(crate::regime::Regime::CalmLowVol);
+    let calm = regime == Some(crate::regime::Regime::CalmLowVol);
+    let calm_blocked = (cfg.skip_calm && calm) || (cfg.only_calm && !calm);
     let mut first = true;
     for &latency_ms in latencies_ms {
         for &threshold in edge_thresholds {

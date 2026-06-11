@@ -164,6 +164,10 @@ enum Cmd {
         /// Skip entries in calm_low_vol regime.
         #[arg(long)]
         skip_calm: bool,
+        /// Take entries ONLY in calm_low_vol windows (calm-regime
+        /// strategy exploration).
+        #[arg(long)]
+        only_calm: bool,
         /// Directional mode: enter only when the book already agrees with
         /// the belief (default is the fade: enter on disagreement).
         #[arg(long)]
@@ -1216,6 +1220,7 @@ async fn main() -> Result<()> {
             clip_cooldown_ms,
             exit_after_s,
             skip_calm,
+            only_calm,
             aligned_mode,
             align_min_mid,
             tail_max_price,
@@ -1271,6 +1276,7 @@ async fn main() -> Result<()> {
                     clip_cooldown_ms,
                     exit_after_s,
                     skip_calm,
+                    only_calm,
                     aligned_mode,
                     align_min_mid,
                     tail_max_price,

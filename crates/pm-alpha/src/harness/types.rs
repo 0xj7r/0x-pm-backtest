@@ -108,6 +108,9 @@ pub struct HarnessConfig {
     /// Take no entries when the open-time regime is calm_low_vol (the cells
     /// show ~no edge there; calm trades are variance without pay).
     pub skip_calm: bool,
+    /// Take entries ONLY in calm_low_vol windows (calm-regime strategy
+    /// exploration; mutually exclusive with skip_calm in spirit).
+    pub only_calm: bool,
     pub entry_mode: EntryMode,
     /// Aligned mode: the side's book mid must exceed this (book agreement).
     pub align_min_mid: f64,
@@ -140,6 +143,7 @@ impl Default for HarnessConfig {
             stop_before_close_s: 10,
             exit_after_s: 0,
             skip_calm: false,
+            only_calm: false,
             entry_mode: EntryMode::Fade,
             align_min_mid: 0.55,
             tail_max_price: 0.0,

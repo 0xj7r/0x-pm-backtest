@@ -156,6 +156,10 @@ enum Cmd {
         decision_dt_ms: u64,
         #[arg(long, default_value = "10")]
         stop_before_close_s: u32,
+        /// Entry window: permit entries only when time-to-close <= this many
+        /// seconds (0 = disabled). stop_before_close_s stays the inner bound.
+        #[arg(long, default_value = "0")]
+        enter_within_close_s: u32,
         /// Max laddered clip entries per market.
         #[arg(long, default_value = "1")]
         max_clips: u32,
@@ -1262,6 +1266,7 @@ async fn main() -> Result<()> {
             skip_touch_level,
             decision_dt_ms,
             stop_before_close_s,
+            enter_within_close_s,
             min_marginal_edge,
             max_clips,
             clip_cooldown_ms,
@@ -1328,6 +1333,7 @@ async fn main() -> Result<()> {
                     skip_touch_level,
                     decision_dt_ms,
                     stop_before_close_s,
+                    enter_within_close_s,
                     min_marginal_edge,
                     max_clips,
                     clip_cooldown_ms,

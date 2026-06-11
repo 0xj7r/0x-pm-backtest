@@ -101,6 +101,12 @@ pub struct HarnessConfig {
     pub decision_dt_ms: u64,
     /// No entries within this many seconds of resolution.
     pub stop_before_close_s: u32,
+    /// Entry window: entries are permitted ONLY when time-to-close is at
+    /// most this many seconds (0 = disabled). Composes with
+    /// `stop_before_close_s` as the inner bound: entries are allowed in
+    /// [close - enter_within_close_s, close - stop_before_close_s].
+    #[serde(default)]
+    pub enter_within_close_s: u32,
     /// Exit at the book this many seconds after fill (0 = hold to
     /// resolution). Exits cross the spread and walk depth; unsold remainder
     /// settles at resolution.
@@ -165,6 +171,7 @@ impl Default for HarnessConfig {
             skip_touch_level: false,
             decision_dt_ms: 1000,
             stop_before_close_s: 10,
+            enter_within_close_s: 0,
             exit_after_s: 0,
             exit_at_mid: false,
             passive_exit_timeout_s: 0,

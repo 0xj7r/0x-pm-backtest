@@ -261,6 +261,62 @@ mod tests {
     }
 
     #[test]
+    fn enter_within_close_zero_is_parity() {
+        // 0 = disabled must produce trades identical to a window so wide the
+        // gate never binds (and to the pre-feature default behaviour).
+        let (series, spot) = dislocation_market(2053);
+        let model = AlphaModel::default();
+        let base = HarnessConfig::default();
+        assert_eq!(base.enter_within_close_s, 0);
+        let off = run_market(&series, &spot, &model, &base);
+        let wide = run_market(
+            &series,
+            &spot,
+            &model,
+            &HarnessConfig { enter_within_close_s: 100_000, ..base },
+        );
+        assert!(!off.trades.is_empty());
+        assert_eq!(
+            serde_json::to_string(&off.trades).unwrap(),
+            serde_json::to_string(&wide.trades).unwrap()
+        );
+    }
+
+    #[test]
+    fn enter_within_close_window_gates_entries() {
+        // Threshold -1 forces an entry at the first eligible decision: with
+        // the window off that is near open; with a 60s window every entry
+        // lands in [close - 60s, close - stop_before_close_s].
+        let (series, spot) = dislocation_market(2053);
+        let model = AlphaModel::default();
+        let base = HarnessConfig {
+            edge_threshold: -1.0,
+            latency_ms: 0,
+            ..HarnessConfig::default()
+        };
+        let close_ns = series.meta.close_ts_ns;
+        let window_ns = 60 * 1_000_000_000;
+        let off = run_market(&series, &spot, &model, &base);
+        assert!(!off.trades.is_empty());
+        assert!(off.trades[0].decision_ts_ns < close_ns - window_ns);
+
+        let gated = run_market(
+            &series,
+            &spot,
+            &model,
+            &HarnessConfig { enter_within_close_s: 60, ..base },
+        );
+        assert!(!gated.trades.is_empty());
+        for t in &gated.trades {
+            assert!(t.decision_ts_ns >= close_ns - window_ns);
+            assert!(
+                t.decision_ts_ns
+                    < close_ns - base.stop_before_close_s as i64 * 1_000_000_000
+            );
+        }
+    }
+
+    #[test]
     fn log_loss_checkpoints_score_exo_vs_book_at_same_instants() {
         let (series, spot) = dislocation_market(2053);
         let out = run_market(&series, &spot, &AlphaModel::default(), &HarnessConfig::default());

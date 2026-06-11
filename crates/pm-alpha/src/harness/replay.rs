@@ -29,6 +29,7 @@ struct Decision {
     mid: f64,
     yes_ask: f64,
     no_buy: f64,
+    sigma_bar_bps: f64,
 }
 
 struct BeliefPass {
@@ -166,6 +167,7 @@ fn belief_pass(
             mid,
             yes_ask: tick.yes_ask as f64,
             no_buy,
+            sigma_bar_bps: ev.raw.sigma_bar_bps,
         });
     }
 
@@ -258,6 +260,7 @@ fn execute(
                 t1.hold_alt_sell_pnl = None;
                 t1.hold_alt_exit_fee = None;
                 trades.push(TradeRecord {
+                    sigma_bar_bps: d.sigma_bar_bps,
                     side: opp,
                     decision_ts_ns: d.ts_ns,
                     fill_ts_ns: fill_tick.ts_ns,
@@ -292,6 +295,11 @@ fn execute(
         if cfg.enter_within_close_s > 0
             && d.ts_ns < close_ns - cfg.enter_within_close_s as i64 * 1_000_000_000
         {
+            continue;
+        }
+        // Regime gate: skip entries when realized vol exceeds the cap (the
+        // late-favourite lane bleeds precisely on hot tape; 0 = no gate).
+        if cfg.max_entry_sigma_bps > 0.0 && d.sigma_bar_bps > cfg.max_entry_sigma_bps {
             continue;
         }
         // Aligned runs with a continuation model trade ITS belief, and only
@@ -561,6 +569,7 @@ fn execute(
             });
 
         trades.push(TradeRecord {
+                    sigma_bar_bps: d.sigma_bar_bps,
             side,
             decision_ts_ns: d.ts_ns,
             fill_ts_ns: fill_tick.ts_ns,
@@ -622,6 +631,7 @@ fn execute(
                 };
                 let tail_payout = if tail_won { 1.0 } else { 0.0 };
                 trades.push(TradeRecord {
+                    sigma_bar_bps: d.sigma_bar_bps,
                     side: tail_side,
                     decision_ts_ns: d.ts_ns,
                     fill_ts_ns: fill_tick.ts_ns,

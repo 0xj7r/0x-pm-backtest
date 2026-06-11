@@ -159,6 +159,9 @@ pub struct HarnessConfig {
     pub tail_max_price: f64,
     /// Tail hedge notional as a fraction of the main clip.
     pub tail_frac: f64,
+    /// Skip entries when sigma_bar_bps at decision exceeds this (regime
+    /// gate for vol-sensitive lanes; 0 disables).
+    pub max_entry_sigma_bps: f64,
     /// Entry fills walk depth only while the marginal level retains at
     /// least this much edge vs the belief (0 = walk unconditionally). Sets
     /// the live marketable-limit price: belief - floor.
@@ -205,6 +208,7 @@ impl Default for HarnessConfig {
             align_min_mid: 0.55,
             tail_max_price: 0.0,
             tail_frac: 0.25,
+            max_entry_sigma_bps: 0.0,
             min_marginal_edge: 0.0,
             max_clips: 1,
             clip_cooldown_ms: 5000,
@@ -233,6 +237,9 @@ impl Side {
 /// One executed simulated trade, held to resolution.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct TradeRecord {
+    /// Realized vol input at the entry decision (bps over one bar).
+    #[serde(default)]
+    pub sigma_bar_bps: f64,
     pub side: Side,
     pub decision_ts_ns: i64,
     pub fill_ts_ns: i64,

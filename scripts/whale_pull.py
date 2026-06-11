@@ -26,16 +26,21 @@ def fetch_window(addr, start, end):
         })
         req = urllib.request.Request(f"{BASE}?{q}",
                                      headers={"User-Agent": "pm-research/1.0"})
-        for attempt in range(5):
+        page = None
+        for attempt in range(8):
             try:
                 with urllib.request.urlopen(req, timeout=30) as r:
                     page = json.load(r)
-                break
-            except Exception as e:
-                if attempt == 4:
-                    raise
-                time.sleep(2.0 * (attempt + 1))
-        if not isinstance(page, list) or not page:
+                if isinstance(page, list):
+                    break
+                page = None
+            except Exception:
+                pass
+            if attempt == 7:
+                raise RuntimeError(f"window {start} offset {offset}: "
+                                   "no valid page after retries")
+            time.sleep(2.0 * (attempt + 1))
+        if not page:
             break
         rows.extend(page)
         if len(page) < 500:
@@ -48,12 +53,24 @@ def fetch_window(addr, start, end):
 def main():
     addr = sys.argv[1].lower()
     days = float(sys.argv[2])
+    repair = len(sys.argv) > 3 and sys.argv[3] == "repair"
     os.makedirs(OUT_DIR, exist_ok=True)
     out_path = f"{OUT_DIR}/{addr}.jsonl"
     meta_path = f"{OUT_DIR}/{addr}.windows.json"
     done = set()
     if os.path.exists(meta_path):
         done = set(json.load(open(meta_path)))
+    if repair and done and os.path.exists(out_path):
+        # re-fetch "done" windows that hold zero rows (possible silent
+        # rate-limit empties)
+        counts = {}
+        for line in open(out_path):
+            ts = json.loads(line).get("timestamp", 0)
+            w = ts // WIN * WIN
+            counts[w] = counts.get(w, 0) + 1
+        empty = {w for w in done if counts.get(w, 0) == 0}
+        print(f"repair: re-fetching {len(empty)} empty windows")
+        done -= empty
 
     end = int(time.time()) // WIN * WIN
     start = end - int(days * 86400)

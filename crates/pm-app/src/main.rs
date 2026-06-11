@@ -103,6 +103,31 @@ enum Cmd {
         /// blend (0 = spot-only champion; enables the futures feed).
         #[arg(long, default_value = "0.0")]
         perp_price_weight: f64,
+        /// LATE-FAVOURITE LANE mode: buy the >= align-min-mid favourite in
+        /// the final entry window and HOLD to expiry (no sell exit). Off by
+        /// default: the fade behaviour is byte-identical without this flag.
+        #[arg(long)]
+        lane_late_fav: bool,
+        /// Lane mode: minimum side book mid to qualify as the favourite.
+        #[arg(long, default_value = "0.85")]
+        align_min_mid: f64,
+        /// Lane mode: entries only within this many seconds of close.
+        #[arg(long, default_value = "120")]
+        enter_within_close_s: u32,
+        /// Lane mode entry deadline before close, seconds (fade mode keeps
+        /// its validated 90s constant regardless of this flag).
+        #[arg(long, default_value = "5")]
+        stop_before_close_s: u32,
+        /// Lane mode: minimum belief sigma_bar_bps to enter (a vol FLOOR).
+        #[arg(long, default_value = "4.0")]
+        min_entry_sigma_bps: f64,
+        /// Fade re-entry: re-arm once both sides' edges drop below this
+        /// (0 = off = single entry per market; validated combo: 0.08).
+        #[arg(long, default_value = "0.0")]
+        rearm_edge: f64,
+        /// Fade re-entry: max entries per market (validated combo: 2).
+        #[arg(long, default_value = "1")]
+        max_clips: u32,
     },
     /// pm-alpha exogenous edge hunt: replay markets through the pm-alpha
     /// validation harness (latency-modeled, cost-aware, leakage-free belief).
@@ -1256,6 +1281,13 @@ async fn main() -> Result<()> {
             latency_probe_ms,
             out_dir,
             perp_price_weight,
+            lane_late_fav,
+            align_min_mid,
+            enter_within_close_s,
+            stop_before_close_s,
+            min_entry_sigma_bps,
+            rearm_edge,
+            max_clips,
         } => {
             shadow::run_shadow(shadow::ShadowArgs {
                 slug_prefix,
@@ -1265,6 +1297,13 @@ async fn main() -> Result<()> {
                 latency_probe_ms,
                 out_dir,
                 perp_price_weight,
+                lane_late_fav,
+                align_min_mid,
+                enter_within_close_s,
+                stop_before_close_s,
+                min_entry_sigma_bps,
+                rearm_edge,
+                max_clips,
             })
             .await
         }

@@ -33,6 +33,23 @@ pub struct ShadowArgs {
     /// Weight on the basis-adjusted perp last in the effective-spot blend
     /// (0 disables the futures feed entirely).
     pub perp_price_weight: f64,
+    /// Late-favourite lane mode: buy the >= `align_min_mid` favourite inside
+    /// the final entry window and HOLD to expiry (no sell exit).
+    pub lane_late_fav: bool,
+    /// Lane mode: minimum side book mid to qualify as the favourite.
+    pub align_min_mid: f64,
+    /// Lane mode: entries permitted only once time-to-close drops to this.
+    pub enter_within_close_s: u32,
+    /// Lane mode entry deadline before close (fade mode keeps the 90s const).
+    pub stop_before_close_s: u32,
+    /// Lane mode: minimum belief sigma_bar_bps to enter (a vol FLOOR; the
+    /// lane's edge lives in vol, calm tape prices favourites fairly).
+    pub min_entry_sigma_bps: f64,
+    /// Fade mode re-entry: once entered, re-arm only after BOTH sides' touch
+    /// edges drop below this (0 = off = single entry per market).
+    pub rearm_edge: f64,
+    /// Fade mode: max entries per market when re-arming is active.
+    pub max_clips: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +89,11 @@ pub enum LogEvent {
         strike: f64,
         strike_source: &'static str,
         sigma_bar_bps: f64,
+        /// "fade" (sell-side mirror of the harness) or "late_fav" (the
+        /// hold-to-expiry favourite lane). Extra field; ingest tolerates it.
+        lane: &'static str,
+        /// 1-based entry index within the market (re-entry ladders only).
+        clip: u32,
     },
     QuoteProbe {
         ts_utc: String,
@@ -186,6 +208,11 @@ impl Ladder {
         })
     }
 
+    /// Best bid/ask midpoint; None until both sides are quoted.
+    pub fn mid(&self) -> Option<f64> {
+        Some((self.best_bid()?.price + self.best_ask()?.price) / 2.0)
+    }
+
     /// Displayed ask size at prices same-or-better than `limit_price`,
     /// looking only at the top 5 ask levels.
     pub fn ask_size_at_or_below(&self, limit_price: f64) -> f64 {
@@ -255,6 +282,12 @@ pub struct MarketWindow {
     pub gamma_strike: Option<f64>,
     /// First threshold crossing only: one shadow entry per market.
     pub entered: bool,
+    /// Entries taken so far (re-entry bookkeeping; equals 0 or 1 unless
+    /// `rearm_edge`/`max_clips` enable laddering).
+    pub n_clips: u32,
+    /// Re-entry arming: disarmed after each entry, re-armed only once both
+    /// sides' touch edges drop below `rearm_edge` (harness semantics).
+    pub armed: bool,
 }
 
 /// Rolling per-venue price prints on the local receipt clock, plus
@@ -348,8 +381,11 @@ pub fn lead_lag_ms(
 }
 
 /// An entry awaiting official resolution (crypto-price API, post-close).
+/// Keyed by `entry_id` (not slug+side): re-entry can put two same-side
+/// entries on one market, and each settles independently.
 #[derive(Debug, Clone)]
 pub struct ResolutionWatch {
+    pub entry_id: u64,
     pub slug: String,
     pub side: Side,
     pub entry_touch_price: f64,
@@ -366,6 +402,7 @@ pub struct ResolutionWatch {
 /// A logged WOULD_ENTER awaiting its quote probe and mark-to-book exit.
 #[derive(Debug, Clone)]
 struct PendingTrade {
+    entry_id: u64,
     slug: String,
     side: Side,
     token: String,
@@ -404,6 +441,7 @@ pub struct ShadowCore {
     markets: HashMap<String, MarketWindow>,
     pending: Vec<PendingTrade>,
     resolutions: Vec<ResolutionWatch>,
+    next_entry_id: u64,
     stats: SummaryStats,
     /// Measure-only cross-venue buffers: Binance on its ARRIVAL clock as the
     /// reference, plus each candidate fast-trigger venue.
@@ -421,6 +459,13 @@ pub struct ShadowConfig {
     pub exit_after_s: u32,
     pub latency_probe_ms: u64,
     pub perp_price_weight: f64,
+    pub lane_late_fav: bool,
+    pub align_min_mid: f64,
+    pub enter_within_close_s: u32,
+    pub stop_before_close_s: u32,
+    pub min_entry_sigma_bps: f64,
+    pub rearm_edge: f64,
+    pub max_clips: u32,
 }
 
 impl ShadowCore {
@@ -449,6 +494,7 @@ impl ShadowCore {
             markets: HashMap::new(),
             pending: Vec::new(),
             resolutions: Vec::new(),
+            next_entry_id: 0,
             vbuf_binance: VenueBuf::default(),
             vbuf_kraken: VenueBuf::default(),
             vbuf_coinbase: VenueBuf::default(),
@@ -652,12 +698,30 @@ impl ShadowCore {
         }
         let mut out = Vec::new();
         let mut entries: Vec<PendingTrade> = Vec::new();
+        let lane = self.cfg.lane_late_fav;
+        let rearm_active = !lane && self.cfg.rearm_edge > 0.0 && self.cfg.max_clips > 1;
 
         for m in self.markets.values_mut() {
             let open_ns = m.open_ts_s * 1_000_000_000;
             let close_ns = m.close_ts_s * 1_000_000_000;
-            let deadline_ns = close_ns - STOP_BEFORE_CLOSE_S * 1_000_000_000;
-            if m.entered || now_ns < open_ns || now_ns >= deadline_ns {
+            // Lane mode trades the very last seconds (configurable deadline);
+            // the fade keeps the validated 90s constant exactly.
+            let stop_before_s = if lane {
+                self.cfg.stop_before_close_s as i64
+            } else {
+                STOP_BEFORE_CLOSE_S
+            };
+            let deadline_ns = close_ns - stop_before_s * 1_000_000_000;
+            let exhausted = if rearm_active {
+                m.n_clips >= self.cfg.max_clips
+            } else {
+                m.entered
+            };
+            if exhausted || now_ns < open_ns || now_ns >= deadline_ns {
+                continue;
+            }
+            if lane && now_ns < close_ns - self.cfg.enter_within_close_s as i64 * 1_000_000_000
+            {
                 continue;
             }
             // The strike must share the belief state's price basis: gamma's
@@ -699,19 +763,58 @@ impl ShadowCore {
                 continue;
             };
 
-            // Same side selection as harness execute(): ties go to Up/Yes.
-            let edge_yes = ev.p - up_ask.price;
-            let edge_no = (1.0 - ev.p) - down_ask.price;
-            let (side, edge, touch) = if edge_yes >= edge_no {
-                (Side::Up, edge_yes, up_ask)
+            let (side, edge, touch) = if lane {
+                // Favourite selection by the side's OWN book mid: mids sum to
+                // ~1, so at most one side clears a >0.5 align_min_mid. Skip
+                // the market when neither qualifies.
+                let up_mid = self.books.get(&m.up_token).and_then(Ladder::mid);
+                let down_mid = self.books.get(&m.down_token).and_then(Ladder::mid);
+                let up_q = up_mid.is_some_and(|x| x >= self.cfg.align_min_mid);
+                let down_q = down_mid.is_some_and(|x| x >= self.cfg.align_min_mid);
+                let side = match (up_q, down_q) {
+                    (true, false) => Side::Up,
+                    (false, true) => Side::Down,
+                    (true, true) if up_mid >= down_mid => Side::Up,
+                    (true, true) => Side::Down,
+                    (false, false) => continue,
+                };
+                let (p_side, touch) = match side {
+                    Side::Up => (ev.p, up_ask),
+                    Side::Down => (1.0 - ev.p, down_ask),
+                };
+                (side, p_side - touch.price, touch)
             } else {
-                (Side::Down, edge_no, down_ask)
+                // Same side selection as harness execute(): ties go to Up/Yes.
+                let edge_yes = ev.p - up_ask.price;
+                let edge_no = (1.0 - ev.p) - down_ask.price;
+                // Disarmed: watch for the dislocation to close (both edges
+                // below the re-arm level); only a LATER crossing re-enters.
+                if rearm_active && !m.armed {
+                    if edge_yes < self.cfg.rearm_edge && edge_no < self.cfg.rearm_edge {
+                        m.armed = true;
+                    }
+                    continue;
+                }
+                if edge_yes >= edge_no {
+                    (Side::Up, edge_yes, up_ask)
+                } else {
+                    (Side::Down, edge_no, down_ask)
+                }
             };
             if edge < self.cfg.edge_threshold {
                 continue;
             }
+            // Lane sigma FLOOR (deliberately a minimum, not a cap): calm
+            // tape prices late favourites fairly; the lane's edge is in vol.
+            if lane && ev.raw.sigma_bar_bps < self.cfg.min_entry_sigma_bps {
+                continue;
+            }
 
             m.entered = true;
+            m.n_clips += 1;
+            m.armed = false;
+            let entry_id = self.next_entry_id;
+            self.next_entry_id += 1;
             self.stats.entries_total += 1;
             out.push(LogEvent::WouldEnter {
                 ts_utc: ts_utc(now_ns),
@@ -724,8 +827,11 @@ impl ShadowCore {
                 strike,
                 strike_source,
                 sigma_bar_bps: ev.raw.sigma_bar_bps,
+                lane: if lane { "late_fav" } else { "fade" },
+                clip: m.n_clips,
             });
             entries.push(PendingTrade {
+                entry_id,
                 slug: m.slug.clone(),
                 side,
                 token: match side {
@@ -738,11 +844,14 @@ impl ShadowCore {
                 // Harness exits require a tick at or before close; clamp.
                 exit_due_ns: (now_ns + self.cfg.exit_after_s as i64 * 1_000_000_000)
                     .min(close_ns),
-                exit_done: false,
+                // Lane entries HOLD to expiry: the exit is pre-marked done so
+                // no WouldExit is ever emitted; the ResolutionWatch settles.
+                exit_done: lane,
                 ladder_avg_cost: None,
                 ladder_shares: None,
             });
             self.resolutions.push(ResolutionWatch {
+                entry_id,
                 slug: m.slug.clone(),
                 side,
                 entry_touch_price: touch.price,
@@ -812,11 +921,13 @@ impl ShadowCore {
     }
 
     /// Record an official outcome for a watched entry and emit the event.
-    pub fn apply_resolution(&mut self, slug: &str, side: Side, won: bool, now_ns: i64) -> Option<LogEvent> {
+    /// Keyed by `entry_id`: with re-entry, one market/side can carry several
+    /// watches (one per clip) and each settles independently.
+    pub fn apply_resolution(&mut self, entry_id: u64, won: bool, now_ns: i64) -> Option<LogEvent> {
         let idx = self
             .resolutions
             .iter()
-            .position(|w| w.slug == slug && w.side == side)?;
+            .position(|w| w.entry_id == entry_id)?;
         let w = self.resolutions.swap_remove(idx);
         let settle = if won {
             1.0 - w.entry_touch_price
@@ -829,8 +940,8 @@ impl ShadowCore {
         });
         Some(LogEvent::Resolution {
             ts_utc: ts_utc(now_ns),
+            side: w.side.as_str(),
             slug: w.slug,
-            side: side.as_str(),
             won,
             settle_pnl_per_share: settle,
             ladder_settle_pnl_usd,
@@ -857,7 +968,7 @@ impl ShadowCore {
                     if let Some(w) = self
                         .resolutions
                         .iter_mut()
-                        .find(|w| w.slug == p.slug && w.side == p.side)
+                        .find(|w| w.entry_id == p.entry_id)
                     {
                         w.ladder_avg_cost = Some(avg);
                         w.ladder_unsold = shares; // until the exit walk sells
@@ -900,7 +1011,7 @@ impl ShadowCore {
                         if let Some(w) = self
                             .resolutions
                             .iter_mut()
-                            .find(|w| w.slug == p.slug && w.side == p.side)
+                            .find(|w| w.entry_id == p.entry_id)
                         {
                             w.ladder_unsold = (shares - sold).max(0.0);
                         }
@@ -1007,6 +1118,13 @@ pub async fn run_shadow(args: ShadowArgs) -> Result<()> {
         exit_after_s: args.exit_after_s,
         latency_probe_ms: args.latency_probe_ms,
         perp_price_weight: args.perp_price_weight,
+        lane_late_fav: args.lane_late_fav,
+        align_min_mid: args.align_min_mid,
+        enter_within_close_s: args.enter_within_close_s,
+        stop_before_close_s: args.stop_before_close_s,
+        min_entry_sigma_bps: args.min_entry_sigma_bps,
+        rearm_edge: args.rearm_edge,
+        max_clips: args.max_clips,
     })));
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -1531,7 +1649,7 @@ mod feeds {
                         let ev = core
                             .lock()
                             .expect("shadow core poisoned")
-                            .apply_resolution(&w.slug, w.side, won, super::now_unix_ns());
+                            .apply_resolution(w.entry_id, won, super::now_unix_ns());
                         if let Some(ev) = ev {
                             let _ = events.send(ev);
                         }
@@ -1672,6 +1790,8 @@ mod feeds {
             down_token,
             gamma_strike,
             entered: false,
+            n_clips: 0,
+            armed: true,
         })
     }
 
@@ -1934,6 +2054,23 @@ mod tests {
             exit_after_s: 30,
             latency_probe_ms: 150,
             perp_price_weight: 0.0,
+            lane_late_fav: false,
+            align_min_mid: 0.85,
+            enter_within_close_s: 120,
+            stop_before_close_s: 5,
+            min_entry_sigma_bps: 4.0,
+            rearm_edge: 0.0,
+            max_clips: 1,
+        }
+    }
+
+    /// The validated late-favourite lane config (thr 0.02, window
+    /// [close-120s, close-5s], favourite mid >= 0.85, sigma floor 4bps).
+    fn lane_cfg() -> ShadowConfig {
+        ShadowConfig {
+            edge_threshold: 0.02,
+            lane_late_fav: true,
+            ..cfg()
         }
     }
 
@@ -1974,7 +2111,28 @@ mod tests {
             down_token: "down-tok".to_string(),
             gamma_strike: strike,
             entered: false,
+            n_clips: 0,
+            armed: true,
         }
+    }
+
+    /// Books for the late-favourite lane: each side quoted around its own
+    /// mid (bid = ask - 0.02), so `Ladder::mid` is ask - 0.01 per side.
+    fn set_lane_books(core: &mut ShadowCore, up_ask: f64, down_ask: f64) {
+        core.apply_book_snapshot(
+            "up-tok",
+            &[(up_ask - 0.02, 100.0)],
+            &[(up_ask, 50.0)],
+            Some(1_899_000),
+            1_899_040,
+        );
+        core.apply_book_snapshot(
+            "down-tok",
+            &[(down_ask - 0.02, 60.0)],
+            &[(down_ask, 70.0)],
+            Some(1_899_000),
+            1_899_040,
+        );
     }
 
     fn set_books(core: &mut ShadowCore, up_ask: f64, down_ask: f64) {
@@ -2207,7 +2365,7 @@ mod tests {
         let w = &due[0];
         // Spot 100k vs strike 99k => entry side was Up. A losing outcome
         // settles at -entry; the watch is consumed.
-        let ev = core.apply_resolution(&w.slug, w.side, false, 2200 * NS).unwrap();
+        let ev = core.apply_resolution(w.entry_id, false, 2200 * NS).unwrap();
         match ev {
             LogEvent::Resolution { won, settle_pnl_per_share, .. } => {
                 assert!(!won);
@@ -2215,7 +2373,7 @@ mod tests {
             }
             other => panic!("expected Resolution, got {other:?}"),
         }
-        assert!(core.apply_resolution(&w.slug, w.side, false, 2300 * NS).is_none());
+        assert!(core.apply_resolution(w.entry_id, false, 2300 * NS).is_none());
         assert!(core.resolutions_due(2400 * NS).is_empty());
     }
 
@@ -2277,7 +2435,7 @@ mod tests {
         let due = core.resolutions_due(2116 * NS);
         let w = &due[0];
         let unsold = shares - 60.0;
-        match core.apply_resolution(&w.slug, w.side, true, 2200 * NS).unwrap() {
+        match core.apply_resolution(w.entry_id, true, 2200 * NS).unwrap() {
             LogEvent::Resolution { ladder_settle_pnl_usd, .. } => {
                 let want = unsold * (1.0 - avg);
                 assert!((ladder_settle_pnl_usd.unwrap() - want).abs() < 1e-9);
@@ -2433,5 +2591,238 @@ mod tests {
         let history = core.spot_history();
         let first = history.samples().first().unwrap().ts_ns / NS;
         assert!(first >= 8999 - SPOT_KEEP_SECS && first > 0);
+    }
+
+    // Late-favourite lane
+
+    /// Lane-config core whose spot tape extends through the close (lane
+    /// decisions happen seconds before expiry). Plateaus at `pre_open`
+    /// through the 1800s open, then trades a 3bp/s wave around 100k.
+    fn lane_core(pre_open: f64) -> ShadowCore {
+        let mut core = ShadowCore::new(lane_cfg());
+        let mut price = 100_000.0;
+        for s in 0..2100i64 {
+            if s <= 1800 {
+                core.push_spot(s * 1_000, s * 1_000 + 25, pre_open, 1.0, false);
+            } else {
+                core.push_spot(s * 1_000, s * 1_000 + 25, price, 1.0, false);
+                price *= if s % 2 == 0 { 1.0003 } else { 0.9997 };
+            }
+        }
+        core
+    }
+
+    #[test]
+    fn lane_enters_only_inside_entry_window() {
+        let mut core = lane_core(99_000.0); // strike far below: up is favourite
+        core.upsert_market(market(None));
+        set_lane_books(&mut core, 0.94, 0.08);
+        // 200s before close: outside the 120s entry window.
+        assert!(core.decide(1900 * NS).is_empty(), "before the window");
+        // 4s before close: past the 5s lane deadline.
+        assert!(core.decide(2096 * NS).is_empty(), "inside the stop buffer");
+        // 110s before close: inside [close-120, close-5).
+        let events = core.decide(1990 * NS);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            LogEvent::WouldEnter { side, lane, edge, touch_price, .. } => {
+                assert_eq!(*side, "up");
+                assert_eq!(*lane, "late_fav");
+                assert_eq!(*touch_price, 0.94);
+                assert!(*edge >= 0.02, "edge={edge}");
+            }
+            other => panic!("expected WouldEnter, got {other:?}"),
+        }
+        // Still one entry per market.
+        assert!(core.decide(1991 * NS).is_empty());
+        assert_eq!(core.stats.entries_total, 1);
+    }
+
+    #[test]
+    fn lane_picks_favourite_side_by_mid() {
+        // Strike far above spot: belief favours Down, and the Down book
+        // (mid 0.93) is the >= 0.85 favourite.
+        let mut core = lane_core(101_000.0);
+        core.upsert_market(market(None));
+        set_lane_books(&mut core, 0.08, 0.94);
+        let events = core.decide(1990 * NS);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            LogEvent::WouldEnter { side, touch_price, .. } => {
+                assert_eq!(*side, "down");
+                assert_eq!(*touch_price, 0.94);
+            }
+            other => panic!("expected WouldEnter, got {other:?}"),
+        }
+
+        // Neither mid qualifies: no entry even with a huge belief edge.
+        let mut none = lane_core(99_000.0);
+        none.upsert_market(market(None));
+        set_lane_books(&mut none, 0.50, 0.52); // mids 0.49 / 0.51
+        assert!(none.decide(1990 * NS).is_empty(), "no favourite -> stand down");
+    }
+
+    #[test]
+    fn lane_sigma_floor_blocks_low_vol_entries() {
+        // Floor above the tape's sigma: the otherwise-valid entry is vetoed.
+        let mut core = lane_core(99_000.0);
+        core.cfg.min_entry_sigma_bps = 1e6;
+        core.upsert_market(market(None));
+        set_lane_books(&mut core, 0.94, 0.08);
+        assert!(core.decide(1990 * NS).is_empty(), "sigma floor must block");
+        // Identical setup at the validated 4bps floor enters.
+        let mut core = lane_core(99_000.0);
+        core.upsert_market(market(None));
+        set_lane_books(&mut core, 0.94, 0.08);
+        assert_eq!(core.decide(1990 * NS).len(), 1);
+    }
+
+    #[test]
+    fn lane_holds_to_expiry_without_would_exit() {
+        let mut core = lane_core(99_000.0);
+        core.upsert_market(market(None));
+        set_lane_books(&mut core, 0.94, 0.08);
+        let entry_ns = 1990 * NS;
+        assert_eq!(core.decide(entry_ns).len(), 1);
+        // Probe telemetry still fires at +latency.
+        let probe = core.poll_due(entry_ns + 150_000_000);
+        assert_eq!(probe.len(), 1);
+        assert!(matches!(probe[0], LogEvent::QuoteProbe { .. }));
+        // No WouldExit at the fade horizon, at close, or far past close.
+        assert!(core.poll_due(entry_ns + 30 * NS).is_empty());
+        assert!(core.poll_due(2100 * NS).is_empty());
+        assert!(core.poll_due(10_000 * NS).is_empty());
+        assert!(core.pending.is_empty(), "lane trade completes at probe");
+    }
+
+    #[test]
+    fn lane_entries_settle_via_resolution() {
+        let mut core = lane_core(99_000.0);
+        core.upsert_market(market(None));
+        set_lane_books(&mut core, 0.94, 0.08);
+        let entry_ns = 1990 * NS;
+        assert_eq!(core.decide(entry_ns).len(), 1);
+        // Probe walks the ladder: $50 against 50 sh @0.94 fills all 50.
+        assert_eq!(core.poll_due(entry_ns + 150_000_000).len(), 1);
+
+        let due = core.resolutions_due(2116 * NS);
+        assert_eq!(due.len(), 1);
+        let w = &due[0];
+        match core.apply_resolution(w.entry_id, true, 2200 * NS).unwrap() {
+            LogEvent::Resolution { won, settle_pnl_per_share, ladder_settle_pnl_usd, .. } => {
+                assert!(won);
+                assert!((settle_pnl_per_share - (1.0 - 0.94)).abs() < 1e-12);
+                // Hold-to-expiry: the FULL laddered position settles (no
+                // exit walk ever sold shares).
+                assert!((ladder_settle_pnl_usd.unwrap() - 50.0 * (1.0 - 0.94)).abs() < 1e-9);
+            }
+            other => panic!("expected Resolution, got {other:?}"),
+        }
+        assert!(core.resolutions_due(2400 * NS).is_empty());
+    }
+
+    // Fade re-entry (rearm)
+
+    #[test]
+    fn rearm_disabled_keeps_single_entry() {
+        // max_clips > 1 without rearm_edge stays single-entry…
+        let mut core = core_with_spot_strike(99_000.0);
+        core.cfg.max_clips = 2;
+        core.upsert_market(market(None));
+        set_books(&mut core, 0.50, 0.50);
+        assert_eq!(core.decide(1900 * NS).len(), 1);
+        set_books(&mut core, 0.99, 0.99);
+        assert!(core.decide(1901 * NS).is_empty());
+        set_books(&mut core, 0.50, 0.50);
+        assert!(core.decide(1902 * NS).is_empty());
+
+        // …and rearm_edge without extra clips does too.
+        let mut core = core_with_spot_strike(99_000.0);
+        core.cfg.rearm_edge = 0.08;
+        core.upsert_market(market(None));
+        set_books(&mut core, 0.50, 0.50);
+        assert_eq!(core.decide(1900 * NS).len(), 1);
+        set_books(&mut core, 0.99, 0.99);
+        assert!(core.decide(1901 * NS).is_empty());
+        set_books(&mut core, 0.50, 0.50);
+        assert!(core.decide(1902 * NS).is_empty());
+    }
+
+    #[test]
+    fn rearm_blocks_reentry_while_dislocation_persists() {
+        let mut core = core_with_spot_strike(99_000.0);
+        core.cfg.rearm_edge = 0.08;
+        core.cfg.max_clips = 2;
+        core.upsert_market(market(None));
+        set_books(&mut core, 0.50, 0.50);
+        assert_eq!(core.decide(1900 * NS).len(), 1);
+        for s in 1901..1950i64 {
+            assert!(core.decide(s * NS).is_empty(), "disarmed while edge persists");
+        }
+        assert_eq!(core.stats.entries_total, 1);
+    }
+
+    #[test]
+    fn rearm_allows_second_entry_after_dislocation_closes() {
+        let mut core = core_with_spot_strike(99_000.0);
+        core.cfg.rearm_edge = 0.08;
+        core.cfg.max_clips = 2;
+        core.upsert_market(market(None));
+        set_books(&mut core, 0.50, 0.50);
+        assert_eq!(core.decide(1900 * NS).len(), 1);
+        // Dislocation closes (both edges < 0.08): the re-arm pass itself
+        // must NOT enter, only a later crossing may.
+        set_books(&mut core, 0.99, 0.99);
+        assert!(core.decide(1901 * NS).is_empty());
+        // It reopens: second clip.
+        set_books(&mut core, 0.50, 0.50);
+        let again = core.decide(1902 * NS);
+        assert_eq!(again.len(), 1);
+        match &again[0] {
+            LogEvent::WouldEnter { clip, lane, .. } => {
+                assert_eq!(*clip, 2);
+                assert_eq!(*lane, "fade");
+            }
+            other => panic!("expected WouldEnter, got {other:?}"),
+        }
+        // max_clips respected: a third close/reopen cycle is refused.
+        set_books(&mut core, 0.99, 0.99);
+        assert!(core.decide(1903 * NS).is_empty());
+        set_books(&mut core, 0.50, 0.50);
+        assert!(core.decide(1904 * NS).is_empty());
+        assert_eq!(core.stats.entries_total, 2);
+    }
+
+    #[test]
+    fn rearm_same_side_entries_settle_independently() {
+        let mut core = core_with_spot_strike(99_000.0);
+        core.cfg.rearm_edge = 0.08;
+        core.cfg.max_clips = 2;
+        core.upsert_market(market(None));
+        set_books(&mut core, 0.50, 0.50);
+        assert_eq!(core.decide(1900 * NS).len(), 1);
+        set_books(&mut core, 0.99, 0.99);
+        assert!(core.decide(1901 * NS).is_empty());
+        // Second Up entry at a different touch so the settles differ.
+        set_books(&mut core, 0.60, 0.99);
+        assert_eq!(core.decide(1902 * NS).len(), 1);
+
+        let due = core.resolutions_due(2116 * NS);
+        assert_eq!(due.len(), 2);
+        assert!(due.iter().all(|w| w.side == Side::Up));
+        let first_id = due[0].entry_id;
+        let mut settles: Vec<f64> = due
+            .iter()
+            .map(|w| match core.apply_resolution(w.entry_id, true, 2200 * NS).unwrap() {
+                LogEvent::Resolution { settle_pnl_per_share, .. } => settle_pnl_per_share,
+                other => panic!("expected Resolution, got {other:?}"),
+            })
+            .collect();
+        settles.sort_by(f64::total_cmp);
+        assert!((settles[0] - 0.40).abs() < 1e-12, "1 - 0.60 leg");
+        assert!((settles[1] - 0.50).abs() < 1e-12, "1 - 0.50 leg");
+        // Each entry id settles exactly once.
+        assert!(core.apply_resolution(first_id, true, 2300 * NS).is_none());
+        assert!(core.resolutions_due(2400 * NS).is_empty());
     }
 }

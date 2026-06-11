@@ -32,3 +32,21 @@ A token-side inversion bug was ruled out: the first hunt-003 pass DID have inver
 ## Status of the deployable set
 
 BTC-5m remains the only deployment-grade cell (Feb-June validated, hardened, stress-tested). BTC-15m is the nearest expansion candidate. Alts await the directional/feed-leadership work.
+
+## Multi-market fade verdicts (full protocol)
+
+BTC-15m fade (thr 0.16, exit 30s, deadline 90s — champion shape unchanged):
+- Tune May 7-18: +$4,038, 460 trades, 65.4% hit ($8.8/trade, vs BTC-5m $9.7)
+- Test May 19-28: +$3,063, 351 trades, 68.4% hit, Sharpe 1.47, worst -$39
+- June 1-7 SEALED: +$865, 79 trades, 74.7% hit, 6/7 days green, worst -$23
+  (434/672 windows — Telonex collected only ~65% of June 15m books, uniform
+  across days, mechanical missingness; ~+$1.3k/wk scaled to full coverage)
+VERDICT: PASS — candidate for shadow alongside BTC-5m.
+
+ETH-5m fade (same shape):
+- Tune: +$5,041 (1,029 trades, 61.1%); Test: +$2,162, Sharpe 0.91, 2 small
+  red days ($3.9/trade — half of BTC's edge, consistent with weaker
+  Binance-leads-ETH-book coupling)
+- June holdout BLOCKED: ETH June books never ingested to S3.
+VERDICT: conditional pass, second-tier size; holdout = forward shadow or
+post-ingestion June run. Aligned shapes negative on both markets.

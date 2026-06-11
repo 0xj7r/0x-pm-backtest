@@ -78,6 +78,15 @@ pub struct AlphaArgs {
     pub perp_symbol: Option<String>,
     /// Cache root for the perp parquets (defaults to the local cache dir).
     pub perp_cache_dir: Option<PathBuf>,
+    /// Cross-asset reference spot symbol (e.g. BTCUSDT for ETH markets);
+    /// exposed to the belief via ExoState.ref_spot.
+    pub xasset_symbol: Option<String>,
+    /// Weight on the reference asset's trailing 60s return as an extra
+    /// drift term (0 disables).
+    pub xasset_weight: f64,
+    /// Weight on the basis-adjusted perp last in the effective-spot blend
+    /// (0 disables; requires --perp-symbol).
+    pub perp_price_weight: f64,
 }
 
 #[derive(serde::Serialize)]
@@ -252,6 +261,7 @@ async fn process_markets(
     down_by_slug: &std::collections::HashMap<String, MarketHandle>,
     tick_cache_dir: Option<&Path>,
     perp: Option<std::sync::Arc<pm_alpha::PerpState>>,
+    xasset_symbol: Option<&str>,
 ) -> Result<ProcessOutput> {
     let store_inner = store.store();
     let n_cells = latencies_ms.len() * edge_thresholds.len();
@@ -273,12 +283,19 @@ async fn process_markets(
     // serial implementation exactly.
     let mut spot_by_market: Vec<Option<std::sync::Arc<pm_types::SpotHistory>>> =
         Vec::with_capacity(markets.len());
+    let mut ref_spot_by_market: Vec<Option<std::sync::Arc<pm_types::SpotHistory>>> =
+        Vec::with_capacity(markets.len());
     for market in markets {
         let spot = match spot_symbol_for_market("auto", &market.slug) {
             Ok(Some(symbol)) => spot_cache.get_or_load(store, &symbol, &market.date).await.ok(),
             _ => None,
         };
         spot_by_market.push(spot);
+        let ref_spot = match xasset_symbol {
+            Some(symbol) => spot_cache.get_or_load(store, symbol, &market.date).await.ok(),
+            None => None,
+        };
+        ref_spot_by_market.push(ref_spot);
     }
 
     const PREFETCH: usize = 24;
@@ -296,6 +313,7 @@ async fn process_markets(
         let down = down_by_slug.get(&market.slug).cloned();
         let cache_dir = replay_event_cache_dir.map(|p| p.to_path_buf());
         let spot = spot_by_market[idx].clone();
+        let ref_spot = ref_spot_by_market[idx].clone();
         let official_strike = strikes_by_slug.get(&market.slug).copied();
         let market = market.clone();
         let model = model.clone();
@@ -352,6 +370,7 @@ async fn process_markets(
                     cached,
                     cache_path.as_deref(),
                     spot,
+                    ref_spot,
                     official_strike,
                     perp,
                     infer_outcome,
@@ -397,6 +416,7 @@ fn compute_market(
     cached_ticks: Option<Vec<BookTick>>,
     cache_path: Option<&Path>,
     spot: Option<std::sync::Arc<pm_types::SpotHistory>>,
+    ref_spot: Option<std::sync::Arc<pm_types::SpotHistory>>,
     official_strike: Option<f64>,
     perp: Option<std::sync::Arc<pm_alpha::PerpState>>,
     infer_outcome: bool,
@@ -493,7 +513,7 @@ fn compute_market(
             date: market.date.clone(),
         };
 
-        let outputs = run_market_grid(&series, &spot, perp.as_deref(), model, base_cfg, latencies_ms, edge_thresholds);
+        let outputs = run_market_grid(&series, &spot, perp.as_deref(), ref_spot.as_deref(), model, base_cfg, latencies_ms, edge_thresholds);
         Item::Done(Box::new((series.meta, outputs)))
     }
 }
@@ -519,6 +539,8 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
         vol_sample_dt_s: 1,
         momentum_lookback_s: args.momentum_lookback_s,
         momentum_weight: args.momentum_weight,
+        xasset_weight: args.xasset_weight,
+        perp_price_weight: args.perp_price_weight,
     };
     let base_cfg = HarnessConfig {
         latency_ms: *args.latencies_ms.first().unwrap_or(&150),
@@ -623,6 +645,7 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
             &down_by_slug,
             args.tick_cache_dir.as_deref(),
             perp.clone(),
+            args.xasset_symbol.as_deref(),
         )
         .await?;
         if let Some(path) = &args.dir_samples_out {
@@ -690,6 +713,7 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
         &down_by_slug,
         args.tick_cache_dir.as_deref(),
         perp,
+        args.xasset_symbol.as_deref(),
     )
     .await?;
     if let Some(path) = &args.trades_out {

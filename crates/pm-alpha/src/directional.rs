@@ -288,6 +288,7 @@ mod tests {
         ExoState {
             spot,
             perp,
+            ref_spot: None,
             market: MarketMeta {
                 token: Token::Btc,
                 window_secs: 300,

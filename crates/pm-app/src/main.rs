@@ -234,6 +234,17 @@ enum Cmd {
         /// Cache root for perp parquets (default: data/cache).
         #[arg(long)]
         perp_cache_dir: Option<PathBuf>,
+        /// Cross-asset reference spot symbol (e.g. BTCUSDT for ETH markets).
+        #[arg(long)]
+        xasset_symbol: Option<String>,
+        /// Weight on the reference asset's trailing 60s return as an extra
+        /// drift term (0 disables).
+        #[arg(long, default_value = "0")]
+        xasset_weight: f64,
+        /// Weight on the basis-adjusted perp last in the effective-spot
+        /// blend (0 disables; requires --perp-symbol).
+        #[arg(long, default_value = "0")]
+        perp_price_weight: f64,
     },
     /// Stream a Telonex book_snapshot parquet from S3 and print sanity stats.
     InspectS3 {
@@ -1241,6 +1252,9 @@ async fn main() -> Result<()> {
             strikes,
             perp_symbol,
             perp_cache_dir,
+            xasset_symbol,
+            xasset_weight,
+            perp_price_weight,
         } => {
             let store = if let Some(ref dir) = local_cache_dir {
                 tracing::info!(?dir, "using local cache");
@@ -1297,6 +1311,9 @@ async fn main() -> Result<()> {
                     strikes,
                     perp_symbol,
                     perp_cache_dir,
+                    xasset_symbol,
+                    xasset_weight,
+                    perp_price_weight,
                 },
             )
             .await

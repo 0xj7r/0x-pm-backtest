@@ -56,6 +56,10 @@ pub struct AlphaArgs {
     pub max_clips: u32,
     pub clip_cooldown_ms: u64,
     pub rearm_edge: f64,
+    /// Maker entry study: rest a bid at (side ask - offset) instead of
+    /// taking; fills only when the side ask later trades through the level
+    /// (zero fee, hold to resolution). Negative disables (taker parity).
+    pub maker_entry_offset: f64,
     pub exit_after_s: u32,
     pub exit_at_mid: bool,
     pub passive_exit_timeout_s: u32,
@@ -699,6 +703,7 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
         max_clips: args.max_clips,
         clip_cooldown_ms: args.clip_cooldown_ms,
         rearm_edge: args.rearm_edge,
+        maker_entry_offset: args.maker_entry_offset,
         exit_after_s: args.exit_after_s,
         exit_at_mid: args.exit_at_mid,
         passive_exit_timeout_s: args.passive_exit_timeout_s,
@@ -915,6 +920,8 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
                     "hold_alt_exit_fee": t.hold_alt_exit_fee,
                     "stopped": t.stopped,
                     "stop_hold_pnl": t.stop_hold_pnl,
+                    "sigma_bar_bps": t.sigma_bar_bps,
+                    "maker_entry": t.maker_entry,
                 });
                 writeln!(f, "{row}")?;
             }
@@ -944,6 +951,21 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
         "\nalpha run: {} markets run / {} considered (skipped: {} no-strike, {} no-outcome, {} load-error)",
         n_run, n_considered, n_no_strike, n_no_outcome, n_load_error
     );
+    if args.maker_entry_offset >= 0.0 && !per_cell.is_empty() {
+        let outs = &per_cell[0];
+        let placed: u32 = outs.iter().map(|(_, o)| o.maker_placed).sum();
+        let filled: usize = outs
+            .iter()
+            .map(|(_, o)| o.trades.iter().filter(|t| t.maker_entry).count())
+            .sum();
+        println!(
+            "maker entry (offset {:.2}): placed {} resting orders, filled {} ({:.1}%)",
+            args.maker_entry_offset,
+            placed,
+            filled,
+            100.0 * filled as f64 / placed.max(1) as f64
+        );
+    }
     if !per_cell.is_empty() {
         let outs = &per_cell[0];
         let cov: f64 = outs.iter().map(|(_, o)| o.real_no_coverage).sum::<f64>()

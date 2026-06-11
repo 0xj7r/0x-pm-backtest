@@ -227,6 +227,13 @@ enum Cmd {
         /// next threshold crossing is then a fresh event (0 = disabled).
         #[arg(long, default_value = "0.0")]
         rearm_edge: f64,
+        /// Maker entry study: rest a bid at (side ask - this offset) instead
+        /// of taking the ask; fills only when the side ask later trades
+        /// at-or-below the level before the stop_before_close deadline (zero
+        /// fee, hold to resolution, one resting order per market). Negative
+        /// disables (taker parity).
+        #[arg(long, default_value = "-1.0", allow_hyphen_values = true)]
+        maker_entry_offset: f64,
         /// Exit at the book N seconds after fill (0 = hold to resolution).
         #[arg(long, default_value = "0")]
         exit_after_s: u32,
@@ -1349,6 +1356,7 @@ async fn main() -> Result<()> {
             max_clips,
             clip_cooldown_ms,
             rearm_edge,
+            maker_entry_offset,
             exit_after_s,
             exit_at_mid,
             passive_exit_timeout_s,
@@ -1424,6 +1432,7 @@ async fn main() -> Result<()> {
                     max_clips,
                     clip_cooldown_ms,
                     rearm_edge,
+                    maker_entry_offset,
                     exit_after_s,
                     exit_at_mid,
                     passive_exit_timeout_s,

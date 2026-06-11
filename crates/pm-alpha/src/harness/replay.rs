@@ -240,13 +240,14 @@ fn execute(
     latency_ms: u64,
     edge_threshold: f64,
     cfg: &HarnessConfig,
-) -> Vec<TradeRecord> {
+) -> (Vec<TradeRecord>, u32) {
     let close_ns = series.meta.close_ts_ns;
     let latency_ns = latency_ms as i64 * 1_000_000;
     let cooldown_ns = cfg.clip_cooldown_ms as i64 * 1_000_000;
     let max_clips = cfg.max_clips.max(1) as usize;
     let pair_completion = cfg.pair_completion_margin > 0.0;
     let mut trades: Vec<TradeRecord> = Vec::new();
+    let mut maker_placed = 0u32;
     let mut next_entry_ns = i64::MIN;
     let mut n_clips = 0usize;
     let mut leg1: Option<OpenLeg> = None;
@@ -326,6 +327,8 @@ fn execute(
                     hold_alt_exit_fee: None,
                     stopped: false,
                     stop_hold_pnl: None,
+                    sigma_bar_bps: d.sigma_bar_bps,
+                    maker_entry: false,
                 });
                 leg1 = None;
                 continue;
@@ -427,6 +430,64 @@ fn execute(
         };
         if notional < 1.0 {
             continue; // sized below the venue's practical minimum
+        }
+
+        // Maker entry study: rest a bid below the side's current ask
+        // instead of taking it. Live after the entry latency; fills only if
+        // the side ask later trades at-or-below the level (crossed-through,
+        // same primitive as the passive-exit fill check) before the
+        // stop_before_close deadline; zero fee, hold to resolution. One
+        // resting order per market, filled or cancelled.
+        if cfg.maker_entry_offset >= 0.0 {
+            let level = entry_cost - cfg.maker_entry_offset;
+            maker_placed += 1;
+            if level > 0.0 && level < 1.0 {
+                let live_ns = d.ts_ns + latency_ns;
+                let deadline_ns = close_ns - cfg.stop_before_close_s as i64 * 1_000_000_000;
+                let cross = series.ticks[d.tick_idx..]
+                    .iter()
+                    .filter(|t| t.ts_ns >= live_ns && t.ts_ns <= deadline_ns)
+                    .find(|t| side_ask(t, side).is_some_and(|a| a <= level + 1e-6));
+                if let Some(fill_tick) = cross {
+                    let shares = notional / level;
+                    let won = match side {
+                        Side::Yes => series.resolved_yes,
+                        Side::No => !series.resolved_yes,
+                    };
+                    let payout = if won { 1.0 } else { 0.0 };
+                    let mark_60s = series.ticks[d.tick_idx..]
+                        .iter()
+                        .find(|t| t.ts_ns >= fill_tick.ts_ns + 60_000_000_000)
+                        .and_then(|t| t.mid())
+                        .map(|m| match side {
+                            Side::Yes => m,
+                            Side::No => 1.0 - m,
+                        });
+                    trades.push(TradeRecord {
+                        side,
+                        decision_ts_ns: d.ts_ns,
+                        fill_ts_ns: fill_tick.ts_ns,
+                        avg_price: level,
+                        shares,
+                        fee: 0.0,
+                        p_exo: d.p_up,
+                        mid_at_decision: d.mid,
+                        pnl: shares * (payout - level),
+                        won,
+                        exit_price: None,
+                        mark_60s,
+                        pnl_exit_mid_optimistic: None,
+                        is_completion: false,
+                        exit_filled_at_mid: None,
+                        fee_hold: false,
+                        hold_alt_sell_pnl: None,
+                        hold_alt_exit_fee: None,
+                        sigma_bar_bps: d.sigma_bar_bps,
+                        maker_entry: true,
+                    });
+                }
+            }
+            break;
         }
 
         // Latency: fill against the book as it actually is at T + latency.
@@ -686,6 +747,8 @@ fn execute(
             hold_alt_exit_fee,
             stopped,
             stop_hold_pnl,
+            sigma_bar_bps: d.sigma_bar_bps,
+            maker_entry: false,
         });
         if pair_completion && !first_entry_done && !stopped {
             first_entry_done = true;
@@ -755,11 +818,13 @@ fn execute(
                     hold_alt_exit_fee: None,
                     stopped: false,
                     stop_hold_pnl: None,
+                    sigma_bar_bps: d.sigma_bar_bps,
+                    maker_entry: false,
                 });
             }
         }
     }
-    trades
+    (trades, maker_placed)
 }
 
 /// Sell `shares` by crossing the spread: selling YES walks the YES bids;
@@ -836,6 +901,16 @@ fn side_mid(tick: &BookTick, side: Side) -> Option<f64> {
         Side::Yes => tick.mid(),
         Side::No if tick.has_real_no() => Some(((tick.no_bid + tick.no_ask) / 2.0) as f64),
         Side::No => tick.mid().map(|m| 1.0 - m),
+    }
+}
+
+/// Side-oriented best ask: the buy touch a resting maker bid must see trade
+/// at-or-below to be considered filled (crossed-through).
+fn side_ask(tick: &BookTick, side: Side) -> Option<f64> {
+    match side {
+        Side::Yes if tick.yes_ask > 0.0 && tick.yes_ask < 1.0 => Some(tick.yes_ask as f64),
+        Side::Yes => None,
+        Side::No => tick.no_buy_price(),
     }
 }
 
@@ -956,12 +1031,13 @@ pub fn run_market_grid(
                 Vec::new()
             };
             first = false;
+            let (trades, maker_placed) = if calm_blocked {
+                (Vec::new(), 0)
+            } else {
+                execute(series, &pass, latency_ms, threshold, cfg)
+            };
             outputs.push(MarketRunOutput {
-                trades: if calm_blocked {
-                    Vec::new()
-                } else {
-                    execute(series, &pass, latency_ms, threshold, cfg)
-                },
+                trades,
                 samples: pass.samples.clone(),
                 had_belief: pass.had_belief,
                 train_samples,
@@ -969,6 +1045,7 @@ pub fn run_market_grid(
                 regime,
                 min_pair_cost,
                 real_no_coverage,
+                maker_placed,
             });
         }
     }

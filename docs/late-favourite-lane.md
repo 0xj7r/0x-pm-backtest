@@ -64,3 +64,40 @@ leaving no margin, and the belief-gated cells barely trade (SOL C: 33/day vs
 BTC 178/day). The lane is BTC-specific book behaviour, not generic venue
 microstructure, subject to the 64-67% coverage caveat. Robustness check
 (model-free A4) is negative on both assets, so this is not a belief artifact.
+
+## Maker-entry study (REJECTED)
+
+Feature: `--maker-entry-offset` (default -1 = off = parity). When >= 0 an
+entry signal rests a bid at (side ask - offset) instead of taking; the order
+fills only if the side ask later trades at-or-below the level before the
+stop-before-close deadline (conservative crossed-through primitive), pays
+zero fee, holds to resolution; one resting order per market. Parity verified:
+defaults reproduce cell C byte-for-byte (2,138 trades / $1,945.19 / 92.8%)
+and the fee-true sigma>=4 champion ($1,513.56 net).
+
+Cells (May 7-18 tune window, lane C config + `--fee-curve-rate 0.07`, $50
+clips; taker pays the one entry leg, maker pays zero). Offline sigma>=4bps
+gate from the trades dump (`scripts/maker_entry_analyze.py`).
+
+| Cell | fill rate | net P&L (/d) | hit | avg px | hit-BE | Sharpe(d) | neg days | sigma>=4 net (/d) |
+|---|---|---|---|---|---|---|---|---|
+| taker ctrl | - | +$1,281 (+$107) | 92.8% | 0.911 | +1.6pp | 0.57 | 3/12 | +$1,514 (+$126) |
+| maker 0.01 | 64.4% | -$304 (-$25) | 89.0% | 0.894 | -0.4pp | -0.16 | 7/12 | +$257 (+$21) |
+| maker 0.02 | 55.8% | -$562 (-$47) | 87.3% | 0.881 | -0.8pp | -0.30 | 10/12 | +$86 (+$7) |
+| maker 0.03 | 49.2% | -$868 (-$72) | 85.6% | 0.870 | -1.4pp | -0.46 | 10/12 | -$117 (-$10) |
+
+Adverse selection is the whole story, and it is fatal. Splitting the taker
+control by would-the-bid-have-filled (offset 0.01): the no-fill 36% of
+signals hit 99.6% (+$3,038, 0/12 negative days, Sharpe(d) 4.1); the
+would-fill 64% hit 88.97% and LOSE -$1,757 even at taker prices. The
+favourite's ask trading down through the bid level in the final 120s is the
+flip starting, not benign de-risking: the counterparty hypothesis is
+rejected. The maker improvement per filled trade is real (+1.33c price +
+$0.33 fee saved, +$1,452 vs taker on the same signals) but it claws back
+barely half of the selection damage, and the fill mechanism structurally
+excludes exactly the no-wobble winners that carry all of the lane's profit.
+Deeper offsets make every number worse (more selection, fewer fills).
+
+Verdict: do NOT advance to OOS. Maker entry inverts this lane's edge; the
+lane's margin lives in the favourites nobody sells down, which a resting bid
+can never buy. Taker entry stays the champion execution.

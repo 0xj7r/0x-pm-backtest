@@ -1240,4 +1240,100 @@ mod tests {
         assert!(strict.trades[0].fee_hold, "margin flips the sell into a hold");
         assert!(strict.trades[0].exit_price.is_none());
     }
+
+    /// Spot jumps +1% before open so the belief is firmly YES from the first
+    /// decision against a 0.50/0.52 book; the ask dips to `dip_ask` at
+    /// t=2100s (or never, when None). Resolves YES.
+    fn maker_market(dip_ask: Option<f32>) -> (MarketSeries, SpotHistory) {
+        let spot = spot_with_jump(2400, 1900);
+        let open_s = 2000_i64;
+        let close_s = 2300_i64;
+        let ticks = (open_s..close_s)
+            .map(|s| match dip_ask {
+                Some(a) if s >= 2100 => book_tick(s, a - 0.02, a),
+                _ => book_tick(s, 0.50, 0.52),
+            })
+            .collect();
+        (
+            MarketSeries {
+                meta: MarketMeta {
+                    token: Token::Btc,
+                    window_secs: 300,
+                    open_ts_ns: open_s * 1_000_000_000,
+                    close_ts_ns: close_s * 1_000_000_000,
+                    strike: 100_000.0,
+                },
+                resolved_yes: true,
+                ticks,
+                date: "2026-05-01".into(),
+            },
+            spot,
+        )
+    }
+
+    #[test]
+    fn maker_entry_fills_only_when_ask_trades_through_the_level() {
+        let model = AlphaModel::default();
+        let base = HarnessConfig {
+            edge_threshold: 0.05,
+            latency_ms: 0,
+            fee_curve_rate: 0.07,
+            maker_entry_offset: 0.01,
+            ..HarnessConfig::default()
+        };
+
+        // Ask dips 0.52 -> 0.51 at 2100s: the 0.51 bid is traded through.
+        let (series, spot) = maker_market(Some(0.51));
+        let out = run_market(&series, &spot, &model, &base);
+        assert_eq!(out.maker_placed, 1);
+        assert_eq!(out.trades.len(), 1);
+        let t = &out.trades[0];
+        assert!(t.maker_entry);
+        assert_eq!(t.side, Side::Yes);
+        assert!((t.avg_price - 0.51).abs() < 1e-6, "filled at the level, got {}", t.avg_price);
+        assert!(t.fill_ts_ns >= 2100 * 1_000_000_000, "fills at the dip tick");
+        assert_eq!(t.fee, 0.0, "maker entry pays zero fee");
+        assert!((t.pnl - t.shares * (1.0 - t.avg_price)).abs() < 1e-9, "held to resolution");
+
+        // Ask dips only to 0.515: never at-or-below 0.51, order cancels.
+        let (series, spot) = maker_market(Some(0.515));
+        let out = run_market(&series, &spot, &model, &base);
+        assert_eq!(out.maker_placed, 1);
+        assert!(out.trades.is_empty(), "unfilled order cancels with no position");
+
+        // Negative offset = disabled: taker parity, no resting orders.
+        let (series, spot) = maker_market(None);
+        let off = run_market(
+            &series,
+            &spot,
+            &model,
+            &HarnessConfig { maker_entry_offset: -1.0, ..base },
+        );
+        assert_eq!(off.maker_placed, 0);
+        assert_eq!(off.trades.len(), 1);
+        assert!(!off.trades[0].maker_entry);
+        assert!((off.trades[0].avg_price - 0.52).abs() < 1e-6, "taker pays the ask");
+        assert!(off.trades[0].fee > 0.0, "taker pays the fee curve");
+    }
+
+    #[test]
+    fn maker_entry_fill_respects_stop_before_close_deadline() {
+        // Dip happens at 2100s; a deadline before that (stop 250s => cutoff
+        // t=2050s) means the resting order cancels before the trade-through.
+        let (series, spot) = maker_market(Some(0.51));
+        let out = run_market(
+            &series,
+            &spot,
+            &AlphaModel::default(),
+            &HarnessConfig {
+                edge_threshold: 0.05,
+                latency_ms: 0,
+                maker_entry_offset: 0.01,
+                stop_before_close_s: 250,
+                ..HarnessConfig::default()
+            },
+        );
+        assert_eq!(out.maker_placed, 1);
+        assert!(out.trades.is_empty(), "deadline cancels before the dip");
+    }
 }

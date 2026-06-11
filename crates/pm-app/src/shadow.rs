@@ -425,6 +425,7 @@ impl ShadowCore {
                 vol_sample_dt_s: 1,
                 momentum_lookback_s: 0,
                 momentum_weight: 1.0,
+                ..AlphaModelConfig::default()
             },
             calibrator: None,
             dir_model: None,
@@ -637,6 +638,7 @@ impl ShadowCore {
             let state = ExoState {
                 spot: &spot,
                 perp: None,
+                ref_spot: None,
                 market: MarketMeta {
                     token,
                     window_secs: (m.close_ts_s - m.open_ts_s).max(1) as u32,

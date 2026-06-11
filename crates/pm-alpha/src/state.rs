@@ -95,6 +95,45 @@ impl PerpState {
         if s <= 0.0 { return None; }
         Some(perp / s - 1.0)
     }
+
+    /// Median perp-minus-spot basis in absolute price units over the trailing
+    /// window, sampled at `sample_dt_ns` cadence. Subtracting this from the
+    /// perp last makes a perp/spot level blend basis-consistent.
+    pub fn median_basis_abs(
+        &self,
+        spot: &SpotHistory,
+        now_ns: i64,
+        lookback_ns: i64,
+        sample_dt_ns: i64,
+    ) -> Option<f64> {
+        const MIN_BASIS_SAMPLES: usize = 5;
+        if lookback_ns <= 0 || sample_dt_ns <= 0 {
+            return None;
+        }
+        let mut diffs: Vec<f64> = Vec::with_capacity((lookback_ns / sample_dt_ns) as usize + 1);
+        let mut ts = now_ns - lookback_ns;
+        while ts <= now_ns {
+            if let (Some(p), Some(s)) = (
+                self.trades.price_at_or_before(ts),
+                spot.price_at_or_before(ts),
+            ) && p.is_finite()
+                && s.is_finite()
+            {
+                diffs.push(p - s);
+            }
+            ts += sample_dt_ns;
+        }
+        if diffs.len() < MIN_BASIS_SAMPLES {
+            return None;
+        }
+        diffs.sort_by(|a, b| a.total_cmp(b));
+        let n = diffs.len();
+        Some(if n % 2 == 1 {
+            diffs[n / 2]
+        } else {
+            0.5 * (diffs[n / 2 - 1] + diffs[n / 2])
+        })
+    }
 }
 
 /// Everything an exogenous signal may see at one decision instant.
@@ -102,6 +141,9 @@ pub struct ExoState<'a> {
     pub spot: &'a SpotHistory,
     /// Perp complex (None when not loaded; features must degrade gracefully).
     pub perp: Option<&'a PerpState>,
+    /// Cross-asset reference spot (e.g. BTCUSDT when trading ETH markets).
+    /// None when not loaded; features must degrade gracefully.
+    pub ref_spot: Option<&'a SpotHistory>,
     pub market: MarketMeta,
     pub now_ns: i64,
 }
@@ -147,6 +189,7 @@ mod tests {
         let s = ExoState {
             spot: &spot,
             perp: None,
+            ref_spot: None,
             market: meta(0, 300_000_000_000),
             now_ns: 400_000_000_000,
         };
@@ -160,6 +203,7 @@ mod tests {
         let s = ExoState {
             spot: &spot,
             perp: None,
+            ref_spot: None,
             market: meta(0, 300_000_000_000),
             now_ns: 150_000_000_000,
         };
@@ -169,10 +213,70 @@ mod tests {
         let early = ExoState {
             spot: &spot,
             perp: None,
+            ref_spot: None,
             market: meta(0, 300_000_000_000),
             now_ns: -100_000_000_000,
         };
         assert_eq!(early.tau_fraction(), 1.0);
+    }
+
+    fn tick(ts_s: i64, price: f64) -> SpotTick {
+        SpotTick {
+            ts_ns: ts_s * 1_000_000_000,
+            price,
+            quantity: 1.0,
+            is_buyer_maker: false,
+        }
+    }
+
+    #[test]
+    fn median_basis_recovers_constant_offset() {
+        // Perp prints a constant +25.0 over spot: the median basis is +25
+        // regardless of the common level path.
+        let spot = SpotHistory::new((0..120).map(|s| tick(s, 100_000.0 + s as f64)).collect());
+        let perp = PerpState {
+            trades: SpotHistory::new(
+                (0..120).map(|s| tick(s, 100_025.0 + s as f64)).collect(),
+            ),
+            ..Default::default()
+        };
+        let b = perp
+            .median_basis_abs(&spot, 100 * 1_000_000_000, 60 * 1_000_000_000, 1_000_000_000)
+            .unwrap();
+        assert!((b - 25.0).abs() < 1e-9, "got {b}");
+    }
+
+    #[test]
+    fn median_basis_robust_to_outlier() {
+        // One wild perp print should not move the median.
+        let spot = SpotHistory::new((0..120).map(|s| tick(s, 100_000.0)).collect());
+        let mut perp_ticks: Vec<SpotTick> = (0..120).map(|s| tick(s, 100_010.0)).collect();
+        perp_ticks[60].price = 150_000.0; // one-second spike
+        let perp = PerpState {
+            trades: SpotHistory::new(perp_ticks),
+            ..Default::default()
+        };
+        let b = perp
+            .median_basis_abs(&spot, 100 * 1_000_000_000, 60 * 1_000_000_000, 1_000_000_000)
+            .unwrap();
+        assert!((b - 10.0).abs() < 1e-9, "got {b}");
+    }
+
+    #[test]
+    fn median_basis_none_when_insufficient() {
+        let spot = SpotHistory::new(vec![tick(0, 100.0)]);
+        let perp = PerpState::default();
+        assert_eq!(
+            perp.median_basis_abs(&spot, 100_000_000_000, 60_000_000_000, 1_000_000_000),
+            None
+        );
+        // Degenerate windows return None.
+        let perp2 = PerpState {
+            trades: SpotHistory::new(vec![tick(0, 100.0)]),
+            ..Default::default()
+        };
+        assert_eq!(perp2.median_basis_abs(&spot, 100_000_000_000, 0, 1_000_000_000), None);
+        assert_eq!(perp2.median_basis_abs(&spot, 100_000_000_000, 60_000_000_000, 0), None);
     }
 
     #[test]
@@ -193,6 +297,7 @@ mod tests {
         let s = ExoState {
             spot: &spot,
             perp: None,
+            ref_spot: None,
             market: meta(0, 300_000_000_000),
             now_ns: 20,
         };

@@ -202,6 +202,16 @@ enum Cmd {
         infer_outcome: bool,
         #[arg(long, default_value = "1800")]
         vol_lookback_s: u32,
+        /// Vol estimator feeding the fair value:
+        /// realized | ewma | blend | seasonal | jump_robust.
+        #[arg(long, default_value = "realized")]
+        vol_estimator: String,
+        /// EWMA half-life in seconds (--vol-estimator ewma only).
+        #[arg(long, default_value = "1200")]
+        ewma_halflife_s: f64,
+        /// Fast realized window in seconds (--vol-estimator blend only).
+        #[arg(long, default_value = "300")]
+        vol_fast_window_s: u32,
         /// 0 disables the momentum drift term (base model).
         #[arg(long, default_value = "0")]
         momentum_lookback_s: u32,
@@ -1256,6 +1266,9 @@ async fn main() -> Result<()> {
             tail_frac,
             infer_outcome,
             vol_lookback_s,
+            vol_estimator,
+            ewma_halflife_s,
+            vol_fast_window_s,
             momentum_lookback_s,
             momentum_weight,
             out_json,
@@ -1318,6 +1331,9 @@ async fn main() -> Result<()> {
                     tail_frac,
                     infer_outcome,
                     vol_lookback_s,
+                    vol_estimator,
+                    ewma_halflife_s,
+                    vol_fast_window_s,
                     momentum_lookback_s,
                     momentum_weight,
                     out_json,

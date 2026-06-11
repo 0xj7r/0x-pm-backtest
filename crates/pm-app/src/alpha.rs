@@ -5,7 +5,7 @@
 use anyhow::{Context, Result, anyhow};
 use futures::StreamExt;
 use pm_alpha::harness::{BookTick, EntryMode, HarnessConfig, HuntReport, MarketRunOutput, MarketSeries, aggregate, run_market_grid};
-use pm_alpha::{AlphaModel, AlphaModelConfig, ExoCalibrator, MarketMeta, Token, TrainingConfig, TrainingSample};
+use pm_alpha::{AlphaModel, AlphaModelConfig, ExoCalibrator, MarketMeta, Token, TrainingConfig, TrainingSample, VolEstimator};
 use pm_telonex_loader::TelonexStore;
 use pm_types::MarketId;
 use std::io::{BufRead, BufReader};
@@ -50,6 +50,12 @@ pub struct AlphaArgs {
     /// missing/Unknown (skips markets whose final mid is ambiguous).
     pub infer_outcome: bool,
     pub vol_lookback_s: u32,
+    /// Vol estimator: realized | ewma | blend | seasonal | jump_robust.
+    pub vol_estimator: String,
+    /// EWMA half-life in seconds (ewma estimator only).
+    pub ewma_halflife_s: f64,
+    /// Fast window in seconds (blend estimator only).
+    pub vol_fast_window_s: u32,
     pub momentum_lookback_s: u32,
     pub momentum_weight: f64,
     pub out_json: Option<PathBuf>,
@@ -234,6 +240,79 @@ fn build_ticks(
         .collect()
 }
 
+/// Per-date hour-of-day (UTC) vol factor tables for the seasonal estimator,
+/// learned from the 7 days before each date (leakage-free by construction).
+type SeasonalTables = std::collections::HashMap<String, [f64; 24]>;
+
+async fn hourly_vols_for_day(
+    store: &TelonexStore,
+    spot_cache: &mut SpotCache,
+    symbol: &str,
+    date: &str,
+) -> [Option<f64>; 24] {
+    let Ok(day) = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d") else {
+        return [None; 24];
+    };
+    let day_start_s = day.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp();
+    let Ok(Some(raw)) = spot_cache.load_raw_day(store, symbol, date, false).await else {
+        return [None; 24];
+    };
+    let hist = pm_types::SpotHistory::new(raw.as_ref().clone());
+    std::array::from_fn(|h| {
+        let now_ns = (day_start_s + (h as i64 + 1) * 3600) * 1_000_000_000;
+        // Bar choice is irrelevant: factors are ratios, bar scaling cancels.
+        pm_alpha::vol::realized_vol_bps_over_bar(&hist, now_ns, 3600, 1, 300)
+    })
+}
+
+async fn build_seasonal_tables(
+    store: &TelonexStore,
+    spot_cache: &mut SpotCache,
+    symbol: &str,
+    dates: &[String],
+) -> Result<SeasonalTables> {
+    const DAYS: i64 = 7;
+    const MIN_DAYS_PER_HOUR: usize = 3;
+    let mut hourly: std::collections::HashMap<String, [Option<f64>; 24]> = Default::default();
+    let mut tables = SeasonalTables::new();
+    for date in dates {
+        let d0 = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+            .with_context(|| format!("parse market date {date}"))?;
+        let mut by_hour: [Vec<f64>; 24] = std::array::from_fn(|_| Vec::new());
+        for k in 1..=DAYS {
+            let p = (d0 - chrono::Duration::days(k)).format("%Y-%m-%d").to_string();
+            let vols = match hourly.get(&p) {
+                Some(v) => *v,
+                None => {
+                    let v = hourly_vols_for_day(store, spot_cache, symbol, &p).await;
+                    hourly.insert(p, v);
+                    v
+                }
+            };
+            for (h, v) in vols.iter().enumerate() {
+                if let Some(v) = v {
+                    by_hour[h].push(*v);
+                }
+            }
+        }
+        let all: Vec<f64> = by_hour.iter().flatten().copied().collect();
+        let mut factors = [1.0_f64; 24];
+        if !all.is_empty() {
+            let grand = all.iter().sum::<f64>() / all.len() as f64;
+            if grand > 0.0 {
+                for (h, samples) in by_hour.iter().enumerate() {
+                    if samples.len() >= MIN_DAYS_PER_HOUR {
+                        let m = samples.iter().sum::<f64>() / samples.len() as f64;
+                        factors[h] = (m / grand).clamp(0.5, 2.0);
+                    }
+                }
+            }
+        }
+        tables.insert(date.clone(), factors);
+    }
+    Ok(tables)
+}
+
 #[derive(Default)]
 struct ProcessCounters {
     n_run: usize,
@@ -265,6 +344,7 @@ async fn process_markets(
     tick_cache_dir: Option<&Path>,
     perp: Option<std::sync::Arc<pm_alpha::PerpState>>,
     xasset_symbol: Option<&str>,
+    seasonal_tables: Option<&SeasonalTables>,
 ) -> Result<ProcessOutput> {
     let store_inner = store.store();
     let n_cells = latencies_ms.len() * edge_thresholds.len();
@@ -318,6 +398,7 @@ async fn process_markets(
         let spot = spot_by_market[idx].clone();
         let ref_spot = ref_spot_by_market[idx].clone();
         let official_strike = strikes_by_slug.get(&market.slug).copied();
+        let seasonal_factors = seasonal_tables.and_then(|t| t.get(&market.date).copied());
         let market = market.clone();
         let model = model.clone();
         let base_cfg = base_cfg.clone();
@@ -378,6 +459,7 @@ async fn process_markets(
                     perp,
                     infer_outcome,
                     &model,
+                    seasonal_factors,
                     &base_cfg,
                     &latencies,
                     &thresholds,
@@ -424,10 +506,27 @@ fn compute_market(
     perp: Option<std::sync::Arc<pm_alpha::PerpState>>,
     infer_outcome: bool,
     model: &AlphaModel,
+    seasonal_factors: Option<[f64; 24]>,
     base_cfg: &HarnessConfig,
     latencies_ms: &[u64],
     edge_thresholds: &[f64],
 ) -> Item {
+    // Seasonal estimator: swap in this market date's factor table.
+    let model_override;
+    let model = match seasonal_factors {
+        Some(factors) => {
+            model_override = AlphaModel {
+                cfg: AlphaModelConfig {
+                    vol_estimator: VolEstimator::Seasonal { factors },
+                    ..model.cfg
+                },
+                calibrator: model.calibrator.clone(),
+                dir_model: model.dir_model.clone(),
+            };
+            &model_override
+        }
+        None => model,
+    };
     {
         let outcome_label = outcome_label_resolved_yes(&market.outcome);
         if outcome_label.is_none() && !infer_outcome {
@@ -537,9 +636,22 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
     }
     tracing::info!(n = n_considered, "alpha run starting");
 
+    let vol_estimator = match args.vol_estimator.as_str() {
+        "realized" => VolEstimator::Realized,
+        "ewma" => VolEstimator::Ewma { halflife_s: args.ewma_halflife_s },
+        "blend" | "blend_fast_slow" => {
+            VolEstimator::BlendFastSlow { fast_lookback_s: args.vol_fast_window_s }
+        }
+        // Per-date factor tables are computed below and swapped in per market;
+        // the identity table is the fallback for dates without one.
+        "seasonal" => VolEstimator::Seasonal { factors: [1.0; 24] },
+        "jump" | "jump_robust" => VolEstimator::JumpRobust,
+        other => return Err(anyhow!("unknown --vol-estimator {other}")),
+    };
     let model_cfg = AlphaModelConfig {
         vol_lookback_s: args.vol_lookback_s,
         vol_sample_dt_s: 1,
+        vol_estimator,
         momentum_lookback_s: args.momentum_lookback_s,
         momentum_weight: args.momentum_weight,
         xasset_weight: args.xasset_weight,
@@ -571,6 +683,23 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
         train_sample_dt_s: 15,
     };
     let mut spot_cache = SpotCache::default();
+    let seasonal_tables: Option<SeasonalTables> =
+        if matches!(vol_estimator, VolEstimator::Seasonal { .. }) {
+            let symbol = spot_symbol_for_market("auto", &markets[0].slug)
+                .ok()
+                .flatten()
+                .ok_or_else(|| {
+                    anyhow!("seasonal estimator: no spot symbol for {}", markets[0].slug)
+                })?;
+            let mut dates: Vec<String> = markets.iter().map(|m| m.date.clone()).collect();
+            dates.sort();
+            dates.dedup();
+            let t = build_seasonal_tables(store, &mut spot_cache, &symbol, &dates).await?;
+            tracing::info!(n_dates = t.len(), symbol, "seasonal vol factor tables built");
+            Some(t)
+        } else {
+            None
+        };
     let strikes_by_slug: std::collections::HashMap<String, f64> = match &args.strikes {
         Some(path) => {
             let mut m = std::collections::HashMap::new();
@@ -652,6 +781,7 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
             args.tick_cache_dir.as_deref(),
             perp.clone(),
             args.xasset_symbol.as_deref(),
+            seasonal_tables.as_ref(),
         )
         .await?;
         if let Some(path) = &args.dir_samples_out {
@@ -720,6 +850,7 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
         args.tick_cache_dir.as_deref(),
         perp,
         args.xasset_symbol.as_deref(),
+        seasonal_tables.as_ref(),
     )
     .await?;
     if let Some(path) = &args.trades_out {

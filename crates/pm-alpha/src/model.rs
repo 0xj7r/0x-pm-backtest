@@ -10,7 +10,7 @@ use crate::fair_value::{
     FairValueEstimate, FairValueModel, estimate_fair_value, estimate_fair_value_with_momentum,
 };
 use crate::state::ExoState;
-use crate::vol::realized_vol_bps_over_bar;
+use crate::vol::{VolEstimator, vol_bps_over_bar};
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct AlphaModelConfig {
@@ -18,6 +18,10 @@ pub struct AlphaModelConfig {
     pub vol_lookback_s: u32,
     /// Sampling cadence for the vol estimator (seconds).
     pub vol_sample_dt_s: u32,
+    /// Which vol estimator feeds the fair value (default: the original
+    /// equal-weight realized estimator, behavior-identical).
+    #[serde(default)]
+    pub vol_estimator: VolEstimator,
     /// Momentum/drift lookback in seconds; 0 disables the drift term (base model).
     pub momentum_lookback_s: u32,
     /// Scale applied to the momentum return before it enters the drift term.
@@ -37,6 +41,7 @@ impl Default for AlphaModelConfig {
         Self {
             vol_lookback_s: 1800,
             vol_sample_dt_s: 1,
+            vol_estimator: VolEstimator::Realized,
             momentum_lookback_s: 0,
             momentum_weight: 1.0,
             xasset_weight: 0.0,
@@ -106,12 +111,13 @@ fn xasset_drift(state: &ExoState, cfg: &AlphaModelConfig, bar_secs: u32) -> f64 
 pub fn belief(state: &ExoState, cfg: &AlphaModelConfig) -> Option<Belief> {
     let spot_now = state.spot_now()?;
     let bar_secs = state.market.window_secs;
-    let sigma_bar_bps = realized_vol_bps_over_bar(
+    let sigma_bar_bps = vol_bps_over_bar(
         state.spot,
         state.now_ns,
         cfg.vol_lookback_s,
         cfg.vol_sample_dt_s,
         bar_secs,
+        cfg.vol_estimator,
     )?;
 
     let eff_spot = if cfg.perp_price_weight != 0.0 {

@@ -131,3 +131,17 @@ ceiling: the information limit is in the FEATURES. The ML-head-on-DirFeatures
 branch is closed (two honest rejections); directional upside now routes
 through better signal STATE — perp-led belief input and cross-asset
 (BTC-leads-ETH-books) — not better models on the same inputs.
+
+## Appendix 13: Live-vs-replay closure test — PASSED (Jun 10 tape)
+
+Replayed Jun 10 with the champion config (fresh Telonex backfill: 576 book
+files + Binance archive spot) against the shadow's 33 logged entries. Where
+the shadow had warm state: 20/20 market matches, 19/20 side-exact, 13 within
+1s of the replay's decision instant — live and sim are the same machine.
+Non-matches fully decomposed: 5 = stale-binary deadline violators (replay
+correctly refuses; config enforcement), 7 of remaining 8 = entries within
+~45min of a process restart (truncated spot buffer -> off-model vol/beliefs;
+those entries also skewed unprofitable). Fix shipped: warm-up gate (no
+entries until buffer spans vol_lookback). Residual open items: one 18:55
+miss and one 14:58 side flip, individual forensics queued. Micro-pilot
+preconditions now: pace OK, capture OK, marks OK, decision-process identity OK.

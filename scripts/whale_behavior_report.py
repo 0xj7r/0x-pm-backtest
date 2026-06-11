@@ -80,7 +80,7 @@ def main():
             mix["TRADE:" + r["side"]] += 1
     print("\n-- event mix (count / $) --")
     for k in ["TRADE:BUY", "TRADE:SELL", "REDEEM", "MERGE", "SPLIT", "REWARD",
-              "CONVERSION"]:
+              "MAKER_REBATE", "CONVERSION"]:
         if mix.get(k) or usd.get(k):
             print(f"  {k:<11} {mix.get(k, 0):>7}  ${usd.get(k, 0):>12,.0f}")
 

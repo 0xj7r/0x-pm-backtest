@@ -12,3 +12,4 @@ data/prepared/
 data/raw/
 target/
 data/.aws_session.env
+frontier_out/

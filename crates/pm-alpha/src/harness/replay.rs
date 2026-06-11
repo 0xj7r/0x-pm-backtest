@@ -237,6 +237,7 @@ fn execute(
                 t1.won = payout1 > 0.5;
                 t1.exit_price = None;
                 t1.pnl_exit_mid_optimistic = None;
+                t1.exit_filled_at_mid = None;
                 trades.push(TradeRecord {
                     side: opp,
                     decision_ts_ns: d.ts_ns,
@@ -252,6 +253,7 @@ fn execute(
                     mark_60s: None,
                     pnl_exit_mid_optimistic: None,
                     is_completion: true,
+                    exit_filled_at_mid: None,
                 });
                 leg1 = None;
                 continue;
@@ -357,9 +359,77 @@ fn execute(
         let mut exit_fee = 0.0;
         let mut proceeds_pnl = None;
         let mut pnl_exit_mid_optimistic = None;
+        let mut exit_filled_at_mid = None;
         if cfg.exit_after_s > 0 {
             let exit_at_ns = fill_tick.ts_ns + cfg.exit_after_s as i64 * 1_000_000_000;
-            if cfg.exit_at_mid {
+            if cfg.passive_exit_timeout_s > 0 {
+                // Hybrid: rest at the side mid; if no bid crosses within the
+                // timeout, convert to a crossing exit against the book as of
+                // the timeout (NOT the original exit tick).
+                if let Some(rel) = series.ticks[d.tick_idx..]
+                    .iter()
+                    .position(|t| t.ts_ns >= exit_at_ns && t.ts_ns <= close_ns)
+                {
+                    let exit_idx = d.tick_idx + rel;
+                    let exit_tick = &series.ticks[exit_idx];
+                    let deadline_ns =
+                        exit_tick.ts_ns + cfg.passive_exit_timeout_s as i64 * 1_000_000_000;
+                    match side_mid(exit_tick, side) {
+                        Some(level)
+                            if series.ticks[exit_idx..]
+                                .iter()
+                                .take_while(|t| t.ts_ns <= close_ns && t.ts_ns <= deadline_ns)
+                                .any(|t| side_bid(t, side) >= level - 1e-9) =>
+                        {
+                            exit_fee = level * shares * cfg.taker_fee_bps / 10_000.0;
+                            proceeds_pnl = Some(shares * (level - avg_price));
+                            exit_price = Some(level);
+                            exit_filled_at_mid = Some(true);
+                        }
+                        Some(_) => {
+                            // Timed out: cross at the first tick past the
+                            // deadline; settle if none remains.
+                            exit_filled_at_mid = Some(false);
+                            if let Some(conv_tick) = series.ticks[exit_idx..]
+                                .iter()
+                                .find(|t| t.ts_ns >= deadline_ns && t.ts_ns <= close_ns)
+                                && let Some((px, sold)) = sell_fill(
+                                    conv_tick,
+                                    side,
+                                    shares,
+                                    cfg.depth_capture_frac,
+                                    cfg.skip_touch_level,
+                                )
+                            {
+                                exit_fee = px * sold * cfg.taker_fee_bps / 10_000.0;
+                                let remainder = (shares - sold).max(0.0);
+                                proceeds_pnl = Some(
+                                    sold * (px - avg_price) + remainder * (payout - avg_price),
+                                );
+                                exit_price = Some(px);
+                            }
+                        }
+                        None => {
+                            // No mid to rest at: champion crossing exit at
+                            // the original exit tick.
+                            if let Some((px, sold)) = sell_fill(
+                                exit_tick,
+                                side,
+                                shares,
+                                cfg.depth_capture_frac,
+                                cfg.skip_touch_level,
+                            ) {
+                                exit_fee = px * sold * cfg.taker_fee_bps / 10_000.0;
+                                let remainder = (shares - sold).max(0.0);
+                                proceeds_pnl = Some(
+                                    sold * (px - avg_price) + remainder * (payout - avg_price),
+                                );
+                                exit_price = Some(px);
+                            }
+                        }
+                    }
+                }
+            } else if cfg.exit_at_mid {
                 if let Some(rel) = series.ticks[d.tick_idx..]
                     .iter()
                     .position(|t| t.ts_ns >= exit_at_ns && t.ts_ns <= close_ns)
@@ -424,6 +494,7 @@ fn execute(
             mark_60s,
             pnl_exit_mid_optimistic,
             is_completion: false,
+            exit_filled_at_mid,
         });
         if pair_completion && !first_entry_done {
             first_entry_done = true;
@@ -479,6 +550,7 @@ fn execute(
                     mark_60s: None,
                     pnl_exit_mid_optimistic: None,
                     is_completion: false,
+                    exit_filled_at_mid: None,
                 });
             }
         }

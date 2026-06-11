@@ -112,6 +112,13 @@ pub struct HarnessConfig {
     /// bound is recorded alongside in `pnl_exit_mid_optimistic`.
     #[serde(default)]
     pub exit_at_mid: bool,
+    /// Hybrid passive exit: rest an ask at the side mid at the exit horizon;
+    /// if no bid crosses the level within this many seconds, convert to the
+    /// champion spread-crossing exit against the book as of the timeout
+    /// (settle at resolution if no tick remains). 0 disables (champion
+    /// behavior). Takes precedence over `exit_at_mid`.
+    #[serde(default)]
+    pub passive_exit_timeout_s: u32,
     /// Pair completion: after the first entry (cost C1, S1 shares), buy the
     /// opposite token when its ask <= 1 - C1 - margin (S1 shares, once per
     /// market); both legs then hold to resolution, netting the locked
@@ -156,6 +163,7 @@ impl Default for HarnessConfig {
             stop_before_close_s: 10,
             exit_after_s: 0,
             exit_at_mid: false,
+            passive_exit_timeout_s: 0,
             pair_completion_margin: 0.0,
             skip_calm: false,
             only_calm: false,
@@ -216,6 +224,11 @@ pub struct TradeRecord {
     /// True for a pair-completion leg (opposite-side buy locking the pair).
     #[serde(default)]
     pub is_completion: bool,
+    /// Hybrid passive exit outcome: Some(true) = the resting mid ask filled
+    /// (maker); Some(false) = timed out and converted to a crossing exit (or
+    /// settled when no tick remained); None = hybrid off or no exit horizon.
+    #[serde(default)]
+    pub exit_filled_at_mid: Option<bool>,
 }
 
 /// A probability sample at a fixed checkpoint, for log-loss scoring of the

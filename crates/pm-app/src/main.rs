@@ -167,6 +167,11 @@ enum Cmd {
         /// per trade in --trades-out.
         #[arg(long)]
         exit_at_mid: bool,
+        /// Hybrid passive exit: rest at the side mid at the exit horizon and
+        /// convert to a spread-crossing exit after this many seconds unfilled
+        /// (0 = disabled = champion crossing exit).
+        #[arg(long, default_value = "0")]
+        passive_exit_timeout_s: u32,
         /// Pair completion: buy the opposite token when its ask locks at
         /// least this margin against leg 1's cost (0 disables).
         #[arg(long, default_value = "0")]
@@ -1230,6 +1235,7 @@ async fn main() -> Result<()> {
             clip_cooldown_ms,
             exit_after_s,
             exit_at_mid,
+            passive_exit_timeout_s,
             pair_completion_margin,
             skip_calm,
             only_calm,
@@ -1288,6 +1294,7 @@ async fn main() -> Result<()> {
                     clip_cooldown_ms,
                     exit_after_s,
                     exit_at_mid,
+                    passive_exit_timeout_s,
                     pair_completion_margin,
                     skip_calm,
                     only_calm,

@@ -542,6 +542,74 @@ mod tests {
     }
 
     #[test]
+    fn hybrid_passive_exit_fills_at_mid_or_converts_at_the_timeout_book() {
+        // Entry YES at 0.52 (fill ~t=2050), exit horizon 30s (t=2080),
+        // resting ask at the 0.51 mid with a 10s timeout (t=2090).
+        let spot = spot_with_jump(2400, 2050);
+        let open_s = 2000_i64;
+        let close_s = 2300_i64;
+        let meta = MarketMeta {
+            token: Token::Btc,
+            window_secs: 300,
+            open_ts_ns: open_s * 1_000_000_000,
+            close_ts_ns: close_s * 1_000_000_000,
+            strike: 100_000.0,
+        };
+        let cfg = HarnessConfig {
+            latency_ms: 0,
+            exit_after_s: 30,
+            passive_exit_timeout_s: 10,
+            ..HarnessConfig::default()
+        };
+        let mk = |ticks: Vec<BookTick>| MarketSeries {
+            meta,
+            resolved_yes: false,
+            ticks,
+            date: "2026-05-01".into(),
+        };
+
+        // Case 1: the book lifts to 0.60/0.62 at t=2085, inside the timeout
+        // window -> the resting ask fills at OUR level (the 0.51 mid).
+        let lifted = mk((open_s..close_s)
+            .map(|s| if s < 2085 { book_tick(s, 0.50, 0.52) } else { book_tick(s, 0.60, 0.62) })
+            .collect());
+        let out = run_market(&lifted, &spot, &AlphaModel::default(), &cfg);
+        let t = &out.trades[0];
+        assert_eq!(t.exit_filled_at_mid, Some(true));
+        assert!((t.exit_price.unwrap() - 0.51).abs() < 1e-6, "maker fill at the mid");
+
+        // Case 2: the book DROPS to 0.40/0.42 at t=2085 -> never crosses
+        // 0.51; at the timeout we convert and cross against the book as of
+        // t=2090 (bid 0.40), NOT the original exit tick's 0.50 bid.
+        let dropped = mk((open_s..close_s)
+            .map(|s| if s < 2085 { book_tick(s, 0.50, 0.52) } else { book_tick(s, 0.40, 0.42) })
+            .collect());
+        let out = run_market(&dropped, &spot, &AlphaModel::default(), &cfg);
+        let t = &out.trades[0];
+        assert_eq!(t.exit_filled_at_mid, Some(false));
+        assert!(
+            (t.exit_price.unwrap() - 0.40).abs() < 1e-6,
+            "conversion crosses the timeout-time book: {:?}",
+            t.exit_price
+        );
+        let expected = (50.0 / 0.52) * (0.40 - 0.52);
+        assert!((t.pnl - expected).abs() < 0.1, "pnl ~{expected}: {}", t.pnl);
+
+        // Case 3: flat book to the end -> conversion sells at the unchanged
+        // 0.50 bid, matching the champion crossing exit exactly.
+        let flat = mk((open_s..close_s).map(|s| book_tick(s, 0.50, 0.52)).collect());
+        let hybrid = run_market(&flat, &spot, &AlphaModel::default(), &cfg);
+        let champion = run_market(
+            &flat,
+            &spot,
+            &AlphaModel::default(),
+            &HarnessConfig { passive_exit_timeout_s: 0, ..cfg },
+        );
+        assert_eq!(hybrid.trades[0].exit_filled_at_mid, Some(false));
+        assert!((hybrid.trades[0].pnl - champion.trades[0].pnl).abs() < 1e-9);
+    }
+
+    #[test]
     fn exit_at_mid_conditional_fill_requires_a_crossing_bid() {
         // Belief is wrong-confident (spot jump the book ignores), entry YES
         // at 0.52, exit horizon 30s, resting ask at the 0.51 mid.
@@ -719,7 +787,12 @@ mod tests {
                 &series,
                 &spot,
                 &model,
-                &HarnessConfig { exit_at_mid: false, pair_completion_margin: 0.0, ..base },
+                &HarnessConfig {
+                    exit_at_mid: false,
+                    passive_exit_timeout_s: 0,
+                    pair_completion_margin: 0.0,
+                    ..base
+                },
             )
             .trades,
         )

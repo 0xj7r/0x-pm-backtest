@@ -2,8 +2,13 @@
   "model_cfg": {
     "vol_lookback_s": 3600,
     "vol_sample_dt_s": 1,
+    "vol_estimator": {
+      "kind": "realized"
+    },
     "momentum_lookback_s": 0,
-    "momentum_weight": 1.0
+    "momentum_weight": 1.0,
+    "xasset_weight": 0.0,
+    "perp_price_weight": 0.0
   },
   "harness_cfg": {
     "latency_ms": 150,
@@ -16,6 +21,9 @@
     "decision_dt_ms": 1000,
     "stop_before_close_s": 90,
     "exit_after_s": 30,
+    "exit_at_mid": false,
+    "passive_exit_timeout_s": 0,
+    "pair_completion_margin": 0.0,
     "skip_calm": false,
     "only_calm": false,
     "entry_mode": "Fade",

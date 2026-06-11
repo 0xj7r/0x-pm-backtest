@@ -55,3 +55,28 @@ directional-taker families. Findings:
   trend). Final; do not revisit as a belief term.
 - Aligned sleeve adoption needs a fresh trend-regime holdout (June 8-14 or
   forward shadow) — May 19-28 is the wrong exam for a trend-only sleeve.
+
+## Parallel research program results (4 agents, tune-window + one-shot test verifications)
+
+VERIFIED UPGRADE — perp-led state (perp_price_weight 0.5, basis-adjusted blend):
+tune +17% Sharpe 3.10 12/12 green; TEST +21.8% ($12,305 vs $10,101), Sharpe
+1.88 vs 1.64, worst day +$531 vs +$273, better 9/10 days. Promotion plan:
+pilot runs frozen spot-only champion; perp-led runs in SHADOW (needs futures
+WS feed) and promotes with the $1k step-up after both validate.
+
+REJECTED with mechanisms understood (all engineering retained, defaults off):
+- blend_fast_slow vol: tune +4.4% did not verify (test Sharpe 1.43 vs 1.64)
+- cross-asset BTC->ETH drift: monotone degradation (continuation drift fights
+  the mean-reversion edge — same lesson as the momentum belief)
+- pair-completion: forecloses the convergence the edge monetizes (locks ~$6
+  vs the exit's ~$9.7); whale-style completion incompatible with timed exits
+- naive passive exits: 9% unfilled tail (-$8.8k) swamps maker gain (+$2.6k)
+- hybrid rest-then-cross: the conversion is the champion exit N seconds late
+  on the adversely-selected set; monotone in N, champion dominates the family
+- term-structure RV 5m/15m: dislocations frequent but thin/brief; apparent
+  edge lives in unfillable quotes; fat left tail; NO-BUILD
+- jump-robust vol: decisively worse — 1s jumps are signal at 5m resolution
+
+Cross-confirmed twice: where real size is quoted the book beats our model;
+the edge is the 150ms staleness window, not superior modeling. Calibration
+gap to the book is strike/drift/distribution-shape, not sigma.

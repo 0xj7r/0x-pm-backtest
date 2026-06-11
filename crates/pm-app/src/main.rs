@@ -159,6 +159,10 @@ enum Cmd {
         /// Max laddered clip entries per market.
         #[arg(long, default_value = "1")]
         max_clips: u32,
+        /// Entry fills walk depth only while each level retains this much
+        /// edge vs the belief (0 = unconditional; live limit = belief-floor).
+        #[arg(long, default_value = "0.0")]
+        min_marginal_edge: f64,
         /// Minimum ms between clip entries.
         #[arg(long, default_value = "5000")]
         clip_cooldown_ms: u64,
@@ -1258,6 +1262,7 @@ async fn main() -> Result<()> {
             skip_touch_level,
             decision_dt_ms,
             stop_before_close_s,
+            min_marginal_edge,
             max_clips,
             clip_cooldown_ms,
             exit_after_s,
@@ -1323,6 +1328,7 @@ async fn main() -> Result<()> {
                     skip_touch_level,
                     decision_dt_ms,
                     stop_before_close_s,
+                    min_marginal_edge,
                     max_clips,
                     clip_cooldown_ms,
                     exit_after_s,

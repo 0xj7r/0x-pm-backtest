@@ -337,12 +337,14 @@ fn execute(
             continue;
         };
 
+        let entry_cap = (cfg.min_marginal_edge > 0.0).then(|| p_side - cfg.min_marginal_edge);
         let Some((avg_price, shares)) = fill(
             fill_tick,
             side,
             notional,
             cfg.depth_capture_frac,
             cfg.skip_touch_level,
+            entry_cap,
         ) else {
             continue;
         };
@@ -531,6 +533,7 @@ fn execute(
                     cfg.notional_usdc * cfg.tail_frac,
                     cfg.depth_capture_frac,
                     cfg.skip_touch_level,
+                    None,
                 )
             {
                 let tail_fee = tail_price * tail_shares * cfg.taker_fee_bps / 10_000.0;
@@ -794,6 +797,7 @@ fn fill(
     notional: f64,
     capture_frac: f64,
     skip_touch: bool,
+    max_price: Option<f64>,
 ) -> Option<(f64, f64)> {
     let levels: Vec<(f64, f64)> = match side {
         Side::Yes => tick
@@ -832,6 +836,11 @@ fn fill(
     for (price, size) in levels {
         if remaining <= 1e-9 || price <= 0.0 {
             break;
+        }
+        if let Some(cap) = max_price
+            && price > cap
+        {
+            break; // marginal edge below the floor: leave the rest
         }
         let level_notional = price * size * capture;
         let take = remaining.min(level_notional);

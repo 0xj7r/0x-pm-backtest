@@ -139,6 +139,10 @@ pub struct HarnessConfig {
     pub tail_max_price: f64,
     /// Tail hedge notional as a fraction of the main clip.
     pub tail_frac: f64,
+    /// Entry fills walk depth only while the marginal level retains at
+    /// least this much edge vs the belief (0 = walk unconditionally). Sets
+    /// the live marketable-limit price: belief - floor.
+    pub min_marginal_edge: f64,
     /// Max laddered clip entries per market (1 = single entry).
     pub max_clips: u32,
     /// Minimum time between clip entries.
@@ -171,6 +175,7 @@ impl Default for HarnessConfig {
             align_min_mid: 0.55,
             tail_max_price: 0.0,
             tail_frac: 0.25,
+            min_marginal_edge: 0.0,
             max_clips: 1,
             clip_cooldown_ms: 5000,
             collect_training: false,

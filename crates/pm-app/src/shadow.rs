@@ -598,6 +598,16 @@ impl ShadowCore {
     /// the first crossing of `edge_threshold`. Call at ~1s cadence.
     pub fn decide(&mut self, now_ns: i64) -> Vec<LogEvent> {
         let spot = self.spot_history();
+        // Warm-up gate: with a partially-filled buffer (post-restart) the
+        // vol estimate runs on a truncated window and produces off-model
+        // beliefs the full-history replay would never hold. Stand down
+        // until the buffer spans the vol lookback.
+        match (self.spot.front(), self.spot.back()) {
+            (Some(first), Some(last))
+                if last.ts_ns - first.ts_ns
+                    >= self.cfg.vol_lookback_s as i64 * 1_000_000_000 => {}
+            _ => return Vec::new(),
+        }
         let mut out = Vec::new();
         let mut entries: Vec<PendingTrade> = Vec::new();
 
@@ -2191,6 +2201,21 @@ mod tests {
         // Ring evicted id=1; re-arrival counts as new (acceptable: trade ids
         // this stale never race between live connections).
         assert!(d.first_arrival(1));
+    }
+
+    #[test]
+    fn warmup_gate_blocks_entries_until_buffer_spans_lookback() {
+        // Buffer covering less than vol_lookback_s: stand down even with a
+        // huge edge on the books (the post-restart off-model regime).
+        let mut core = ShadowCore::new(cfg());
+        let mut price = 99_000.0;
+        for s in 1000..2000i64 {
+            core.push_spot(s * 1_000, s * 1_000 + 25, price, 1.0, false);
+            price *= if s % 2 == 0 { 1.0001 } else { 0.9999 };
+        }
+        core.upsert_market(market(Some(99_000.0)));
+        set_books(&mut core, 0.10, 0.95);
+        assert!(core.decide(1900 * NS).is_empty(), "warmup gate must block");
     }
 
     #[test]

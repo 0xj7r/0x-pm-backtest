@@ -166,7 +166,12 @@ mod tests {
     fn output(pnl: f64, won: bool, p_exo: f64, p_book: f64) -> MarketRunOutput {
         MarketRunOutput {
             trades: vec![TradeRecord {
-            sigma_bar_bps: 0.0,
+                sigma_bar_bps: 0.0,
+                side_ask_at_decision: 0.0,
+                trail_min_ask_10s: None,
+                trail_min_ask_20s: None,
+                trail_min_ask_40s: None,
+                stable_entry: true,
                 side: Side::Yes,
                 decision_ts_ns: 0,
                 fill_ts_ns: 0,

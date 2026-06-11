@@ -45,6 +45,10 @@ pub struct AlphaArgs {
     /// seconds (0 = disabled).
     pub enter_within_close_s: u32,
     pub max_entry_sigma_bps: f64,
+    /// Pre-entry stability gate window in seconds (0 = off).
+    pub entry_stability_s: u32,
+    /// Tolerance on the stability gate's trailing-min comparison.
+    pub stability_eps: f64,
     pub min_marginal_edge: f64,
     pub max_clips: u32,
     pub clip_cooldown_ms: u64,
@@ -685,6 +689,8 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
         stop_before_close_s: args.stop_before_close_s,
         enter_within_close_s: args.enter_within_close_s,
         max_entry_sigma_bps: args.max_entry_sigma_bps,
+        entry_stability_s: args.entry_stability_s,
+        stability_eps: args.stability_eps,
         min_marginal_edge: args.min_marginal_edge,
         max_clips: args.max_clips,
         clip_cooldown_ms: args.clip_cooldown_ms,
@@ -886,6 +892,11 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
                     "open_ts_ns": meta.open_ts_ns, "strike": meta.strike,
                     "regime": out.regime.map(|r| r.as_str()),
                     "sigma_bar_bps": t.sigma_bar_bps,
+                    "side_ask_at_decision": t.side_ask_at_decision,
+                    "trail_min_ask_10s": t.trail_min_ask_10s,
+                    "trail_min_ask_20s": t.trail_min_ask_20s,
+                    "trail_min_ask_40s": t.trail_min_ask_40s,
+                    "stable_entry": t.stable_entry,
                     "side": t.side, "decision_ts_ns": t.decision_ts_ns,
                     "fill_ts_ns": t.fill_ts_ns, "avg_price": t.avg_price,
                     "shares": t.shares, "p_exo": t.p_exo,

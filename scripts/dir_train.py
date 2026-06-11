@@ -90,5 +90,65 @@ def main():
         print(f"\nmodel written: {sys.argv[2]}")
 
 
+def fit_stumps(X, y, rounds=150, lr=0.3, n_bins=32):
+    """Gradient-boosted depth-1 stumps on logistic loss (pure numpy)."""
+    n, k = X.shape
+    f = np.full(n, np.log(y.mean() / (1 - y.mean())))
+    stumps = []
+    # Pre-compute candidate thresholds per feature (quantile bins).
+    cuts = [np.unique(np.quantile(X[:, j], np.linspace(0.02, 0.98, n_bins))) for j in range(k)]
+    for _ in range(rounds):
+        p = 1 / (1 + np.exp(-f))
+        g = y - p  # negative gradient
+        best = None
+        for j in range(k):
+            xj = X[:, j]
+            for c in cuts[j]:
+                m = xj <= c
+                nl, nr = m.sum(), n - m.sum()
+                if nl < 200 or nr < 200:
+                    continue
+                gl, gr = g[m].mean(), g[~m].mean()
+                gain = nl * gl * gl + nr * gr * gr
+                if best is None or gain > best[0]:
+                    best = (gain, j, c, gl, gr)
+        if best is None:
+            break
+        _, j, c, gl, gr = best
+        f = f + lr * np.where(X[:, j] <= c, gl, gr)
+        stumps.append((j, c, lr * gl, lr * gr))
+    return stumps, f
+
+
+def predict_stumps(stumps, base, X):
+    f = np.full(len(X), base)
+    for j, c, vl, vr in stumps:
+        f = f + np.where(X[:, j] <= c, vl, vr)
+    return 1 / (1 + np.exp(-f))
+
+
+def main_stumps():
+    d = sys.argv[2]
+    Xtr, ytr, Xte, yte = load(d)
+    print(f"train {len(ytr):,} test {len(yte):,} base {yte.mean():.3f}")
+    stumps, _ = fit_stumps(Xtr, ytr)
+    base = np.log(ytr.mean() / (1 - ytr.mean()))
+    pte = predict_stumps(stumps, base, Xte)
+    eps = 1e-9
+    ll = -np.mean(yte * np.log(pte + eps) + (1 - yte) * np.log(1 - pte + eps))
+    pb = yte.mean()
+    llb = -(pb * np.log(pb) + (1 - pb) * np.log(1 - pb))
+    print(f"stumps({len(stumps)}) Apr OOS log-loss {ll:.4f} vs base {llb:.4f} (linear was 0.6279)")
+    print(f"prob range: p1={np.quantile(pte,0.01):.3f} p99={np.quantile(pte,0.99):.3f} (linear capped ~0.85)")
+    order = np.argsort(-pte)
+    n = len(pte)
+    for k in range(10):
+        idx = order[k * n // 10:(k + 1) * n // 10]
+        print(f"  decile {k+1:2d}: predicted {pte[idx].mean():.3f} realized {yte[idx].mean():.3f}")
+
+
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 2 and sys.argv[1] == "stumps":
+        main_stumps()
+    else:
+        main()

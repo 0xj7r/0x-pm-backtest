@@ -121,3 +121,13 @@ Full June rerun with official crypto-price strikes (8,308 windows backfilled, Ma
 ## Appendix 11: Exit-timing sweep — no change (champion stays 30s)
 
 Tune sweep {10,20,30,45,60,90,120s,hold} (May 7-18): EV peaks at 30s ($20,339); a Sharpe spike at 90s (3.87, daily sd 414) prompted the one-shot test verification. Test (May 19-28): 30s $10,101/Sharpe 1.64 vs 90s $11,071/1.68 — statistically indistinguishable; the tune-window variance edge did not reproduce (winner's curse across 8 evaluated cells). Champion remains exit-30s. Durable findings: the EV curve is a flat plateau ~20-90s (exit timing is a robust parameter, not a fragile knob), hold-to-resolution remains dominated (Sharpe 1.65, worst structure), and convergence-triggered exits lose motivation (nothing to harvest on a flat plateau). Passive/resting exits remain the one exit-side iteration with a real prize. Clamp check: only 1/2,090 exits hit the close under 90s-exit (no artifact).
+
+## Appendix 12: Continuation head, nonlinear — branch closed
+
+Boosted stumps (150 rounds, depth-1, Feb-Mar train / Apr OOS) on the 14 dir
+features: log-loss 0.6240 vs linear 0.6279 — marginal — and the probability
+range did NOT widen (p99 0.834 vs linear ~0.85). Two model classes, same
+ceiling: the information limit is in the FEATURES. The ML-head-on-DirFeatures
+branch is closed (two honest rejections); directional upside now routes
+through better signal STATE — perp-led belief input and cross-asset
+(BTC-leads-ETH-books) — not better models on the same inputs.

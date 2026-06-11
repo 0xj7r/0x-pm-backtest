@@ -203,6 +203,11 @@ fn execute(
     let mut n_clips = 0usize;
     let mut leg1: Option<OpenLeg> = None;
     let mut first_entry_done = false;
+    // Event-based re-entry: disarmed after each entry; re-armed only once a
+    // later decision shows the dislocation closed (both edges below the
+    // re-arm level). Inert when rearm_edge is 0.
+    let rearm_active = cfg.rearm_edge > 0.0;
+    let mut armed = true;
 
     for d in &pass.decisions {
         // Pair completion: buy the opposite token once its ask locks at
@@ -269,9 +274,6 @@ fn execute(
             }
             break;
         }
-        if d.ts_ns < next_entry_ns {
-            continue;
-        }
         // Aligned runs with a continuation model trade ITS belief, and only
         // when a move is in progress; the fade keeps the exogenous belief.
         let p_up = match (cfg.entry_mode, d.dir_p_up) {
@@ -282,6 +284,17 @@ fn execute(
         // Edge per side against touch prices (entry test; fill walks depth).
         let edge_yes = p_up - d.yes_ask;
         let edge_no = (1.0 - p_up) - d.no_buy; // real NO ask when loaded
+        // Disarmed: watch (even through the cooldown) for the dislocation to
+        // close; only a later threshold crossing may then enter again.
+        if rearm_active && !armed {
+            if edge_yes < cfg.rearm_edge && edge_no < cfg.rearm_edge {
+                armed = true;
+            }
+            continue;
+        }
+        if d.ts_ns < next_entry_ns {
+            continue;
+        }
         let (side, edge) = if edge_yes >= edge_no {
             (Side::Yes, edge_yes)
         } else {
@@ -476,6 +489,9 @@ fn execute(
         let pnl = proceeds_pnl.unwrap_or(shares * (payout - avg_price)) - fee;
         next_entry_ns = d.ts_ns + cooldown_ns;
         n_clips += 1;
+        if rearm_active {
+            armed = false;
+        }
         let mark_60s = series.ticks[d.tick_idx..]
             .iter()
             .find(|t| t.ts_ns >= fill_tick.ts_ns + 60_000_000_000)

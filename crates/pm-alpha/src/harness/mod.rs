@@ -791,6 +791,7 @@ mod tests {
                     exit_at_mid: false,
                     passive_exit_timeout_s: 0,
                     pair_completion_margin: 0.0,
+                    rearm_edge: 0.0,
                     ..base
                 },
             )
@@ -798,6 +799,128 @@ mod tests {
         )
         .unwrap();
         assert_eq!(a, b);
+    }
+
+    /// Persistent dislocation market (book stays stale 0.50/0.52 the whole
+    /// window after a +1% spot jump at 2050s) for re-entry mechanics tests.
+    fn persistent_dislocation() -> (MarketSeries, SpotHistory) {
+        dislocation_market(2300) // never reprices before close
+    }
+
+    #[test]
+    fn rearm_zero_keeps_cooldown_ladder_and_trades_identical() {
+        // rearm_edge = 0 must leave multi-clip laddering exactly as before:
+        // entries spaced by the cooldown into the same persisting
+        // dislocation, and byte-identical trades vs the unset config.
+        let (series, spot) = persistent_dislocation();
+        let model = AlphaModel::default();
+        let base = HarnessConfig {
+            latency_ms: 0,
+            edge_threshold: 0.16,
+            max_clips: 3,
+            clip_cooldown_ms: 20_000,
+            ..HarnessConfig::default()
+        };
+        let out = run_market(&series, &spot, &model, &base);
+        assert_eq!(out.trades.len(), 3, "cooldown ladder fills all clips");
+        for w in out.trades.windows(2) {
+            assert_eq!(
+                w[1].decision_ts_ns - w[0].decision_ts_ns,
+                20_000_000_000,
+                "clips spaced by exactly the cooldown"
+            );
+        }
+        let a = serde_json::to_string(&out.trades).unwrap();
+        let b = serde_json::to_string(
+            &run_market(&series, &spot, &model, &HarnessConfig { rearm_edge: 0.0, ..base })
+                .trades,
+        )
+        .unwrap();
+        assert_eq!(a, b, "rearm_edge=0 is byte-identical");
+    }
+
+    #[test]
+    fn rearm_blocks_reentry_while_dislocation_persists() {
+        // The quote that survives is adversely selected: with a re-arm level
+        // set, a dislocation that never closes yields exactly one entry no
+        // matter how many clips or how short the cooldown.
+        let (series, spot) = persistent_dislocation();
+        let out = run_market(
+            &series,
+            &spot,
+            &AlphaModel::default(),
+            &HarnessConfig {
+                latency_ms: 0,
+                edge_threshold: 0.16,
+                max_clips: 3,
+                clip_cooldown_ms: 1_000,
+                rearm_edge: 0.04,
+                ..HarnessConfig::default()
+            },
+        );
+        assert_eq!(out.trades.len(), 1, "no re-entry into a persisting dislocation");
+    }
+
+    #[test]
+    fn rearm_allows_reentry_after_dislocation_closes_and_reopens() {
+        // Book: stale 0.50/0.52 until 2100s (dislocation open), repriced to
+        // 0.97/0.99 until 2150s (closed: both edges collapse below the
+        // re-arm level), then stale again (a fresh staleness event).
+        let spot = spot_with_jump(2400, 2050);
+        let open_s = 2000_i64;
+        let close_s = 2300_i64;
+        let series = MarketSeries {
+            meta: MarketMeta {
+                token: Token::Btc,
+                window_secs: 300,
+                open_ts_ns: open_s * 1_000_000_000,
+                close_ts_ns: close_s * 1_000_000_000,
+                strike: 100_000.0,
+            },
+            resolved_yes: true,
+            ticks: (open_s..close_s)
+                .map(|s| {
+                    if (2100..2150).contains(&s) {
+                        book_tick(s, 0.97, 0.99)
+                    } else {
+                        book_tick(s, 0.50, 0.52)
+                    }
+                })
+                .collect(),
+            date: "2026-05-01".into(),
+        };
+        let cfg = HarnessConfig {
+            latency_ms: 0,
+            edge_threshold: 0.16,
+            max_clips: 2,
+            clip_cooldown_ms: 1_000,
+            rearm_edge: 0.04,
+            ..HarnessConfig::default()
+        };
+        let out = run_market(&series, &spot, &AlphaModel::default(), &cfg);
+        assert_eq!(out.trades.len(), 2, "re-opened dislocation is enterable");
+        assert!(
+            out.trades[0].decision_ts_ns < 2_100 * 1_000_000_000,
+            "first entry hits the original dislocation"
+        );
+        assert!(
+            out.trades[1].decision_ts_ns >= 2_150 * 1_000_000_000,
+            "re-entry only after close-and-reopen, got {}",
+            out.trades[1].decision_ts_ns
+        );
+        // Without the gate the second clip piles into the same dislocation
+        // one cooldown later.
+        let naive = run_market(
+            &series,
+            &spot,
+            &AlphaModel::default(),
+            &HarnessConfig { rearm_edge: 0.0, ..cfg },
+        );
+        assert_eq!(naive.trades.len(), 2);
+        assert!(
+            naive.trades[1].decision_ts_ns < 2_100 * 1_000_000_000,
+            "naive cooldown re-entry stays in the same event"
+        );
     }
 
     #[test]

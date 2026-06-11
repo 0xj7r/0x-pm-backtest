@@ -161,6 +161,21 @@ enum Cmd {
         /// Exit at the book N seconds after fill (0 = hold to resolution).
         #[arg(long, default_value = "0")]
         exit_after_s: u32,
+        /// Passive exit study: rest an ask at the side mid at the exit
+        /// horizon instead of crossing the spread. P&L uses the exact
+        /// conditional fill; the optimistic always-fills bound is recorded
+        /// per trade in --trades-out.
+        #[arg(long)]
+        exit_at_mid: bool,
+        /// Hybrid passive exit: rest at the side mid at the exit horizon and
+        /// convert to a spread-crossing exit after this many seconds unfilled
+        /// (0 = disabled = champion crossing exit).
+        #[arg(long, default_value = "0")]
+        passive_exit_timeout_s: u32,
+        /// Pair completion: buy the opposite token when its ask locks at
+        /// least this margin against leg 1's cost (0 disables).
+        #[arg(long, default_value = "0")]
+        pair_completion_margin: f64,
         /// Skip entries in calm_low_vol regime.
         #[arg(long)]
         skip_calm: bool,
@@ -1219,6 +1234,9 @@ async fn main() -> Result<()> {
             max_clips,
             clip_cooldown_ms,
             exit_after_s,
+            exit_at_mid,
+            passive_exit_timeout_s,
+            pair_completion_margin,
             skip_calm,
             only_calm,
             aligned_mode,
@@ -1275,6 +1293,9 @@ async fn main() -> Result<()> {
                     max_clips,
                     clip_cooldown_ms,
                     exit_after_s,
+                    exit_at_mid,
+                    passive_exit_timeout_s,
+                    pair_completion_margin,
                     skip_calm,
                     only_calm,
                     aligned_mode,

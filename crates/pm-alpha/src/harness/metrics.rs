@@ -178,6 +178,9 @@ mod tests {
                 won,
                 exit_price: None,
                 mark_60s: None,
+                pnl_exit_mid_optimistic: None,
+                is_completion: false,
+                exit_filled_at_mid: None,
             }],
             samples: vec![ProbSample {
                 ts_ns: 60_000_000_000,

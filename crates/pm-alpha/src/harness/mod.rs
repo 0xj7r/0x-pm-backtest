@@ -542,6 +542,265 @@ mod tests {
     }
 
     #[test]
+    fn hybrid_passive_exit_fills_at_mid_or_converts_at_the_timeout_book() {
+        // Entry YES at 0.52 (fill ~t=2050), exit horizon 30s (t=2080),
+        // resting ask at the 0.51 mid with a 10s timeout (t=2090).
+        let spot = spot_with_jump(2400, 2050);
+        let open_s = 2000_i64;
+        let close_s = 2300_i64;
+        let meta = MarketMeta {
+            token: Token::Btc,
+            window_secs: 300,
+            open_ts_ns: open_s * 1_000_000_000,
+            close_ts_ns: close_s * 1_000_000_000,
+            strike: 100_000.0,
+        };
+        let cfg = HarnessConfig {
+            latency_ms: 0,
+            exit_after_s: 30,
+            passive_exit_timeout_s: 10,
+            ..HarnessConfig::default()
+        };
+        let mk = |ticks: Vec<BookTick>| MarketSeries {
+            meta,
+            resolved_yes: false,
+            ticks,
+            date: "2026-05-01".into(),
+        };
+
+        // Case 1: the book lifts to 0.60/0.62 at t=2085, inside the timeout
+        // window -> the resting ask fills at OUR level (the 0.51 mid).
+        let lifted = mk((open_s..close_s)
+            .map(|s| if s < 2085 { book_tick(s, 0.50, 0.52) } else { book_tick(s, 0.60, 0.62) })
+            .collect());
+        let out = run_market(&lifted, &spot, &AlphaModel::default(), &cfg);
+        let t = &out.trades[0];
+        assert_eq!(t.exit_filled_at_mid, Some(true));
+        assert!((t.exit_price.unwrap() - 0.51).abs() < 1e-6, "maker fill at the mid");
+
+        // Case 2: the book DROPS to 0.40/0.42 at t=2085 -> never crosses
+        // 0.51; at the timeout we convert and cross against the book as of
+        // t=2090 (bid 0.40), NOT the original exit tick's 0.50 bid.
+        let dropped = mk((open_s..close_s)
+            .map(|s| if s < 2085 { book_tick(s, 0.50, 0.52) } else { book_tick(s, 0.40, 0.42) })
+            .collect());
+        let out = run_market(&dropped, &spot, &AlphaModel::default(), &cfg);
+        let t = &out.trades[0];
+        assert_eq!(t.exit_filled_at_mid, Some(false));
+        assert!(
+            (t.exit_price.unwrap() - 0.40).abs() < 1e-6,
+            "conversion crosses the timeout-time book: {:?}",
+            t.exit_price
+        );
+        let expected = (50.0 / 0.52) * (0.40 - 0.52);
+        assert!((t.pnl - expected).abs() < 0.1, "pnl ~{expected}: {}", t.pnl);
+
+        // Case 3: flat book to the end -> conversion sells at the unchanged
+        // 0.50 bid, matching the champion crossing exit exactly.
+        let flat = mk((open_s..close_s).map(|s| book_tick(s, 0.50, 0.52)).collect());
+        let hybrid = run_market(&flat, &spot, &AlphaModel::default(), &cfg);
+        let champion = run_market(
+            &flat,
+            &spot,
+            &AlphaModel::default(),
+            &HarnessConfig { passive_exit_timeout_s: 0, ..cfg },
+        );
+        assert_eq!(hybrid.trades[0].exit_filled_at_mid, Some(false));
+        assert!((hybrid.trades[0].pnl - champion.trades[0].pnl).abs() < 1e-9);
+    }
+
+    #[test]
+    fn exit_at_mid_conditional_fill_requires_a_crossing_bid() {
+        // Belief is wrong-confident (spot jump the book ignores), entry YES
+        // at 0.52, exit horizon 30s, resting ask at the 0.51 mid.
+        let spot = spot_with_jump(2400, 2050);
+        let open_s = 2000_i64;
+        let close_s = 2300_i64;
+        let meta = MarketMeta {
+            token: Token::Btc,
+            window_secs: 300,
+            open_ts_ns: open_s * 1_000_000_000,
+            close_ts_ns: close_s * 1_000_000_000,
+            strike: 100_000.0,
+        };
+        let cfg = HarnessConfig {
+            latency_ms: 0,
+            exit_after_s: 30,
+            exit_at_mid: true,
+            ..HarnessConfig::default()
+        };
+
+        // Case 1: the bid never reaches the resting level -> no fill, the
+        // position settles at resolution (full loss), while the optimistic
+        // bound prices the exit at the mid.
+        let never = MarketSeries {
+            meta,
+            resolved_yes: false,
+            ticks: (open_s..close_s).map(|s| book_tick(s, 0.50, 0.52)).collect(),
+            date: "2026-05-01".into(),
+        };
+        let out = run_market(&never, &spot, &AlphaModel::default(), &cfg);
+        let t = &out.trades[0];
+        assert!(t.exit_price.is_none(), "resting ask must not fill");
+        assert!(t.pnl < -40.0, "unfilled exit settles at resolution: {}", t.pnl);
+        let opt = t.pnl_exit_mid_optimistic.unwrap();
+        assert!(
+            opt > -5.0 && opt < 0.0,
+            "optimistic bound loses ~half the spread: {opt}"
+        );
+
+        // Case 2: the book lifts to 0.60/0.62 after the horizon -> the bid
+        // crosses 0.51 and the resting ask fills at OUR level (0.51).
+        let crossed = MarketSeries {
+            meta,
+            resolved_yes: false,
+            ticks: (open_s..close_s)
+                .map(|s| {
+                    if s < 2120 {
+                        book_tick(s, 0.50, 0.52)
+                    } else {
+                        book_tick(s, 0.60, 0.62)
+                    }
+                })
+                .collect(),
+            date: "2026-05-01".into(),
+        };
+        let out = run_market(&crossed, &spot, &AlphaModel::default(), &cfg);
+        let t = &out.trades[0];
+        assert!((t.exit_price.unwrap() - 0.51).abs() < 1e-6, "fills at the resting level");
+        assert!(
+            t.pnl > -5.0 && t.pnl < 0.0,
+            "filled passive exit loses ~half the spread: {}",
+            t.pnl
+        );
+    }
+
+    #[test]
+    fn pair_completion_locks_profit_for_either_outcome() {
+        // Entry YES at 0.52; the book then lifts so the synthetic NO ask
+        // (1 - yes_bid) drops to 0.40 <= 1 - 0.52 - 0.02: completion fires,
+        // matching leg 1's shares; both legs settle, locking ~0.08/share
+        // regardless of which side resolves.
+        let spot = spot_with_jump(2400, 2050);
+        let open_s = 2000_i64;
+        let close_s = 2300_i64;
+        let meta = MarketMeta {
+            token: Token::Btc,
+            window_secs: 300,
+            open_ts_ns: open_s * 1_000_000_000,
+            close_ts_ns: close_s * 1_000_000_000,
+            strike: 100_000.0,
+        };
+        let mk = |resolved_yes: bool| MarketSeries {
+            meta,
+            resolved_yes,
+            ticks: (open_s..close_s)
+                .map(|s| {
+                    if s < 2120 {
+                        book_tick(s, 0.50, 0.52)
+                    } else {
+                        book_tick(s, 0.60, 0.62)
+                    }
+                })
+                .collect(),
+            date: "2026-05-01".into(),
+        };
+        let cfg = HarnessConfig {
+            latency_ms: 0,
+            pair_completion_margin: 0.02,
+            ..HarnessConfig::default()
+        };
+        let mut totals = Vec::new();
+        for resolved_yes in [true, false] {
+            let out = run_market(&mk(resolved_yes), &spot, &AlphaModel::default(), &cfg);
+            assert_eq!(out.trades.len(), 2, "leg 1 + completion");
+            let (l1, l2) = (&out.trades[0], &out.trades[1]);
+            assert!(!l1.is_completion);
+            assert!(l2.is_completion);
+            assert_eq!(l2.side, l1.side.opposite());
+            assert!((l2.shares - l1.shares).abs() < 1e-6, "completion matches leg 1");
+            assert!((l2.avg_price - 0.40).abs() < 1e-6, "synthetic NO ask = 1 - bid");
+            assert!(l1.exit_price.is_none(), "completed leg 1 holds to resolution");
+            totals.push(l1.pnl + l2.pnl);
+        }
+        let expected = (1.0 - 0.52 - 0.40) * (50.0 / 0.52);
+        for total in &totals {
+            assert!(
+                (total - expected).abs() < 0.5,
+                "locked profit ~{expected}: got {total}"
+            );
+        }
+        assert!((totals[0] - totals[1]).abs() < 1e-6, "outcome-invariant lock");
+    }
+
+    #[test]
+    fn pair_completion_respects_leg1_exit_window() {
+        // Same setup but the book only lifts AFTER leg 1's 30s exit horizon:
+        // no completion may fire; leg 1 exits normally.
+        let spot = spot_with_jump(2400, 2050);
+        let open_s = 2000_i64;
+        let close_s = 2300_i64;
+        let series = MarketSeries {
+            meta: MarketMeta {
+                token: Token::Btc,
+                window_secs: 300,
+                open_ts_ns: open_s * 1_000_000_000,
+                close_ts_ns: close_s * 1_000_000_000,
+                strike: 100_000.0,
+            },
+            resolved_yes: true,
+            ticks: (open_s..close_s)
+                .map(|s| {
+                    if s < 2150 {
+                        book_tick(s, 0.50, 0.52)
+                    } else {
+                        book_tick(s, 0.60, 0.62)
+                    }
+                })
+                .collect(),
+            date: "2026-05-01".into(),
+        };
+        let out = run_market(
+            &series,
+            &spot,
+            &AlphaModel::default(),
+            &HarnessConfig {
+                latency_ms: 0,
+                exit_after_s: 30,
+                pair_completion_margin: 0.02,
+                ..HarnessConfig::default()
+            },
+        );
+        assert_eq!(out.trades.len(), 1, "no completion after the exit window");
+        assert!(!out.trades[0].is_completion);
+        assert!(out.trades[0].exit_price.is_some(), "leg 1 exits normally");
+    }
+
+    #[test]
+    fn new_mechanics_default_off_leave_trades_identical() {
+        let (series, spot) = dislocation_market(2053);
+        let model = AlphaModel::default();
+        let base = HarnessConfig { exit_after_s: 30, ..HarnessConfig::default() };
+        let a = serde_json::to_string(&run_market(&series, &spot, &model, &base).trades).unwrap();
+        let b = serde_json::to_string(
+            &run_market(
+                &series,
+                &spot,
+                &model,
+                &HarnessConfig {
+                    exit_at_mid: false,
+                    passive_exit_timeout_s: 0,
+                    pair_completion_margin: 0.0,
+                    ..base
+                },
+            )
+            .trades,
+        )
+        .unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
     fn no_entries_inside_stop_window() {
         let (mut series, spot) = dislocation_market(2053);
         // Keep only ticks in the final 10 seconds.

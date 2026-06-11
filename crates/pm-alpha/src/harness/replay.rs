@@ -168,6 +168,18 @@ fn belief_pass(
     pass
 }
 
+/// First entry of a market while it can still be pair-completed.
+struct OpenLeg {
+    trade_idx: usize,
+    side: Side,
+    avg_price: f64,
+    shares: f64,
+    entry_fee: f64,
+    /// Decisions at-or-after this instant can no longer complete the pair
+    /// (the leg's scheduled exit, or close when held to resolution).
+    complete_until_ns: i64,
+}
+
 /// Execute one (latency, threshold) combination against a shared belief
 /// pass, laddering up to `max_clips` entries separated by the cooldown.
 fn execute(
@@ -181,11 +193,76 @@ fn execute(
     let latency_ns = latency_ms as i64 * 1_000_000;
     let cooldown_ns = cfg.clip_cooldown_ms as i64 * 1_000_000;
     let max_clips = cfg.max_clips.max(1) as usize;
+    let pair_completion = cfg.pair_completion_margin > 0.0;
     let mut trades: Vec<TradeRecord> = Vec::new();
     let mut next_entry_ns = i64::MIN;
+    let mut n_clips = 0usize;
+    let mut leg1: Option<OpenLeg> = None;
+    let mut first_entry_done = false;
 
     for d in &pass.decisions {
-        if trades.len() >= max_clips {
+        // Pair completion: buy the opposite token once its ask locks at
+        // least the margin against leg 1's cost; both legs then settle.
+        if let Some(l1) = leg1.as_ref().filter(|l| d.ts_ns < l.complete_until_ns) {
+            let opp = l1.side.opposite();
+            let opp_ask = match opp {
+                Side::Yes => d.yes_ask,
+                Side::No => d.no_buy,
+            };
+            if opp_ask > 0.0
+                && opp_ask <= 1.0 - l1.avg_price - cfg.pair_completion_margin
+                && let Some(fill_tick) = series.ticks[d.tick_idx..]
+                    .iter()
+                    .find(|t| t.ts_ns >= d.ts_ns + latency_ns && t.ts_ns <= close_ns)
+                && let Some((px2, sh2)) = fill_shares(
+                    fill_tick,
+                    opp,
+                    l1.shares,
+                    cfg.depth_capture_frac,
+                    cfg.skip_touch_level,
+                )
+            {
+                let fee2 = px2 * sh2 * cfg.taker_fee_bps / 10_000.0;
+                let won2 = match opp {
+                    Side::Yes => series.resolved_yes,
+                    Side::No => !series.resolved_yes,
+                };
+                let payout2 = if won2 { 1.0 } else { 0.0 };
+                // Leg 1 reverts to hold-to-resolution: exactly one leg pays
+                // $1, netting the locked profit across the pair.
+                let payout1 = 1.0 - payout2;
+                let t1 = &mut trades[l1.trade_idx];
+                t1.pnl = l1.shares * (payout1 - l1.avg_price) - l1.entry_fee;
+                t1.fee = l1.entry_fee;
+                t1.won = payout1 > 0.5;
+                t1.exit_price = None;
+                t1.pnl_exit_mid_optimistic = None;
+                t1.exit_filled_at_mid = None;
+                trades.push(TradeRecord {
+                    side: opp,
+                    decision_ts_ns: d.ts_ns,
+                    fill_ts_ns: fill_tick.ts_ns,
+                    avg_price: px2,
+                    shares: sh2,
+                    fee: fee2,
+                    p_exo: d.p_up,
+                    mid_at_decision: d.mid,
+                    pnl: sh2 * (payout2 - px2) - fee2,
+                    won: won2,
+                    exit_price: None,
+                    mark_60s: None,
+                    pnl_exit_mid_optimistic: None,
+                    is_completion: true,
+                    exit_filled_at_mid: None,
+                });
+                leg1 = None;
+                continue;
+            }
+        }
+        if n_clips >= max_clips {
+            if pair_completion && leg1.is_some() {
+                continue; // out of clips, but the pair may still complete
+            }
             break;
         }
         if d.ts_ns < next_entry_ns {
@@ -273,13 +350,105 @@ fn execute(
         let payout = if won { 1.0 } else { 0.0 };
 
         // Optional early exit: cross the spread at the first tick past the
-        // horizon; any unsold remainder settles at resolution.
+        // horizon; any unsold remainder settles at resolution. With
+        // exit_at_mid, rest an ask at the side mid instead: the exact
+        // conditional fill (a later bid must cross the level before close,
+        // else settle) drives pnl, with the always-fills optimistic bound
+        // recorded alongside.
         let mut exit_price = None;
         let mut exit_fee = 0.0;
         let mut proceeds_pnl = None;
+        let mut pnl_exit_mid_optimistic = None;
+        let mut exit_filled_at_mid = None;
         if cfg.exit_after_s > 0 {
             let exit_at_ns = fill_tick.ts_ns + cfg.exit_after_s as i64 * 1_000_000_000;
-            if let Some(exit_tick) = series.ticks[d.tick_idx..]
+            if cfg.passive_exit_timeout_s > 0 {
+                // Hybrid: rest at the side mid; if no bid crosses within the
+                // timeout, convert to a crossing exit against the book as of
+                // the timeout (NOT the original exit tick).
+                if let Some(rel) = series.ticks[d.tick_idx..]
+                    .iter()
+                    .position(|t| t.ts_ns >= exit_at_ns && t.ts_ns <= close_ns)
+                {
+                    let exit_idx = d.tick_idx + rel;
+                    let exit_tick = &series.ticks[exit_idx];
+                    let deadline_ns =
+                        exit_tick.ts_ns + cfg.passive_exit_timeout_s as i64 * 1_000_000_000;
+                    match side_mid(exit_tick, side) {
+                        Some(level)
+                            if series.ticks[exit_idx..]
+                                .iter()
+                                .take_while(|t| t.ts_ns <= close_ns && t.ts_ns <= deadline_ns)
+                                .any(|t| side_bid(t, side) >= level - 1e-9) =>
+                        {
+                            exit_fee = level * shares * cfg.taker_fee_bps / 10_000.0;
+                            proceeds_pnl = Some(shares * (level - avg_price));
+                            exit_price = Some(level);
+                            exit_filled_at_mid = Some(true);
+                        }
+                        Some(_) => {
+                            // Timed out: cross at the first tick past the
+                            // deadline; settle if none remains.
+                            exit_filled_at_mid = Some(false);
+                            if let Some(conv_tick) = series.ticks[exit_idx..]
+                                .iter()
+                                .find(|t| t.ts_ns >= deadline_ns && t.ts_ns <= close_ns)
+                                && let Some((px, sold)) = sell_fill(
+                                    conv_tick,
+                                    side,
+                                    shares,
+                                    cfg.depth_capture_frac,
+                                    cfg.skip_touch_level,
+                                )
+                            {
+                                exit_fee = px * sold * cfg.taker_fee_bps / 10_000.0;
+                                let remainder = (shares - sold).max(0.0);
+                                proceeds_pnl = Some(
+                                    sold * (px - avg_price) + remainder * (payout - avg_price),
+                                );
+                                exit_price = Some(px);
+                            }
+                        }
+                        None => {
+                            // No mid to rest at: champion crossing exit at
+                            // the original exit tick.
+                            if let Some((px, sold)) = sell_fill(
+                                exit_tick,
+                                side,
+                                shares,
+                                cfg.depth_capture_frac,
+                                cfg.skip_touch_level,
+                            ) {
+                                exit_fee = px * sold * cfg.taker_fee_bps / 10_000.0;
+                                let remainder = (shares - sold).max(0.0);
+                                proceeds_pnl = Some(
+                                    sold * (px - avg_price) + remainder * (payout - avg_price),
+                                );
+                                exit_price = Some(px);
+                            }
+                        }
+                    }
+                }
+            } else if cfg.exit_at_mid {
+                if let Some(rel) = series.ticks[d.tick_idx..]
+                    .iter()
+                    .position(|t| t.ts_ns >= exit_at_ns && t.ts_ns <= close_ns)
+                    && let Some(level) = side_mid(&series.ticks[d.tick_idx + rel], side)
+                {
+                    let mid_fee = level * shares * cfg.taker_fee_bps / 10_000.0;
+                    pnl_exit_mid_optimistic =
+                        Some(shares * (level - avg_price) - entry_fee - mid_fee);
+                    let crossed = series.ticks[d.tick_idx + rel..]
+                        .iter()
+                        .take_while(|t| t.ts_ns <= close_ns)
+                        .any(|t| side_bid(t, side) >= level - 1e-9);
+                    if crossed {
+                        exit_fee = mid_fee;
+                        proceeds_pnl = Some(shares * (level - avg_price));
+                        exit_price = Some(level);
+                    }
+                }
+            } else if let Some(exit_tick) = series.ticks[d.tick_idx..]
                 .iter()
                 .find(|t| t.ts_ns >= exit_at_ns && t.ts_ns <= close_ns)
                 && let Some((px, sold)) = sell_fill(
@@ -300,6 +469,7 @@ fn execute(
         let fee = entry_fee + exit_fee;
         let pnl = proceeds_pnl.unwrap_or(shares * (payout - avg_price)) - fee;
         next_entry_ns = d.ts_ns + cooldown_ns;
+        n_clips += 1;
         let mark_60s = series.ticks[d.tick_idx..]
             .iter()
             .find(|t| t.ts_ns >= fill_tick.ts_ns + 60_000_000_000)
@@ -322,7 +492,25 @@ fn execute(
             won: if exit_price.is_some() { pnl > 0.0 } else { won },
             exit_price,
             mark_60s,
+            pnl_exit_mid_optimistic,
+            is_completion: false,
+            exit_filled_at_mid,
         });
+        if pair_completion && !first_entry_done {
+            first_entry_done = true;
+            leg1 = Some(OpenLeg {
+                trade_idx: trades.len() - 1,
+                side,
+                avg_price,
+                shares,
+                entry_fee,
+                complete_until_ns: if cfg.exit_after_s > 0 {
+                    fill_tick.ts_ns + cfg.exit_after_s as i64 * 1_000_000_000
+                } else {
+                    close_ns
+                },
+            });
+        }
 
         // Convexity hedge: buy the opposite cheap tail (held to resolution;
         // it exists to bound the crossed-mid disaster, not to be traded).
@@ -360,6 +548,9 @@ fn execute(
                     won: tail_won,
                     exit_price: None,
                     mark_60s: None,
+                    pnl_exit_mid_optimistic: None,
+                    is_completion: false,
+                    exit_filled_at_mid: None,
                 });
             }
         }
@@ -422,6 +613,82 @@ fn sell_fill(
         return None;
     }
     Some((proceeds / sold, sold))
+}
+
+/// Side-oriented mid: the natural resting-ask level for a passive exit.
+fn side_mid(tick: &BookTick, side: Side) -> Option<f64> {
+    match side {
+        Side::Yes => tick.mid(),
+        Side::No if tick.has_real_no() => Some(((tick.no_bid + tick.no_ask) / 2.0) as f64),
+        Side::No => tick.mid().map(|m| 1.0 - m),
+    }
+}
+
+/// Side-oriented best bid: what could lift a resting ask on this side.
+/// Synthetic NO bid is `1 - yes_ask` (selling NO = buying back YES).
+fn side_bid(tick: &BookTick, side: Side) -> f64 {
+    match side {
+        Side::Yes => tick.yes_bid as f64,
+        Side::No if tick.has_real_no() => tick.no_bid as f64,
+        Side::No if tick.yes_ask > 0.0 && tick.yes_ask < 1.0 => 1.0 - tick.yes_ask as f64,
+        Side::No => 0.0,
+    }
+}
+
+/// Buy `target_shares` (not dollars) walking the relevant ask ladder; used
+/// by pair completion to match leg 1's share count. Returns (avg_price, shares).
+fn fill_shares(
+    tick: &BookTick,
+    side: Side,
+    target_shares: f64,
+    capture_frac: f64,
+    skip_touch: bool,
+) -> Option<(f64, f64)> {
+    let levels: Vec<(f64, f64)> = match side {
+        Side::Yes => tick
+            .asks
+            .iter()
+            .filter(|l| valid(l))
+            .map(|l| (l.price as f64, l.size as f64))
+            .collect(),
+        Side::No if tick.has_real_no() => tick
+            .no_asks
+            .iter()
+            .filter(|l| valid(l))
+            .map(|l| (l.price as f64, l.size as f64))
+            .collect(),
+        Side::No => tick
+            .bids
+            .iter()
+            .filter(|l| valid(l))
+            .map(|l| (1.0 - l.price as f64, l.size as f64))
+            .collect(),
+    };
+    let levels = if skip_touch && levels.len() > 1 {
+        levels[1..].to_vec()
+    } else {
+        levels
+    };
+    if levels.is_empty() {
+        return None;
+    }
+    let capture = capture_frac.clamp(0.0, 1.0);
+    let mut remaining = target_shares;
+    let mut cost = 0.0;
+    let mut shares = 0.0;
+    for (price, size) in levels {
+        if remaining <= 1e-9 || price <= 0.0 {
+            break;
+        }
+        let qty = remaining.min(size * capture);
+        cost += qty * price;
+        shares += qty;
+        remaining -= qty;
+    }
+    if shares <= 1e-9 {
+        return None;
+    }
+    Some((cost / shares, shares))
 }
 
 /// Run one market across a latency x threshold grid, computing the belief

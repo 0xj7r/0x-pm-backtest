@@ -30,6 +30,9 @@ pub struct ShadowArgs {
     pub exit_after_s: u32,
     pub latency_probe_ms: u64,
     pub out_dir: PathBuf,
+    /// Weight on the basis-adjusted perp last in the effective-spot blend
+    /// (0 disables the futures feed entirely).
+    pub perp_price_weight: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -407,6 +410,8 @@ pub struct ShadowCore {
     vbuf_binance: VenueBuf,
     vbuf_kraken: VenueBuf,
     vbuf_coinbase: VenueBuf,
+    /// Binance futures prints (perp-led state input; empty when disabled).
+    perp_buf: VecDeque<SpotTick>,
 }
 
 #[derive(Debug, Clone)]
@@ -415,6 +420,7 @@ pub struct ShadowConfig {
     pub vol_lookback_s: u32,
     pub exit_after_s: u32,
     pub latency_probe_ms: u64,
+    pub perp_price_weight: f64,
 }
 
 impl ShadowCore {
@@ -425,6 +431,7 @@ impl ShadowCore {
                 vol_sample_dt_s: 1,
                 momentum_lookback_s: 0,
                 momentum_weight: 1.0,
+                perp_price_weight: cfg.perp_price_weight,
                 ..AlphaModelConfig::default()
             },
             calibrator: None,
@@ -445,6 +452,7 @@ impl ShadowCore {
             vbuf_binance: VenueBuf::default(),
             vbuf_kraken: VenueBuf::default(),
             vbuf_coinbase: VenueBuf::default(),
+            perp_buf: VecDeque::new(),
             stats: SummaryStats::default(),
         }
     }
@@ -479,6 +487,38 @@ impl ShadowCore {
 
     pub fn spot_history(&self) -> SpotHistory {
         SpotHistory::new(self.spot.iter().copied().collect())
+    }
+
+    /// Record a Binance futures print (perp-led state; measure parity with
+    /// the harness PerpState, trades only - no OI/funding live).
+    pub fn push_perp(&mut self, exchange_ms: i64, receipt_ms: i64, price: f64, quantity: f64) {
+        if !(price.is_finite() && price > 0.0) {
+            return;
+        }
+        let _ = receipt_ms;
+        self.perp_buf.push_back(SpotTick {
+            ts_ns: exchange_ms * 1_000_000,
+            price,
+            quantity: quantity as f32,
+            is_buyer_maker: false,
+        });
+        while let Some(front) = self.perp_buf.front() {
+            if exchange_ms * 1_000_000 - front.ts_ns <= SPOT_KEEP_SECS * 1_000_000_000 {
+                break;
+            }
+            self.perp_buf.pop_front();
+        }
+    }
+
+    fn perp_state(&self) -> Option<pm_alpha::PerpState> {
+        if self.cfg.perp_price_weight == 0.0 || self.perp_buf.is_empty() {
+            return None;
+        }
+        Some(pm_alpha::PerpState {
+            trades: SpotHistory::new(self.perp_buf.iter().copied().collect()),
+            oi: Vec::new(),
+            funding: Vec::new(),
+        })
     }
 
     pub fn apply_book_snapshot(
@@ -599,6 +639,7 @@ impl ShadowCore {
     /// the first crossing of `edge_threshold`. Call at ~1s cadence.
     pub fn decide(&mut self, now_ns: i64) -> Vec<LogEvent> {
         let spot = self.spot_history();
+        let perp = self.perp_state();
         // Warm-up gate: with a partially-filled buffer (post-restart) the
         // vol estimate runs on a truncated window and produces off-model
         // beliefs the full-history replay would never hold. Stand down
@@ -637,7 +678,7 @@ impl ShadowCore {
             };
             let state = ExoState {
                 spot: &spot,
-                perp: None,
+                perp: perp.as_ref(),
                 ref_spot: None,
                 market: MarketMeta {
                     token,
@@ -965,6 +1006,7 @@ pub async fn run_shadow(args: ShadowArgs) -> Result<()> {
         vol_lookback_s: args.vol_lookback_s,
         exit_after_s: args.exit_after_s,
         latency_probe_ms: args.latency_probe_ms,
+        perp_price_weight: args.perp_price_weight,
     })));
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -999,6 +1041,11 @@ pub async fn run_shadow(args: ShadowArgs) -> Result<()> {
         core.clone(),
         shutdown_rx.clone(),
     ));
+    let perp_task = if args.perp_price_weight != 0.0 {
+        tokio::spawn(feeds::binance_perp_feed(core.clone(), shutdown_rx.clone()))
+    } else {
+        tokio::spawn(async {})
+    };
 
     // 10ms poll keeps the latency probe honest (~±10ms of the target);
     // decisions run on the harness's 1s cadence; summaries every 60s.
@@ -1058,6 +1105,7 @@ pub async fn run_shadow(args: ShadowArgs) -> Result<()> {
             marker_task,
             kraken_task,
             coinbase_task,
+            perp_task,
         ]),
     )
     .await;
@@ -1240,6 +1288,87 @@ mod feeds {
         core.lock()
             .expect("shadow core poisoned")
             .push_spot(exchange_ms, receipt_ms, price, qty, is_buyer_maker);
+        Ok(())
+    }
+
+    // Binance futures (perp-led state input)
+
+    const BINANCE_FUT_WS_URL: &str = "wss://fstream.binance.com/ws/btcusdt@aggTrade";
+
+    pub async fn binance_perp_feed(core: Core, mut shutdown: watch::Receiver<bool>) {
+        let mut backoff = Duration::from_secs(1);
+        while !*shutdown.borrow() {
+            match perp_once(&core, &mut shutdown).await {
+                Ok(()) => break,
+                Err(error) => {
+                    tracing::warn!(?error, backoff_ms = backoff.as_millis() as u64,
+                        "binance perp feed failed; reconnecting");
+                    backoff_sleep(&mut backoff).await;
+                }
+            }
+        }
+    }
+
+    async fn perp_once(core: &Core, shutdown: &mut watch::Receiver<bool>) -> Result<()> {
+        let (stream, _) = connect_async(BINANCE_FUT_WS_URL)
+            .await
+            .context("connecting binance futures ws")?;
+        tracing::info!("binance futures websocket connected");
+        let (mut write, mut read) = stream.split();
+        let mut pings = tokio::time::interval(Duration::from_secs(15));
+        pings.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut last_frame = tokio::time::Instant::now();
+        loop {
+            tokio::select! {
+                _ = shutdown.changed() => {
+                    let _ = write.send(Message::Close(None)).await;
+                    return Ok(());
+                }
+                _ = pings.tick() => {
+                    if last_frame.elapsed() > STALE_TIMEOUT {
+                        anyhow::bail!("binance futures ws stale (no frames)");
+                    }
+                    write.send(Message::Ping(Vec::new().into())).await
+                        .context("binance futures ping")?;
+                }
+                frame = read.next() => {
+                    last_frame = tokio::time::Instant::now();
+                    match frame {
+                        Some(Ok(Message::Text(text))) => {
+                            if let Err(error) = handle_perp_text(core, &text) {
+                                tracing::warn!(?error, "skipping malformed futures message");
+                            }
+                        }
+                        Some(Ok(Message::Ping(payload))) => {
+                            write.send(Message::Pong(payload)).await.ok();
+                        }
+                        Some(Ok(Message::Close(_))) => anyhow::bail!("futures ws closed by remote"),
+                        Some(Ok(_)) => {}
+                        Some(Err(error)) => return Err(error).context("futures ws frame error"),
+                        None => anyhow::bail!("futures ws stream ended"),
+                    }
+                }
+            }
+        }
+    }
+
+    fn handle_perp_text(core: &Core, text: &str) -> Result<()> {
+        let payload: Value = serde_json::from_str(text).context("decode futures payload")?;
+        if payload.get("e").and_then(Value::as_str) != Some("aggTrade") {
+            return Ok(());
+        }
+        let (Some(price), Some(qty)) = (
+            value_f64(payload.get("p")),
+            value_f64(payload.get("q")),
+        ) else {
+            anyhow::bail!("futures aggTrade missing price/quantity");
+        };
+        let exchange_ms = value_i64(payload.get("T"))
+            .or_else(|| value_i64(payload.get("E")))
+            .context("futures aggTrade missing T/E timestamp")?;
+        core.lock()
+            .expect("shadow core poisoned")
+            .push_perp(exchange_ms, now_unix_ms(), price, qty);
         Ok(())
     }
 
@@ -1804,6 +1933,7 @@ mod tests {
             vol_lookback_s: 1800,
             exit_after_s: 30,
             latency_probe_ms: 150,
+            perp_price_weight: 0.0,
         }
     }
 

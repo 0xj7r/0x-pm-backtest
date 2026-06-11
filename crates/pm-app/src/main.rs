@@ -99,6 +99,10 @@ enum Cmd {
         /// Directory for JSONL shadow logs (created if missing).
         #[arg(long)]
         out_dir: PathBuf,
+        /// Weight on the basis-adjusted perp last in the effective-spot
+        /// blend (0 = spot-only champion; enables the futures feed).
+        #[arg(long, default_value = "0.0")]
+        perp_price_weight: f64,
     },
     /// pm-alpha exogenous edge hunt: replay markets through the pm-alpha
     /// validation harness (latency-modeled, cost-aware, leakage-free belief).
@@ -1223,6 +1227,7 @@ async fn main() -> Result<()> {
             exit_after_s,
             latency_probe_ms,
             out_dir,
+            perp_price_weight,
         } => {
             shadow::run_shadow(shadow::ShadowArgs {
                 slug_prefix,
@@ -1231,6 +1236,7 @@ async fn main() -> Result<()> {
                 exit_after_s,
                 latency_probe_ms,
                 out_dir,
+                perp_price_weight,
             })
             .await
         }

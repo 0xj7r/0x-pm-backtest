@@ -185,6 +185,8 @@ mod tests {
                 fee_hold: false,
                 hold_alt_sell_pnl: None,
                 hold_alt_exit_fee: None,
+                stopped: false,
+                stop_hold_pnl: None,
             }],
             samples: vec![ProbSample {
                 ts_ns: 60_000_000_000,

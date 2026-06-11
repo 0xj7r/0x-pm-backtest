@@ -45,6 +45,9 @@ pub struct AlphaArgs {
     /// seconds (0 = disabled).
     pub enter_within_close_s: u32,
     pub max_entry_sigma_bps: f64,
+    /// Post-entry selldown stop eps (hold mode only): sell when the entry
+    /// side's ask prints at-or-below fill - eps. Negative disables.
+    pub selldown_stop_eps: f64,
     pub min_marginal_edge: f64,
     pub max_clips: u32,
     pub clip_cooldown_ms: u64,
@@ -685,6 +688,7 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
         stop_before_close_s: args.stop_before_close_s,
         enter_within_close_s: args.enter_within_close_s,
         max_entry_sigma_bps: args.max_entry_sigma_bps,
+        selldown_stop_eps: args.selldown_stop_eps,
         min_marginal_edge: args.min_marginal_edge,
         max_clips: args.max_clips,
         clip_cooldown_ms: args.clip_cooldown_ms,
@@ -898,6 +902,8 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
                     "fee_hold": t.fee_hold,
                     "hold_alt_sell_pnl": t.hold_alt_sell_pnl,
                     "hold_alt_exit_fee": t.hold_alt_exit_fee,
+                    "stopped": t.stopped,
+                    "stop_hold_pnl": t.stop_hold_pnl,
                 });
                 writeln!(f, "{row}")?;
             }

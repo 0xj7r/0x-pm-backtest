@@ -279,6 +279,8 @@ fn execute(
                     fee_hold: false,
                     hold_alt_sell_pnl: None,
                     hold_alt_exit_fee: None,
+                    stopped: false,
+                    stop_hold_pnl: None,
                 });
                 leg1 = None;
                 continue;
@@ -371,12 +373,14 @@ fn execute(
 
         // Latency: fill against the book as it actually is at T + latency.
         let fill_at_ns = d.ts_ns + latency_ns;
-        let Some(fill_tick) = series.ticks[d.tick_idx..]
+        let Some(fill_rel) = series.ticks[d.tick_idx..]
             .iter()
-            .find(|t| t.ts_ns >= fill_at_ns && t.ts_ns <= close_ns)
+            .position(|t| t.ts_ns >= fill_at_ns && t.ts_ns <= close_ns)
         else {
             continue;
         };
+        let fill_idx = d.tick_idx + fill_rel;
+        let fill_tick = &series.ticks[fill_idx];
 
         let entry_cap = (cfg.min_marginal_edge > 0.0).then(|| p_side - cfg.min_marginal_edge);
         let Some((avg_price, shares)) = fill(
@@ -552,6 +556,35 @@ fn execute(
                 }
             }
         }
+        // Post-entry selldown stop (hold mode only): trades whose side ask
+        // later prints through entry lose money even held to expiry; sell
+        // at the first such tick (taker, exit-leg fee), remainder settles.
+        let mut stopped = false;
+        let mut stop_hold_pnl = None;
+        if cfg.selldown_stop_eps >= 0.0 && cfg.exit_after_s == 0 {
+            let stop_level = avg_price - cfg.selldown_stop_eps;
+            if let Some(stop_tick) = series.ticks[fill_idx + 1..]
+                .iter()
+                .take_while(|t| t.ts_ns <= close_ns)
+                .find(|t| side_ask(t, side).is_some_and(|a| a <= stop_level + 1e-9))
+                && let Some((px, sold)) = sell_fill(
+                    stop_tick,
+                    side,
+                    shares,
+                    cfg.depth_capture_frac,
+                    cfg.skip_touch_level,
+                )
+            {
+                exit_fee = px * sold * cfg.taker_fee_bps / 10_000.0
+                    + curve_fee(cfg.fee_curve_rate, px, sold);
+                let remainder = (shares - sold).max(0.0);
+                proceeds_pnl =
+                    Some(sold * (px - avg_price) + remainder * (payout - avg_price));
+                exit_price = Some(px);
+                stopped = true;
+                stop_hold_pnl = Some(shares * (payout - avg_price) - entry_fee);
+            }
+        }
         let fee = entry_fee + exit_fee;
         let pnl = proceeds_pnl.unwrap_or(shares * (payout - avg_price)) - fee;
         next_entry_ns = d.ts_ns + cooldown_ns;
@@ -588,8 +621,10 @@ fn execute(
             fee_hold,
             hold_alt_sell_pnl,
             hold_alt_exit_fee,
+            stopped,
+            stop_hold_pnl,
         });
-        if pair_completion && !first_entry_done {
+        if pair_completion && !first_entry_done && !stopped {
             first_entry_done = true;
             leg1 = Some(OpenLeg {
                 trade_idx: trades.len() - 1,
@@ -650,6 +685,8 @@ fn execute(
                     fee_hold: false,
                     hold_alt_sell_pnl: None,
                     hold_alt_exit_fee: None,
+                    stopped: false,
+                    stop_hold_pnl: None,
                 });
             }
         }
@@ -712,6 +749,17 @@ fn sell_fill(
         return None;
     }
     Some((proceeds / sold, sold))
+}
+
+/// Side-oriented ask: the cost of buying one more share of `side` at the
+/// touch (real NO ask when loaded, synthetic complement otherwise).
+fn side_ask(tick: &BookTick, side: Side) -> Option<f64> {
+    match side {
+        Side::Yes => {
+            (tick.yes_ask > 0.0 && tick.yes_ask < 1.0).then_some(tick.yes_ask as f64)
+        }
+        Side::No => tick.no_buy_price(),
+    }
 }
 
 /// Side-oriented mid: the natural resting-ask level for a passive exit.

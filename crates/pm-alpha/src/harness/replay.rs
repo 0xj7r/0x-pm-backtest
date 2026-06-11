@@ -180,6 +180,46 @@ pub(crate) fn curve_fee(rate: f64, price: f64, shares: f64) -> f64 {
     rate * price * (1.0 - price) * shares
 }
 
+/// Trailing mins of the entry side's ask over the diagnostic windows
+/// (10/20/40s) and the configured stability window before the decision tick.
+/// Returns (min_10s, min_20s, min_40s, gate_passed).
+fn trailing_stability(
+    series: &MarketSeries,
+    tick_idx: usize,
+    ts_ns: i64,
+    side: Side,
+    side_ask_now: f64,
+    cfg: &HarnessConfig,
+) -> (f64, f64, f64, bool) {
+    const DIAG_NS: [i64; 3] = [10_000_000_000, 20_000_000_000, 40_000_000_000];
+    let cfg_ns = cfg.entry_stability_s as i64 * 1_000_000_000;
+    let scan_ns = cfg_ns.max(DIAG_NS[2]);
+    let mut mins = [side_ask_now; 3];
+    let mut cfg_min = side_ask_now;
+    for t in series.ticks[..=tick_idx].iter().rev() {
+        let age_ns = ts_ns - t.ts_ns;
+        if age_ns > scan_ns {
+            break;
+        }
+        let ask = match side {
+            Side::Yes if t.yes_ask > 0.0 && t.yes_ask < 1.0 => Some(t.yes_ask as f64),
+            Side::Yes => None,
+            Side::No => t.no_buy_price(),
+        };
+        let Some(ask) = ask else { continue };
+        for (k, w_ns) in DIAG_NS.iter().enumerate() {
+            if age_ns <= *w_ns && ask < mins[k] {
+                mins[k] = ask;
+            }
+        }
+        if age_ns <= cfg_ns && ask < cfg_min {
+            cfg_min = ask;
+        }
+    }
+    let passed = cfg.entry_stability_s == 0 || cfg_min >= side_ask_now - cfg.stability_eps;
+    (mins[0], mins[1], mins[2], passed)
+}
+
 /// First entry of a market while it can still be pair-completed.
 struct OpenLeg {
     trade_idx: usize,
@@ -261,6 +301,11 @@ fn execute(
                 t1.hold_alt_exit_fee = None;
                 trades.push(TradeRecord {
                     sigma_bar_bps: d.sigma_bar_bps,
+                    side_ask_at_decision: 0.0,
+                    trail_min_ask_10s: None,
+                    trail_min_ask_20s: None,
+                    trail_min_ask_40s: None,
+                    stable_entry: true,
                     side: opp,
                     decision_ts_ns: d.ts_ns,
                     fill_ts_ns: fill_tick.ts_ns,
@@ -343,6 +388,19 @@ fn execute(
             if side_mid < cfg.align_min_mid {
                 continue;
             }
+        }
+
+        // Pre-entry stability: the trailing window of the entry side's ask
+        // must hold at-or-above (current ask - eps); diagnostics are always
+        // computed so the control run carries the offline proxy study.
+        let side_ask_now = match side {
+            Side::Yes => d.yes_ask,
+            Side::No => d.no_buy,
+        };
+        let (trail_min_10, trail_min_20, trail_min_40, stable_entry) =
+            trailing_stability(series, d.tick_idx, d.ts_ns, side, side_ask_now, cfg);
+        if !stable_entry {
+            continue;
         }
 
         // Sizing: flat clip, or Kelly-style scaling on the
@@ -602,7 +660,12 @@ fn execute(
             });
 
         trades.push(TradeRecord {
-                    sigma_bar_bps: d.sigma_bar_bps,
+            sigma_bar_bps: d.sigma_bar_bps,
+            side_ask_at_decision: side_ask_now,
+            trail_min_ask_10s: Some(trail_min_10),
+            trail_min_ask_20s: Some(trail_min_20),
+            trail_min_ask_40s: Some(trail_min_40),
+            stable_entry,
             side,
             decision_ts_ns: d.ts_ns,
             fill_ts_ns: fill_tick.ts_ns,
@@ -667,6 +730,11 @@ fn execute(
                 let tail_payout = if tail_won { 1.0 } else { 0.0 };
                 trades.push(TradeRecord {
                     sigma_bar_bps: d.sigma_bar_bps,
+                    side_ask_at_decision: 0.0,
+                    trail_min_ask_10s: None,
+                    trail_min_ask_20s: None,
+                    trail_min_ask_40s: None,
+                    stable_entry: true,
                     side: tail_side,
                     decision_ts_ns: d.ts_ns,
                     fill_ts_ns: fill_tick.ts_ns,

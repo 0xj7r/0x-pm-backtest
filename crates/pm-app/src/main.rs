@@ -207,6 +207,14 @@ enum Cmd {
         /// entry side's ask prints at-or-below fill - eps. Negative = off.
         #[arg(long, default_value = "-1.0", allow_hyphen_values = true)]
         selldown_stop_eps: f64,
+        /// Pre-entry stability gate: enter only if over the trailing S
+        /// seconds the entry side's ask never printed below (current ask -
+        /// --entry-stability-eps). 0 = off (parity).
+        #[arg(long, default_value = "0")]
+        entry_stability_s: u32,
+        /// Tolerance for the stability gate's trailing-min comparison.
+        #[arg(long, default_value = "0.005")]
+        entry_stability_eps: f64,
         /// Entry fills walk depth only while each level retains this much
         /// edge vs the belief (0 = unconditional; live limit = belief-floor).
         #[arg(long, default_value = "0.0")]
@@ -1335,6 +1343,8 @@ async fn main() -> Result<()> {
             enter_within_close_s,
             max_entry_sigma_bps,
             selldown_stop_eps,
+            entry_stability_s,
+            entry_stability_eps,
             min_marginal_edge,
             max_clips,
             clip_cooldown_ms,
@@ -1408,6 +1418,8 @@ async fn main() -> Result<()> {
                     enter_within_close_s,
                     max_entry_sigma_bps,
                     selldown_stop_eps,
+                    entry_stability_s,
+                    stability_eps: entry_stability_eps,
                     min_marginal_edge,
                     max_clips,
                     clip_cooldown_ms,

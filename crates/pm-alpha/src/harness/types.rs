@@ -168,6 +168,14 @@ pub struct HarnessConfig {
     /// `avg_fill_price - eps`. Negative disables (parity).
     #[serde(default = "default_selldown_stop_eps")]
     pub selldown_stop_eps: f64,
+    /// Pre-entry stability gate: take an entry only when, over the trailing
+    /// S seconds of ticks before the decision, the entry side's ask never
+    /// printed below (current side ask - stability_eps). 0 disables (parity).
+    #[serde(default)]
+    pub entry_stability_s: u32,
+    /// Tolerance on the stability gate's trailing-min comparison.
+    #[serde(default)]
+    pub stability_eps: f64,
     /// Entry fills walk depth only while the marginal level retains at
     /// least this much edge vs the belief (0 = walk unconditionally). Sets
     /// the live marketable-limit price: belief - floor.
@@ -220,6 +228,8 @@ impl Default for HarnessConfig {
             tail_frac: 0.25,
             max_entry_sigma_bps: 0.0,
             selldown_stop_eps: -1.0,
+            entry_stability_s: 0,
+            stability_eps: 0.005,
             min_marginal_edge: 0.0,
             max_clips: 1,
             clip_cooldown_ms: 5000,
@@ -251,6 +261,23 @@ pub struct TradeRecord {
     /// Realized vol input at the entry decision (bps over one bar).
     #[serde(default)]
     pub sigma_bar_bps: f64,
+    /// Entry side's ask at the decision tick (the stability reference;
+    /// 0 on hedge/completion legs).
+    #[serde(default)]
+    pub side_ask_at_decision: f64,
+    /// Trailing min of the entry side's ask over the 10/20/40 seconds
+    /// before the decision (stability-proxy diagnostics; None on
+    /// hedge/completion legs).
+    #[serde(default)]
+    pub trail_min_ask_10s: Option<f64>,
+    #[serde(default)]
+    pub trail_min_ask_20s: Option<f64>,
+    #[serde(default)]
+    pub trail_min_ask_40s: Option<f64>,
+    /// Result of the configured stability gate (true when the gate is off
+    /// or for hedge/completion legs).
+    #[serde(default)]
+    pub stable_entry: bool,
     pub side: Side,
     pub decision_ts_ns: i64,
     pub fill_ts_ns: i64,

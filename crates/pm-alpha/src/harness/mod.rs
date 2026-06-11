@@ -317,6 +317,86 @@ mod tests {
     }
 
     #[test]
+    fn entry_stability_zero_is_parity() {
+        // 0 = disabled must produce trades identical to a gate so loose it
+        // never binds (eps = 1.0 covers any ask move in (0, 1)).
+        let (series, spot) = dislocation_market(2053);
+        let model = AlphaModel::default();
+        let base = HarnessConfig::default();
+        assert_eq!(base.entry_stability_s, 0);
+        let off = run_market(&series, &spot, &model, &base);
+        let loose = run_market(
+            &series,
+            &spot,
+            &model,
+            &HarnessConfig { entry_stability_s: 40, stability_eps: 1.0, ..base },
+        );
+        assert!(!off.trades.is_empty());
+        assert!(off.trades.iter().all(|t| t.stable_entry));
+        assert_eq!(
+            serde_json::to_string(&off.trades).unwrap(),
+            serde_json::to_string(&loose.trades).unwrap()
+        );
+    }
+
+    #[test]
+    fn entry_stability_blocks_until_selldown_leaves_window() {
+        // The gate blocks only prints BELOW (current ask - eps), i.e. a
+        // dip-and-recover: the ask dips 0.90 -> 0.80 during [2060, 2070),
+        // then recovers. Entries open at t=2080 (post-recovery): decisions
+        // in [2080, 2110) still carry the 0.80 prints in their trailing 40s
+        // and must be blocked; t=2110 is the first clean window.
+        let spot = spot_with_jump(2400, 2050); // belief goes ~certain YES
+        let open_s = 2000_i64;
+        let close_s = 2300_i64;
+        let mut ticks = Vec::new();
+        for s in open_s..close_s {
+            let ask = if (2060..2070).contains(&s) { 0.80 } else { 0.90 };
+            ticks.push(book_tick(s, ask - 0.02, ask));
+        }
+        let series = MarketSeries {
+            meta: MarketMeta {
+                token: Token::Btc,
+                window_secs: 300,
+                open_ts_ns: open_s * 1_000_000_000,
+                close_ts_ns: close_s * 1_000_000_000,
+                strike: 100_000.0,
+            },
+            resolved_yes: true,
+            ticks,
+            date: "2026-05-01".into(),
+        };
+        let model = AlphaModel::default();
+        let base = HarnessConfig {
+            edge_threshold: 0.05,
+            latency_ms: 0,
+            enter_within_close_s: 220, // entries open at t=2080, post-recovery
+            ..HarnessConfig::default()
+        };
+        let off = run_market(&series, &spot, &model, &base);
+        assert!(!off.trades.is_empty());
+        let first_off = off.trades[0].decision_ts_ns / 1_000_000_000;
+        assert!(first_off < 2110, "ungated entry near the window open, got {first_off}");
+
+        let gated = run_market(
+            &series,
+            &spot,
+            &model,
+            &HarnessConfig { entry_stability_s: 40, ..base },
+        );
+        assert!(!gated.trades.is_empty());
+        let t = &gated.trades[0];
+        // The 0.80 dip prints must have aged out of the trailing 40s.
+        assert!(
+            t.decision_ts_ns >= 2_110 * 1_000_000_000,
+            "stability gate must delay entry past the dip+window, got {}",
+            t.decision_ts_ns / 1_000_000_000
+        );
+        assert!(t.stable_entry);
+        assert!(t.trail_min_ask_40s.unwrap() >= t.side_ask_at_decision - 0.005);
+    }
+
+    #[test]
     fn log_loss_checkpoints_score_exo_vs_book_at_same_instants() {
         let (series, spot) = dislocation_market(2053);
         let out = run_market(&series, &spot, &AlphaModel::default(), &HarnessConfig::default());

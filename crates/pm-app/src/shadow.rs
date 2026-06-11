@@ -425,6 +425,7 @@ impl ShadowCore {
                 vol_sample_dt_s: 1,
                 momentum_lookback_s: 0,
                 momentum_weight: 1.0,
+                ..AlphaModelConfig::default()
             },
             calibrator: None,
             dir_model: None,

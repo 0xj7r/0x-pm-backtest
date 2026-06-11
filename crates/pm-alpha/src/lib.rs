@@ -23,3 +23,4 @@ pub use fair_value::{FairValueEstimate, FairValueModel, NoSignalReason};
 pub use model::{AlphaModel, AlphaModelConfig, Belief, Evaluation};
 pub use regime::Regime;
 pub use state::{ExoState, MarketMeta, PerpState, Token};
+pub use vol::VolEstimator;

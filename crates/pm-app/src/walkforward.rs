@@ -2842,7 +2842,7 @@ pub(crate) struct SpotCache {
 }
 
 impl SpotCache {
-    async fn load_raw_day(
+    pub(crate) async fn load_raw_day(
         &mut self,
         store: &TelonexStore,
         symbol: &str,

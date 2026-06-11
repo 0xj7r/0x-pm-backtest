@@ -207,6 +207,9 @@ pub struct HarnessConfig {
 }
 
 fn default_selldown_stop_eps() -> f64 {
+    -1.0
+}
+
 fn default_maker_entry_offset() -> f64 {
     -1.0
 }
@@ -340,10 +343,6 @@ pub struct TradeRecord {
     /// (entry fee only). Set only when `stopped`.
     #[serde(default)]
     pub stop_hold_pnl: Option<f64>,
-    /// Bar-sigma (bps) of the belief at the entry decision (diagnostic;
-    /// enables offline vol-band filters on the trades dump).
-    #[serde(default)]
-    pub sigma_bar_bps: f64,
     /// True when this entry filled as a resting maker bid (zero fee).
     #[serde(default)]
     pub maker_entry: bool,

@@ -192,7 +192,6 @@ mod tests {
                 hold_alt_exit_fee: None,
                 stopped: false,
                 stop_hold_pnl: None,
-                sigma_bar_bps: 0.0,
                 maker_entry: false,
             }],
             samples: vec![ProbSample {

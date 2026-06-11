@@ -327,7 +327,6 @@ fn execute(
                     hold_alt_exit_fee: None,
                     stopped: false,
                     stop_hold_pnl: None,
-                    sigma_bar_bps: d.sigma_bar_bps,
                     maker_entry: false,
                 });
                 leg1 = None;
@@ -484,6 +483,14 @@ fn execute(
                         hold_alt_exit_fee: None,
                         sigma_bar_bps: d.sigma_bar_bps,
                         maker_entry: true,
+                    
+                        side_ask_at_decision: 0.0,
+                        trail_min_ask_10s: None,
+                        trail_min_ask_20s: None,
+                        trail_min_ask_40s: None,
+                        stable_entry: true,
+                        stopped: false,
+                        stop_hold_pnl: None,
                     });
                 }
             }
@@ -747,9 +754,9 @@ fn execute(
             hold_alt_exit_fee,
             stopped,
             stop_hold_pnl,
-            sigma_bar_bps: d.sigma_bar_bps,
             maker_entry: false,
-        });
+        
+                    });
         if pair_completion && !first_entry_done && !stopped {
             first_entry_done = true;
             leg1 = Some(OpenLeg {
@@ -818,7 +825,6 @@ fn execute(
                     hold_alt_exit_fee: None,
                     stopped: false,
                     stop_hold_pnl: None,
-                    sigma_bar_bps: d.sigma_bar_bps,
                     maker_entry: false,
                 });
             }
@@ -906,14 +912,6 @@ fn side_mid(tick: &BookTick, side: Side) -> Option<f64> {
 
 /// Side-oriented best ask: the buy touch a resting maker bid must see trade
 /// at-or-below to be considered filled (crossed-through).
-fn side_ask(tick: &BookTick, side: Side) -> Option<f64> {
-    match side {
-        Side::Yes if tick.yes_ask > 0.0 && tick.yes_ask < 1.0 => Some(tick.yes_ask as f64),
-        Side::Yes => None,
-        Side::No => tick.no_buy_price(),
-    }
-}
-
 /// Side-oriented best bid: what could lift a resting ask on this side.
 /// Synthetic NO bid is `1 - yes_ask` (selling NO = buying back YES).
 fn side_bid(tick: &BookTick, side: Side) -> f64 {

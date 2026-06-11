@@ -30,6 +30,7 @@
     "align_min_mid": 0.55,
     "tail_max_price": 0.0,
     "tail_frac": 0.25,
+    "min_marginal_edge": 0.0,
     "max_clips": 1,
     "clip_cooldown_ms": 5000,
     "collect_training": false,

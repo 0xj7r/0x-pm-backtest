@@ -34,6 +34,9 @@ pub struct AlphaArgs {
     pub skip_touch_level: bool,
     pub decision_dt_ms: u64,
     pub stop_before_close_s: u32,
+    /// Entry window: permit entries only when time-to-close <= this many
+    /// seconds (0 = disabled).
+    pub enter_within_close_s: u32,
     pub min_marginal_edge: f64,
     pub max_clips: u32,
     pub clip_cooldown_ms: u64,
@@ -669,6 +672,7 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
         skip_touch_level: args.skip_touch_level,
         decision_dt_ms: args.decision_dt_ms,
         stop_before_close_s: args.stop_before_close_s,
+        enter_within_close_s: args.enter_within_close_s,
         min_marginal_edge: args.min_marginal_edge,
         max_clips: args.max_clips,
         clip_cooldown_ms: args.clip_cooldown_ms,

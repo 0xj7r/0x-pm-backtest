@@ -274,6 +274,13 @@ fn execute(
             }
             break;
         }
+        // Entry window: entries only once time-to-close drops to
+        // enter_within_close_s (stop_before_close_s stays the inner bound).
+        if cfg.enter_within_close_s > 0
+            && d.ts_ns < close_ns - cfg.enter_within_close_s as i64 * 1_000_000_000
+        {
+            continue;
+        }
         // Aligned runs with a continuation model trade ITS belief, and only
         // when a move is in progress; the fade keeps the exogenous belief.
         let p_up = match (cfg.entry_mode, d.dir_p_up) {

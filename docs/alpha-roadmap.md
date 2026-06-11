@@ -80,3 +80,16 @@ REJECTED with mechanisms understood (all engineering retained, defaults off):
 Cross-confirmed twice: where real size is quoted the book beats our model;
 the edge is the 150ms staleness window, not superior modeling. Calibration
 gap to the book is strike/drift/distribution-shape, not sigma.
+
+## Verified config stack (test-window, one shot each; budget closed)
+
+- perp-led w=0.5 @ thr 0.12: TEST $13,115 / Sharpe 2.05 / worst +$630 / 10-10
+  green (+30% vs champion, dominates perp@0.16 on every axis). Live A/B
+  challenger switched to this config.
+- rearm 0.08 / max_clips 2 (event-gated re-entry): TEST $14,160 / Sharpe 1.80
+  / worst +$517 / 10-10 green (+40% vs champion standalone, spot state).
+- Composition (perp@0.12 + rearm) gets NO further backtest looks: it
+  validates in the live shadow A/B, then promotes with the $1k step-up.
+- Frontier facts: thresholds max out at 1.6x participation on BTC-5m (99.6%
+  of windows entered at 0.06); dual-trigger entry (primary 0.16 + late
+  secondary 0.12) flagged worth ~1.3x, queued as engine work.

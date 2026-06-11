@@ -13,6 +13,9 @@
   "harness_cfg": {
     "latency_ms": 150,
     "taker_fee_bps": 0.0,
+    "fee_curve_rate": 0.0,
+    "fee_aware_exit": false,
+    "fee_exit_margin": 0.0,
     "edge_threshold": 0.16,
     "notional_usdc": 50.0,
     "kelly_sizing": false,
@@ -31,6 +34,7 @@
     "align_min_mid": 0.55,
     "tail_max_price": 0.0,
     "tail_frac": 0.25,
+    "max_entry_sigma_bps": 0.0,
     "min_marginal_edge": 0.0,
     "max_clips": 1,
     "clip_cooldown_ms": 5000,

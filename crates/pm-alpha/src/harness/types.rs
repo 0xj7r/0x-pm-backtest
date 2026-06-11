@@ -173,10 +173,24 @@ pub struct HarnessConfig {
     /// staleness event. 0 disables (cooldown-only laddering).
     #[serde(default)]
     pub rearm_edge: f64,
+    /// Maker entry study: when >= 0, an entry signal rests a bid at
+    /// (decision-tick side ask - offset) instead of taking the ask. The
+    /// order goes live after the entry latency and fills only if a later
+    /// tick's side ask trades at-or-below the level before the
+    /// `stop_before_close_s` deadline (conservative crossed-through
+    /// primitive); fills pay ZERO fee and hold to resolution. Unfilled
+    /// orders cancel at the deadline. One resting order per market.
+    /// Negative disables (taker parity).
+    #[serde(default = "default_maker_entry_offset")]
+    pub maker_entry_offset: f64,
     /// Emit calibrator training samples (features + raw base p + outcome).
     pub collect_training: bool,
     /// Cadence of training-sample collection (seconds into the window).
     pub train_sample_dt_s: u32,
+}
+
+fn default_maker_entry_offset() -> f64 {
+    -1.0
 }
 
 impl Default for HarnessConfig {
@@ -209,6 +223,7 @@ impl Default for HarnessConfig {
             max_clips: 1,
             clip_cooldown_ms: 5000,
             rearm_edge: 0.0,
+            maker_entry_offset: -1.0,
             collect_training: false,
             train_sample_dt_s: 15,
         }
@@ -276,6 +291,13 @@ pub struct TradeRecord {
     /// Exit-leg fee the fee-held trade avoided. Set only when `fee_hold`.
     #[serde(default)]
     pub hold_alt_exit_fee: Option<f64>,
+    /// Bar-sigma (bps) of the belief at the entry decision (diagnostic;
+    /// enables offline vol-band filters on the trades dump).
+    #[serde(default)]
+    pub sigma_bar_bps: f64,
+    /// True when this entry filled as a resting maker bid (zero fee).
+    #[serde(default)]
+    pub maker_entry: bool,
 }
 
 /// A probability sample at a fixed checkpoint, for log-loss scoring of the
@@ -306,4 +328,8 @@ pub struct MarketRunOutput {
     pub min_pair_cost: Option<f64>,
     /// Fraction of ticks carrying a real NO ladder.
     pub real_no_coverage: f64,
+    /// Resting maker entry orders placed (filled or cancelled); nonzero only
+    /// when `maker_entry_offset >= 0`. Fill rate = maker trades / this.
+    #[serde(default)]
+    pub maker_placed: u32,
 }

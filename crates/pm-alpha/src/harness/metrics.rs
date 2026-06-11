@@ -184,6 +184,8 @@ mod tests {
                 fee_hold: false,
                 hold_alt_sell_pnl: None,
                 hold_alt_exit_fee: None,
+                sigma_bar_bps: 0.0,
+                maker_entry: false,
             }],
             samples: vec![ProbSample {
                 ts_ns: 60_000_000_000,
@@ -197,6 +199,7 @@ mod tests {
             regime: None,
             min_pair_cost: None,
             real_no_coverage: 0.0,
+            maker_placed: 0,
         }
     }
 

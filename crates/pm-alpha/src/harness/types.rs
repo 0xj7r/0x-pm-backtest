@@ -105,6 +105,19 @@ pub struct HarnessConfig {
     /// resolution). Exits cross the spread and walk depth; unsold remainder
     /// settles at resolution.
     pub exit_after_s: u32,
+    /// Passive exit study: instead of crossing the spread at the exit
+    /// horizon, rest an ask at the side mid. The trade's pnl uses the exact
+    /// conditional fill (filled only if a later bid crosses the level before
+    /// close, else settle at resolution); the optimistic always-fills-at-mid
+    /// bound is recorded alongside in `pnl_exit_mid_optimistic`.
+    #[serde(default)]
+    pub exit_at_mid: bool,
+    /// Pair completion: after the first entry (cost C1, S1 shares), buy the
+    /// opposite token when its ask <= 1 - C1 - margin (S1 shares, once per
+    /// market); both legs then hold to resolution, netting the locked
+    /// profit. 0 disables.
+    #[serde(default)]
+    pub pair_completion_margin: f64,
     /// Take no entries when the open-time regime is calm_low_vol (the cells
     /// show ~no edge there; calm trades are variance without pay).
     pub skip_calm: bool,
@@ -142,6 +155,8 @@ impl Default for HarnessConfig {
             decision_dt_ms: 1000,
             stop_before_close_s: 10,
             exit_after_s: 0,
+            exit_at_mid: false,
+            pair_completion_margin: 0.0,
             skip_calm: false,
             only_calm: false,
             entry_mode: EntryMode::Fade,
@@ -193,6 +208,14 @@ pub struct TradeRecord {
     /// Side-oriented book mid 60s after the fill (diagnostic: did the book
     /// move toward the belief, or did we only "win" at resolution?).
     pub mark_60s: Option<f64>,
+    /// Optimistic passive-exit bound: pnl if the exit always filled at the
+    /// side mid at the exit horizon (Some only when `exit_at_mid` is on and
+    /// a mid existed at the horizon).
+    #[serde(default)]
+    pub pnl_exit_mid_optimistic: Option<f64>,
+    /// True for a pair-completion leg (opposite-side buy locking the pair).
+    #[serde(default)]
+    pub is_completion: bool,
 }
 
 /// A probability sample at a fixed checkpoint, for log-loss scoring of the

@@ -37,6 +37,8 @@ pub struct AlphaArgs {
     pub max_clips: u32,
     pub clip_cooldown_ms: u64,
     pub exit_after_s: u32,
+    pub exit_at_mid: bool,
+    pub pair_completion_margin: f64,
     pub skip_calm: bool,
     pub only_calm: bool,
     pub aligned_mode: bool,
@@ -533,6 +535,8 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
         max_clips: args.max_clips,
         clip_cooldown_ms: args.clip_cooldown_ms,
         exit_after_s: args.exit_after_s,
+        exit_at_mid: args.exit_at_mid,
+        pair_completion_margin: args.pair_completion_margin,
         skip_calm: args.skip_calm,
         only_calm: args.only_calm,
         entry_mode: if args.aligned_mode { EntryMode::Aligned } else { EntryMode::Fade },
@@ -708,7 +712,9 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
                     "fill_ts_ns": t.fill_ts_ns, "avg_price": t.avg_price,
                     "shares": t.shares, "p_exo": t.p_exo,
                     "mid_at_decision": t.mid_at_decision, "pnl": t.pnl, "won": t.won,
-                    "mark_60s": t.mark_60s,
+                    "mark_60s": t.mark_60s, "exit_price": t.exit_price,
+                    "pnl_exit_mid_optimistic": t.pnl_exit_mid_optimistic,
+                    "is_completion": t.is_completion,
                 });
                 writeln!(f, "{row}")?;
             }

@@ -166,6 +166,11 @@ enum Cmd {
         /// Minimum ms between clip entries.
         #[arg(long, default_value = "5000")]
         clip_cooldown_ms: u64,
+        /// Event-based re-entry: after an entry, block further entries until
+        /// both sides' edges drop below this (the dislocation closed); the
+        /// next threshold crossing is then a fresh event (0 = disabled).
+        #[arg(long, default_value = "0.0")]
+        rearm_edge: f64,
         /// Exit at the book N seconds after fill (0 = hold to resolution).
         #[arg(long, default_value = "0")]
         exit_after_s: u32,
@@ -1265,6 +1270,7 @@ async fn main() -> Result<()> {
             min_marginal_edge,
             max_clips,
             clip_cooldown_ms,
+            rearm_edge,
             exit_after_s,
             exit_at_mid,
             passive_exit_timeout_s,
@@ -1331,6 +1337,7 @@ async fn main() -> Result<()> {
                     min_marginal_edge,
                     max_clips,
                     clip_cooldown_ms,
+                    rearm_edge,
                     exit_after_s,
                     exit_at_mid,
                     passive_exit_timeout_s,

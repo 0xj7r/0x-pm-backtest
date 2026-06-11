@@ -147,6 +147,12 @@ pub struct HarnessConfig {
     pub max_clips: u32,
     /// Minimum time between clip entries.
     pub clip_cooldown_ms: u64,
+    /// Event-based re-entry: after an entry, block further entries until a
+    /// later decision shows BOTH sides' edges below this level (the
+    /// dislocation has closed); the next threshold crossing is then a fresh
+    /// staleness event. 0 disables (cooldown-only laddering).
+    #[serde(default)]
+    pub rearm_edge: f64,
     /// Emit calibrator training samples (features + raw base p + outcome).
     pub collect_training: bool,
     /// Cadence of training-sample collection (seconds into the window).
@@ -178,6 +184,7 @@ impl Default for HarnessConfig {
             min_marginal_edge: 0.0,
             max_clips: 1,
             clip_cooldown_ms: 5000,
+            rearm_edge: 0.0,
             collect_training: false,
             train_sample_dt_s: 15,
         }

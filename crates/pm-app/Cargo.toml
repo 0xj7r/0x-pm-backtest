@@ -10,6 +10,18 @@ publish = false
 name = "pm-app"
 path = "src/main.rs"
 
+[[bin]]
+name = "f11_deep_tail"
+path = "src/bin/f11_deep_tail.rs"
+
+[[bin]]
+name = "deep_tail_long"
+path = "src/bin/deep_tail_long.rs"
+
+[[bin]]
+name = "exo_fade_equivalence"
+path = "src/bin/exo_fade_equivalence.rs"
+
 [dependencies]
 pm-types          = { workspace = true }
 pm-telonex-loader = { workspace = true }

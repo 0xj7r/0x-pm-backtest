@@ -9,7 +9,10 @@
 //! Design: docs/superpowers/specs/2026-06-09-signal-ssot-design.md
 
 pub mod calibrator;
+pub mod decide;
 pub mod directional;
+#[cfg(test)]
+mod exo_fade_equivalence;
 pub mod fair_value;
 pub mod harness;
 pub mod model;
@@ -18,6 +21,10 @@ pub mod state;
 pub mod vol;
 
 pub use calibrator::{ExoCalibrator, ExoCalibratorSnapshot, ExoFeatures, TrainingConfig, TrainingSample};
+pub use decide::{
+    DecideConfig, DecisionInputs, EntryAction, EntryDecision, EntryState, EntryStateDelta,
+    decide_entry,
+};
 pub use directional::{DIR_FEATURE_NAMES, DIR_FEATURES, DirFeatures, DirModel, dir_features};
 pub use fair_value::{FairValueEstimate, FairValueModel, NoSignalReason};
 pub use model::{AlphaModel, AlphaModelConfig, Belief, Evaluation};

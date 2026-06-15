@@ -118,8 +118,9 @@ enum Cmd {
         /// its validated 90s constant regardless of this flag).
         #[arg(long, default_value = "5")]
         stop_before_close_s: u32,
-        /// Lane mode: minimum belief sigma_bar_bps to enter (a vol FLOOR).
-        #[arg(long, default_value = "4.0")]
+        /// Minimum belief sigma_bar_bps to enter (a vol FLOOR, applies to
+        /// fade and lane). 0 = off. Lane uses 4.0; fade-hold uses 3.0.
+        #[arg(long, default_value = "0.0")]
         min_entry_sigma_bps: f64,
         /// Fade re-entry: re-arm once both sides' edges drop below this
         /// (0 = off = single entry per market; validated combo: 0.08).
@@ -128,6 +129,23 @@ enum Cmd {
         /// Fade re-entry: max entries per market (validated combo: 2).
         #[arg(long, default_value = "1")]
         max_clips: u32,
+        /// Vol estimator: "realized" (rolling) or "ewma" (validated combo).
+        #[arg(long, default_value = "realized")]
+        vol_estimator: String,
+        /// EWMA half-life seconds (only when --vol-estimator ewma).
+        #[arg(long, default_value = "600.0")]
+        ewma_halflife_s: f64,
+        /// Skip UTC-Saturday entries (finalized-candidate behaviour).
+        #[arg(long)]
+        skip_saturday: bool,
+        /// Vol-responsive sizing reference (bps): clip = SHADOW_NOTIONAL *
+        /// clamp(sigma_bar_bps/ref, lo, hi). 0 = off (flat, behaviour unchanged).
+        #[arg(long, default_value = "0.0")]
+        vol_sizing_ref_bps: f64,
+        #[arg(long, default_value = "0.5")]
+        vol_sizing_lo: f64,
+        #[arg(long, default_value = "2.0")]
+        vol_sizing_hi: f64,
     },
     /// pm-alpha exogenous edge hunt: replay markets through the pm-alpha
     /// validation harness (latency-modeled, cost-aware, leakage-free belief).
@@ -183,6 +201,19 @@ enum Cmd {
         /// variance equalization); default is flat clips.
         #[arg(long)]
         kelly_sizing: bool,
+        /// Vol-responsive sizing reference (bps): clip = notional *
+        /// clamp(sigma_bar_bps/ref, lo, hi). 0 = off (flat).
+        #[arg(long, default_value = "0.0")]
+        vol_sizing_ref_bps: f64,
+        #[arg(long, default_value = "0.5")]
+        vol_sizing_lo: f64,
+        #[arg(long, default_value = "2.0")]
+        vol_sizing_hi: f64,
+        /// Basis-momentum tilt multipliers (agree/disagree); 1.0/1.0 = off.
+        #[arg(long, default_value = "1.0")]
+        basis_mom_agree: f64,
+        #[arg(long, default_value = "1.0")]
+        basis_mom_disagree: f64,
         /// Capture stress: fraction of displayed depth available to us.
         #[arg(long, default_value = "1.0")]
         depth_capture_frac: f64,
@@ -1307,6 +1338,12 @@ async fn main() -> Result<()> {
             min_entry_sigma_bps,
             rearm_edge,
             max_clips,
+            vol_estimator,
+            ewma_halflife_s,
+            skip_saturday,
+            vol_sizing_ref_bps,
+            vol_sizing_lo,
+            vol_sizing_hi,
         } => {
             shadow::run_shadow(shadow::ShadowArgs {
                 slug_prefix,
@@ -1323,6 +1360,12 @@ async fn main() -> Result<()> {
                 min_entry_sigma_bps,
                 rearm_edge,
                 max_clips,
+                vol_estimator,
+                ewma_halflife_s,
+                skip_saturday,
+                vol_sizing_ref_bps,
+                vol_sizing_lo,
+                vol_sizing_hi,
             })
             .await
         }
@@ -1343,6 +1386,11 @@ async fn main() -> Result<()> {
             fee_exit_margin,
             notional_usdc,
             kelly_sizing,
+            vol_sizing_ref_bps,
+            vol_sizing_lo,
+            vol_sizing_hi,
+            basis_mom_agree,
+            basis_mom_disagree,
             depth_capture_frac,
             skip_touch_level,
             decision_dt_ms,
@@ -1419,6 +1467,11 @@ async fn main() -> Result<()> {
                     fee_exit_margin,
                     notional_usdc,
                     kelly_sizing,
+                    vol_sizing_ref_bps,
+                    vol_sizing_lo,
+                    vol_sizing_hi,
+                    basis_mom_agree,
+                    basis_mom_disagree,
                     depth_capture_frac,
                     skip_touch_level,
                     decision_dt_ms,

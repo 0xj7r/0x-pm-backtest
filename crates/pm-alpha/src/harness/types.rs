@@ -105,6 +105,18 @@ pub struct HarnessConfig {
     /// reliability-discounted edge and equalizes per-trade variance
     /// (cheap lottery entries shrink hard). false = flat clips.
     pub kelly_sizing: bool,
+    /// Vol-responsive sizing: when > 0, clip = notional * clamp(sigma_bar_bps
+    /// / ref, lo, hi). Sizes up on high-movement tape (real edges), down on
+    /// pinned tape (phantom edges). 0 = off. Causal (uses entry sigma).
+    pub vol_sizing_ref_bps: f64,
+    pub vol_sizing_lo: f64,
+    pub vol_sizing_hi: f64,
+    /// Basis-momentum tilt: scale the stake by whether the 60s change in
+    /// perp-minus-spot basis agrees with the entry side. Yes wants basis
+    /// rising, No wants it falling. 1.0/1.0 = off. Multiplies the base clip
+    /// (after vol/kelly sizing) before caps; never an entry gate.
+    pub basis_mom_agree: f64,
+    pub basis_mom_disagree: f64,
     /// Capture stress: only this fraction of displayed size at each level is
     /// available to us (competitors take the rest). 1.0 = the optimistic sim.
     pub depth_capture_frac: f64,
@@ -225,6 +237,11 @@ impl Default for HarnessConfig {
             edge_threshold: 0.05,
             notional_usdc: 50.0,
             kelly_sizing: false,
+            vol_sizing_ref_bps: 0.0,
+            vol_sizing_lo: 0.5,
+            vol_sizing_hi: 2.0,
+            basis_mom_agree: 1.0,
+            basis_mom_disagree: 1.0,
             depth_capture_frac: 1.0,
             skip_touch_level: false,
             decision_dt_ms: 1000,

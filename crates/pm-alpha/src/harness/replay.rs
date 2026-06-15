@@ -30,6 +30,8 @@ struct Decision {
     yes_ask: f64,
     no_buy: f64,
     sigma_bar_bps: f64,
+    /// 60s change in perp-minus-spot basis, bps of spot. 0 when no perp.
+    basis_mom_60s_bps: f64,
 }
 
 struct BeliefPass {
@@ -159,6 +161,13 @@ fn belief_pass(
             }
             _ => None,
         };
+        let basis_mom_60s_bps = perp
+            .and_then(|p| {
+                let bn = p.basis_frac(spot, tick.ts_ns)?;
+                let bp = p.basis_frac(spot, tick.ts_ns - 60_000_000_000)?;
+                Some((bn - bp) * 1e4)
+            })
+            .unwrap_or(0.0);
         pass.decisions.push(Decision {
             tick_idx: i,
             ts_ns: tick.ts_ns,
@@ -168,6 +177,7 @@ fn belief_pass(
             yes_ask: tick.yes_ask as f64,
             no_buy,
             sigma_bar_bps: ev.raw.sigma_bar_bps,
+            basis_mom_60s_bps,
         });
     }
 
@@ -339,58 +349,41 @@ fn execute(
             }
             break;
         }
-        // Entry window: entries only once time-to-close drops to
-        // enter_within_close_s (stop_before_close_s stays the inner bound).
-        if cfg.enter_within_close_s > 0
-            && d.ts_ns < close_ns - cfg.enter_within_close_s as i64 * 1_000_000_000
-        {
-            continue;
-        }
-        // Regime gate: skip entries when realized vol exceeds the cap (the
-        // late-favourite lane bleeds precisely on hot tape; 0 = no gate).
-        if cfg.max_entry_sigma_bps > 0.0 && d.sigma_bar_bps > cfg.max_entry_sigma_bps {
-            continue;
-        }
-        // Aligned runs with a continuation model trade ITS belief, and only
-        // when a move is in progress; the fade keeps the exogenous belief.
-        let p_up = match (cfg.entry_mode, d.dir_p_up) {
-            (EntryMode::Aligned, Some(p)) => p,
-            (EntryMode::Aligned, None) if pass.dir_model_active => continue,
-            _ => d.p_up,
+        // Shared entry-decision SSOT: pm_alpha::decide_entry owns every gate,
+        // side-pick, and sizing line, so the backtest, the live shadow, and the
+        // live agent make byte-identical decisions. belief_pass already bounded
+        // ticks to [open, deadline]; the history-dependent pre-entry stability
+        // gate stays here (it needs the trailing tick window, not just touch).
+        let inputs = crate::decide::DecisionInputs {
+            p_exo: d.p_up,
+            dir_p_up: d.dir_p_up,
+            dir_model_active: pass.dir_model_active,
+            yes_ask: d.yes_ask,
+            no_buy: d.no_buy,
+            mid: d.mid,
+            sigma_bar_bps: d.sigma_bar_bps,
+            basis_mom_60s_bps: d.basis_mom_60s_bps,
         };
-        // Edge per side against touch prices (entry test; fill walks depth).
-        let edge_yes = p_up - d.yes_ask;
-        let edge_no = (1.0 - p_up) - d.no_buy; // real NO ask when loaded
-        // Disarmed: watch (even through the cooldown) for the dislocation to
-        // close; only a later threshold crossing may then enter again.
-        if rearm_active && !armed {
-            if edge_yes < cfg.rearm_edge && edge_no < cfg.rearm_edge {
-                armed = true;
-            }
-            continue;
-        }
-        if d.ts_ns < next_entry_ns {
-            continue;
-        }
-        let (side, edge) = if edge_yes >= edge_no {
-            (Side::Yes, edge_yes)
-        } else {
-            (Side::No, edge_no)
-        };
-        if edge < edge_threshold {
-            continue;
-        }
-        if cfg.entry_mode == EntryMode::Aligned {
-            // Directional entries require the book to already favour the
-            // same side (we ride agreement, not disagreement).
-            let side_mid = match side {
-                Side::Yes => d.mid,
-                Side::No => 1.0 - d.mid,
-            };
-            if side_mid < cfg.align_min_mid {
+        let dcfg = crate::decide::DecideConfig::from_harness(cfg, edge_threshold);
+        let (decision, delta) = crate::decide::decide_entry(
+            &inputs,
+            d.ts_ns,
+            close_ns,
+            &crate::decide::EntryState { armed, next_entry_ns },
+            &dcfg,
+        );
+        match decision.action {
+            crate::decide::EntryAction::Rearm => {
+                if let Some(a) = delta.set_armed {
+                    armed = a;
+                }
                 continue;
             }
+            crate::decide::EntryAction::Skip => continue,
+            crate::decide::EntryAction::Enter => {}
         }
+        let side = decision.side;
+        let notional = decision.target_notional;
 
         // Pre-entry stability: the trailing window of the entry side's ask
         // must hold at-or-above (current ask - eps); diagnostics are always
@@ -404,32 +397,10 @@ fn execute(
         if !stable_entry {
             continue;
         }
-
-        // Sizing: flat clip, or Kelly-style scaling on the
-        // reliability-discounted edge with per-trade variance equalized.
         let entry_cost = match side {
             Side::Yes => d.yes_ask,
             Side::No => d.no_buy,
         };
-        let p_side = match side {
-            Side::Yes => p_up,
-            Side::No => 1.0 - p_up,
-        };
-        let notional = if cfg.kelly_sizing {
-            // Half-trust the belief (shrink toward the market's price; the
-            // belief's claimed edge historically realizes at roughly half).
-            let p_eff = entry_cost + 0.5 * (p_side - entry_cost);
-            let kelly = ((p_eff - entry_cost) / (1.0 - entry_cost).max(1e-6)).max(0.0);
-            let edge_factor = (kelly / 0.16).clamp(0.0, 1.0);
-            let var_factor =
-                (entry_cost / (p_eff * (1.0 - p_eff)).sqrt().max(1e-6)).clamp(0.0, 1.0);
-            (cfg.notional_usdc * edge_factor * var_factor).max(0.0)
-        } else {
-            cfg.notional_usdc
-        };
-        if notional < 1.0 {
-            continue; // sized below the venue's practical minimum
-        }
 
         // Maker entry study: rest a bid below the side's current ask
         // instead of taking it. Live after the entry latency; fills only if
@@ -508,7 +479,7 @@ fn execute(
         let fill_idx = d.tick_idx + fill_rel;
         let fill_tick = &series.ticks[fill_idx];
 
-        let entry_cap = (cfg.min_marginal_edge > 0.0).then(|| p_side - cfg.min_marginal_edge);
+        let entry_cap = (cfg.min_marginal_edge > 0.0).then(|| decision.marketable_limit_price);
         let Some((avg_price, shares)) = fill(
             fill_tick,
             side,

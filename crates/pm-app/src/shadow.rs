@@ -8,7 +8,7 @@
 //! logs WOULD_ENTER / QUOTE_PROBE / WOULD_EXIT / SUMMARY records as JSONL.
 
 use anyhow::{Context, Result};
-use pm_alpha::{AlphaModel, AlphaModelConfig, ExoState, MarketMeta, Token};
+use pm_alpha::{AlphaModel, AlphaModelConfig, ExoState, MarketMeta, Token, VolEstimator};
 use pm_types::{SpotHistory, SpotTick};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
@@ -19,6 +19,10 @@ const SPOT_KEEP_SECS: i64 = 7_800;
 const STOP_BEFORE_CLOSE_S: i64 = 90;
 /// Clip notional for the realistic laddered-fill telemetry (harness default).
 const SHADOW_NOTIONAL_USDC: f64 = 50.0;
+/// Passive-exit probe: how long the measure-only resting ask waits for a
+/// crossing bid before converting against the book (matches the harness
+/// midtimeout variant).
+const PASSIVE_EXIT_TIMEOUT_S: i64 = 60;
 /// Rolling cap on receipt-minus-exchange latency samples.
 const LATENCY_SAMPLE_CAP: usize = 4_096;
 
@@ -50,6 +54,17 @@ pub struct ShadowArgs {
     pub rearm_edge: f64,
     /// Fade mode: max entries per market when re-arming is active.
     pub max_clips: u32,
+    /// Vol estimator: "realized" (rolling) or "ewma" (validated combo).
+    pub vol_estimator: String,
+    /// EWMA half-life seconds (only used when vol_estimator == "ewma").
+    pub ewma_halflife_s: f64,
+    /// Skip UTC-Saturday entries (finalized-candidate behaviour).
+    pub skip_saturday: bool,
+    /// Vol-responsive sizing reference (bps): clip notional scales by
+    /// clamp(sigma_bar_bps/ref, lo, hi). 0 = off (flat, behaviour unchanged).
+    pub vol_sizing_ref_bps: f64,
+    pub vol_sizing_lo: f64,
+    pub vol_sizing_hi: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,6 +141,25 @@ pub enum LogEvent {
         ladder_exit_avg: Option<f64>,
         ladder_shares_sold: Option<f64>,
         ladder_mark_pnl_usd: Option<f64>,
+    },
+    /// Measure-only alternative to the taker exit: an ask resting at the
+    /// side mid from the exit walk. `filled` fills the whole clip at `level`
+    /// with NO taker fee; a timeout converts against the then-current bids
+    /// (taker fee applies, unsold remainder rides); close without either
+    /// rides fully to resolution (join by slug+side for the settle).
+    PassiveExit {
+        ts_utc: String,
+        slug: String,
+        side: &'static str,
+        level: f64,
+        filled: bool,
+        entry_avg: f64,
+        shares: f64,
+        /// Proceeds-vs-entry for the sold portion; None when everything
+        /// rides to settlement.
+        pnl_usd: Option<f64>,
+        fallback_exit_avg: Option<f64>,
+        fallback_shares_sold: Option<f64>,
     },
     Resolution {
         ts_utc: String,
@@ -407,6 +441,8 @@ struct PendingTrade {
     side: Side,
     token: String,
     entry_touch_price: f64,
+    /// Belief vol at entry, retained for vol-responsive clip sizing at probe.
+    sigma_bar_bps: f64,
     probe_due_ns: i64,
     probe_done: bool,
     exit_due_ns: i64,
@@ -415,6 +451,13 @@ struct PendingTrade {
     /// the then-current top-5 asks for the full clip notional.
     ladder_avg_cost: Option<f64>,
     ladder_shares: Option<f64>,
+    /// Measure-only passive-exit probe, armed at the taker-exit walk: an ask
+    /// resting at the then-current side mid. Filled when a later bid crosses
+    /// the level, converted against the book at the timeout, or left to ride
+    /// to settlement if the market closes first.
+    passive_level: Option<f64>,
+    passive_deadline_ns: i64,
+    passive_done: bool,
 }
 
 #[derive(Debug, Default)]
@@ -466,6 +509,15 @@ pub struct ShadowConfig {
     pub min_entry_sigma_bps: f64,
     pub rearm_edge: f64,
     pub max_clips: u32,
+    pub vol_estimator: VolEstimator,
+    /// Skip entries on UTC Saturday (the structurally dead day: thin weekend
+    /// liquidity, breakeven hit rate). The finalized candidate sits out Sat.
+    pub skip_saturday: bool,
+    /// Vol-responsive clip sizing reference (bps): the clip notional scales by
+    /// clamp(sigma_bar_bps/ref, lo, hi). 0 = off (flat clips, unchanged path).
+    pub vol_sizing_ref_bps: f64,
+    pub vol_sizing_lo: f64,
+    pub vol_sizing_hi: f64,
 }
 
 impl ShadowCore {
@@ -477,6 +529,7 @@ impl ShadowCore {
                 momentum_lookback_s: 0,
                 momentum_weight: 1.0,
                 perp_price_weight: cfg.perp_price_weight,
+                vol_estimator: cfg.vol_estimator,
                 ..AlphaModelConfig::default()
             },
             calibrator: None,
@@ -804,10 +857,22 @@ impl ShadowCore {
             if edge < self.cfg.edge_threshold {
                 continue;
             }
-            // Lane sigma FLOOR (deliberately a minimum, not a cap): calm
-            // tape prices late favourites fairly; the lane's edge is in vol.
-            if lane && ev.raw.sigma_bar_bps < self.cfg.min_entry_sigma_bps {
+            // Sigma FLOOR (deliberately a minimum, not a cap): below it the
+            // tape is too calm for the edge to clear the fee leg. Applies to
+            // both lanes; the lane runs a higher floor (vol IS its edge), the
+            // fade a lower one (prunes the dead-hours sub-survival entries).
+            if ev.raw.sigma_bar_bps < self.cfg.min_entry_sigma_bps {
                 continue;
+            }
+            // Saturday skip: the structurally dead day (thin weekend
+            // liquidity, breakeven hit). The finalized candidate sits it out.
+            if self.cfg.skip_saturday {
+                use chrono::Datelike;
+                if chrono::DateTime::from_timestamp_nanos(now_ns).weekday()
+                    == chrono::Weekday::Sat
+                {
+                    continue;
+                }
             }
 
             m.entered = true;
@@ -839,16 +904,21 @@ impl ShadowCore {
                     Side::Down => m.down_token.clone(),
                 },
                 entry_touch_price: touch.price,
+                sigma_bar_bps: ev.raw.sigma_bar_bps,
                 probe_due_ns: now_ns + self.cfg.latency_probe_ms as i64 * 1_000_000,
                 probe_done: false,
                 // Harness exits require a tick at or before close; clamp.
                 exit_due_ns: (now_ns + self.cfg.exit_after_s as i64 * 1_000_000_000)
                     .min(close_ns),
-                // Lane entries HOLD to expiry: the exit is pre-marked done so
-                // no WouldExit is ever emitted; the ResolutionWatch settles.
-                exit_done: lane,
+                // Lane entries and exit_after_s == 0 HOLD to expiry: the exit
+                // is pre-marked done so no WouldExit is ever emitted; the
+                // ResolutionWatch settles the full laddered position.
+                exit_done: lane || self.cfg.exit_after_s == 0,
                 ladder_avg_cost: None,
                 ladder_shares: None,
+                passive_level: None,
+                passive_deadline_ns: 0,
+                passive_done: true,
             });
             self.resolutions.push(ResolutionWatch {
                 entry_id,
@@ -961,7 +1031,13 @@ impl ShadowCore {
                     .map(|l| l.ask_size_at_or_below(p.entry_touch_price))
                     .unwrap_or(0.0);
                 let still_quoted = remaining_size > 0.0;
-                let ladder_fill = ladder.and_then(|l| l.fill_buy(SHADOW_NOTIONAL_USDC));
+                let mult = if self.cfg.vol_sizing_ref_bps > 0.0 {
+                    (p.sigma_bar_bps / self.cfg.vol_sizing_ref_bps)
+                        .clamp(self.cfg.vol_sizing_lo, self.cfg.vol_sizing_hi)
+                } else {
+                    1.0
+                };
+                let ladder_fill = ladder.and_then(|l| l.fill_buy(SHADOW_NOTIONAL_USDC * mult));
                 if let Some((avg, shares)) = ladder_fill {
                     p.ladder_avg_cost = Some(avg);
                     p.ladder_shares = Some(shares);
@@ -1029,9 +1105,81 @@ impl ShadowCore {
                     ladder_shares_sold,
                     ladder_mark_pnl_usd,
                 });
+                if p.ladder_avg_cost.is_some()
+                    && p.ladder_shares.is_some()
+                    && let Some(mid) = ladder.and_then(|l| {
+                        let b = l.best_bid()?.price;
+                        let a = l.best_ask()?.price;
+                        Some(0.5 * (b + a))
+                    })
+                {
+                    p.passive_level = Some(mid);
+                    p.passive_deadline_ns =
+                        now_ns + PASSIVE_EXIT_TIMEOUT_S * 1_000_000_000;
+                    p.passive_done = false;
+                }
+            }
+            if !p.passive_done
+                && let (Some(level), Some(avg), Some(shares)) =
+                    (p.passive_level, p.ladder_avg_cost, p.ladder_shares)
+            {
+                let ladder = self.books.get(&p.token);
+                let close_ns = self
+                    .markets
+                    .get(&p.slug)
+                    .map(|m| m.close_ts_s * 1_000_000_000)
+                    .unwrap_or(i64::MAX);
+                let crossed = ladder
+                    .and_then(Ladder::best_bid)
+                    .is_some_and(|b| b.price >= level - 1e-9);
+                if crossed {
+                    p.passive_done = true;
+                    out.push(LogEvent::PassiveExit {
+                        ts_utc: ts_utc(now_ns),
+                        slug: p.slug.clone(),
+                        side: p.side.as_str(),
+                        level,
+                        filled: true,
+                        entry_avg: avg,
+                        shares,
+                        pnl_usd: Some(shares * (level - avg)),
+                        fallback_exit_avg: None,
+                        fallback_shares_sold: None,
+                    });
+                } else if now_ns >= close_ns {
+                    p.passive_done = true;
+                    out.push(LogEvent::PassiveExit {
+                        ts_utc: ts_utc(now_ns),
+                        slug: p.slug.clone(),
+                        side: p.side.as_str(),
+                        level,
+                        filled: false,
+                        entry_avg: avg,
+                        shares,
+                        pnl_usd: None,
+                        fallback_exit_avg: None,
+                        fallback_shares_sold: None,
+                    });
+                } else if now_ns >= p.passive_deadline_ns {
+                    p.passive_done = true;
+                    let sale = ladder.and_then(|l| l.fill_sell(shares));
+                    out.push(LogEvent::PassiveExit {
+                        ts_utc: ts_utc(now_ns),
+                        slug: p.slug.clone(),
+                        side: p.side.as_str(),
+                        level,
+                        filled: false,
+                        entry_avg: avg,
+                        shares,
+                        pnl_usd: sale.map(|(px, sold)| sold * (px - avg)),
+                        fallback_exit_avg: sale.map(|(px, _)| px),
+                        fallback_shares_sold: sale.map(|(_, sold)| sold),
+                    });
+                }
             }
         }
-        self.pending.retain(|p| !(p.probe_done && p.exit_done));
+        self.pending
+            .retain(|p| !(p.probe_done && p.exit_done && p.passive_done));
         out
     }
 
@@ -1125,6 +1273,16 @@ pub async fn run_shadow(args: ShadowArgs) -> Result<()> {
         min_entry_sigma_bps: args.min_entry_sigma_bps,
         rearm_edge: args.rearm_edge,
         max_clips: args.max_clips,
+        vol_estimator: match args.vol_estimator.as_str() {
+            "ewma" => VolEstimator::Ewma {
+                halflife_s: args.ewma_halflife_s,
+            },
+            _ => VolEstimator::Realized,
+        },
+        skip_saturday: args.skip_saturday,
+        vol_sizing_ref_bps: args.vol_sizing_ref_bps,
+        vol_sizing_lo: args.vol_sizing_lo,
+        vol_sizing_hi: args.vol_sizing_hi,
     })));
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -2058,9 +2216,14 @@ mod tests {
             align_min_mid: 0.85,
             enter_within_close_s: 120,
             stop_before_close_s: 5,
-            min_entry_sigma_bps: 4.0,
+            min_entry_sigma_bps: 0.0,
             rearm_edge: 0.0,
             max_clips: 1,
+            vol_estimator: VolEstimator::Realized,
+            skip_saturday: false,
+            vol_sizing_ref_bps: 0.0,
+            vol_sizing_lo: 0.5,
+            vol_sizing_hi: 2.0,
         }
     }
 
@@ -2294,6 +2457,27 @@ mod tests {
             }
             other => panic!("expected WouldExit, got {other:?}"),
         }
+        // The passive-exit probe keeps the trade pending until it resolves.
+        assert_eq!(core.pending.len(), 1);
+        // A bid crossing the resting mid level fills the probe fee-free.
+        core.apply_book_snapshot(
+            "up-tok",
+            &[(0.58, 20.0)],
+            &[(0.60, 10.0)],
+            Some(1_932_000),
+            1_932_020,
+        );
+        let passive = core.poll_due(entry_ns + 32 * NS);
+        assert_eq!(passive.len(), 1);
+        match &passive[0] {
+            LogEvent::PassiveExit { filled, level, pnl_usd, .. } => {
+                assert!(*filled);
+                assert!((*level - 0.575).abs() < 1e-9);
+                // Laddered entry was 0.60; the mid level sits below it.
+                assert!(pnl_usd.unwrap() < 0.0);
+            }
+            other => panic!("expected PassiveExit, got {other:?}"),
+        }
         assert!(core.pending.is_empty(), "completed trades are dropped");
 
         match core.summary(entry_ns + 31 * NS, 1_931_000) {
@@ -2348,8 +2532,10 @@ mod tests {
         assert_eq!(core.decide(entry_ns).len(), 1);
         assert!(core.poll_due(2099 * NS).iter().all(|e| matches!(e, LogEvent::QuoteProbe { .. })));
         let exit = core.poll_due(2100 * NS);
-        assert_eq!(exit.len(), 1);
+        assert_eq!(exit.len(), 2);
         assert!(matches!(exit[0], LogEvent::WouldExit { .. }));
+        // At close the passive probe resolves in the same poll.
+        assert!(matches!(exit[1], LogEvent::PassiveExit { .. }));
     }
 
     #[test]

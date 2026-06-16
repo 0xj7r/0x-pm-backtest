@@ -2255,15 +2255,16 @@ mod bootstrap {
     type Core = Arc<Mutex<ShadowCore>>;
 
     pub async fn warm_buffers(core: Core, perp_weight: f64) -> anyhow::Result<()> {
-        match warm_klines(
-            &core,
-            "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=70",
-            false,
-        )
-        .await
-        {
-            Ok(n) => tracing::info!(klines = n, "spot buffer pre-warmed from Binance klines"),
-            Err(e) => tracing::warn!(error = %e, "spot klines pre-warm failed; live warm-up fallback"),
+        // The realized-vol estimator samples spot on a 1-SECOND grid
+        // (vol_sample_dt_s=1). 1m klines give one price per 60s, so the 1s grid
+        // becomes a step function (59 zero-returns + 1 jump) and vol is badly
+        // under-estimated until live ticks replace it -> off-model first hour.
+        // Backfill SPOT at 1s granularity (the level the estimator actually
+        // uses) so the bootstrap vol matches the live tick-sampled vol and the
+        // engine has parity from t=0.
+        match warm_spot_1s(&core, 3600).await {
+            Ok(n) => tracing::info!(klines = n, "spot buffer pre-warmed from Binance 1s klines"),
+            Err(e) => tracing::warn!(error = %e, "spot 1s klines pre-warm failed; live warm-up fallback"),
         }
         if perp_weight > 0.0 {
             match warm_klines(
@@ -2355,6 +2356,49 @@ mod bootstrap {
             }
         }
         Ok(n)
+    }
+
+    /// Backfill the spot buffer with ~`seconds` of 1s klines (Binance caps at
+    /// 1000/req, so paginate by close-time). Each close is pushed on its
+    /// close-time, giving the vol estimator a real 1s price path == what the
+    /// live tick feed produces on the 1s sample grid.
+    async fn warm_spot_1s(core: &Core, seconds: i64) -> anyhow::Result<usize> {
+        let now_ms = super::now_unix_ms();
+        let mut start = now_ms - seconds * 1000;
+        let mut total = 0usize;
+        let client = reqwest::Client::new();
+        while start < now_ms {
+            let url = format!(
+                "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1s&startTime={}&limit=1000",
+                start
+            );
+            let body: serde_json::Value = client.get(&url).send().await?.json().await?;
+            let arr = match body.as_array() {
+                Some(a) if !a.is_empty() => a,
+                _ => break,
+            };
+            let mut last_close = start;
+            {
+                let mut core_g = core.lock().expect("shadow core poisoned");
+                for k in arr {
+                    let close_ms = k.get(6).and_then(serde_json::Value::as_i64);
+                    let close_px = k
+                        .get(4)
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|s| s.parse::<f64>().ok());
+                    if let (Some(ms), Some(px)) = (close_ms, close_px) {
+                        core_g.push_spot(ms, ms, px, 0.0, false);
+                        last_close = ms;
+                        total += 1;
+                    }
+                }
+            }
+            if last_close <= start {
+                break;
+            }
+            start = last_close + 1;
+        }
+        Ok(total)
     }
 }
 

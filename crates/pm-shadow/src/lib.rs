@@ -8,7 +8,12 @@
 //! logs WOULD_ENTER / QUOTE_PROBE / WOULD_EXIT / SUMMARY records as JSONL.
 
 use anyhow::{Context, Result};
-use pm_alpha::{AlphaModel, AlphaModelConfig, ExoState, MarketMeta, Token, VolEstimator};
+use pm_alpha::harness::{EntryMode, Side as HarnessSide};
+use pm_alpha::{
+    decide_entry, frozen_fade_decide_config, AlphaModel, AlphaModelConfig, DecideConfig,
+    DecisionInputs, EntryAction, EntryState, EntryStateDelta, ExoState, MarketMeta, PerpState,
+    Token, VolEstimator,
+};
 use pm_types::{SpotHistory, SpotTick};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
@@ -343,6 +348,11 @@ pub struct MarketWindow {
     pub close_ts_s: i64,
     pub up_token: String,
     pub down_token: String,
+    /// CTF binary index set per outcome (1 << position in clobTokenIds).
+    pub up_index_set: u64,
+    pub down_index_set: u64,
+    /// CTF condition id for on-chain redemption; None until Gamma supplies it.
+    pub condition_id: Option<String>,
     /// True strike from Gamma/crypto-price (`openPrice`); None until present.
     pub gamma_strike: Option<f64>,
     /// First threshold crossing only: one shadow entry per market.
@@ -350,9 +360,10 @@ pub struct MarketWindow {
     /// Entries taken so far (re-entry bookkeeping; equals 0 or 1 unless
     /// `rearm_edge`/`max_clips` enable laddering).
     pub n_clips: u32,
-    /// Re-entry arming: disarmed after each entry, re-armed only once both
-    /// sides' touch edges drop below `rearm_edge` (harness semantics).
-    pub armed: bool,
+    /// Shared SSOT entry state (rearm + clip cooldown); fed to `decide_entry`.
+    pub entry: EntryState,
+    /// Deferred `decide_entry` delta when live execution commits after submit.
+    pub pending_commit: Option<EntryStateDelta>,
 }
 
 /// Rolling per-venue price prints on the local receipt clock, plus
@@ -516,7 +527,17 @@ pub struct ExecIntent {
     pub token_id: String,
     pub p_exo: f64,
     pub touch_price: f64,
+    pub marketable_limit_price: f64,
+    pub target_notional: f64,
+    pub hold_to_redemption: bool,
     pub clip: u32,
+    pub edge: f64,
+    pub sigma_bar_bps: f64,
+    pub strike: f64,
+    pub close_ts_s: i64,
+    pub condition_id: Option<String>,
+    pub up_index_set: u64,
+    pub down_index_set: u64,
 }
 
 pub struct ShadowCore {
@@ -565,6 +586,37 @@ pub struct ShadowConfig {
     pub vol_sizing_ref_bps: f64,
     pub vol_sizing_lo: f64,
     pub vol_sizing_hi: f64,
+    /// Shared `decide_entry` config — byte-identical to backtest harness.
+    pub decide_cfg: DecideConfig,
+}
+
+/// Build `ShadowConfig` from CLI/runtime args plus the frozen decide SSOT.
+pub fn shadow_config_from_args(args: &ShadowArgs) -> ShadowConfig {
+    ShadowConfig {
+        edge_threshold: args.edge_threshold,
+        vol_lookback_s: args.vol_lookback_s,
+        exit_after_s: args.exit_after_s,
+        latency_probe_ms: args.latency_probe_ms,
+        perp_price_weight: args.perp_price_weight,
+        lane_late_fav: args.lane_late_fav,
+        align_min_mid: args.align_min_mid,
+        enter_within_close_s: args.enter_within_close_s,
+        stop_before_close_s: args.stop_before_close_s,
+        min_entry_sigma_bps: args.min_entry_sigma_bps,
+        rearm_edge: args.rearm_edge,
+        max_clips: args.max_clips,
+        vol_estimator: match args.vol_estimator.as_str() {
+            "ewma" => VolEstimator::Ewma {
+                halflife_s: args.ewma_halflife_s,
+            },
+            _ => VolEstimator::Realized,
+        },
+        skip_saturday: args.skip_saturday,
+        vol_sizing_ref_bps: args.vol_sizing_ref_bps,
+        vol_sizing_lo: args.vol_sizing_lo,
+        vol_sizing_hi: args.vol_sizing_hi,
+        decide_cfg: frozen_fade_decide_config(SHADOW_NOTIONAL_USDC),
+    }
 }
 
 impl ShadowCore {
@@ -736,10 +788,56 @@ impl ShadowCore {
                 if existing.gamma_strike.is_none() {
                     existing.gamma_strike = market.gamma_strike;
                 }
+                if existing.condition_id.is_none() {
+                    existing.condition_id = market.condition_id;
+                }
             }
             None => {
                 self.markets.insert(market.slug.clone(), market);
             }
+        }
+    }
+
+    /// Apply a deferred entry commit after live execution fills (restore on miss).
+    pub fn commit_entry(&mut self, slug: &str, filled: bool) {
+        let pending = match self.markets.get_mut(slug) {
+            Some(m) => m.pending_commit.take(),
+            None => return,
+        };
+        let Some(delta) = pending else {
+            return;
+        };
+        if !filled {
+            if let Some(m) = self.markets.get_mut(slug) {
+                m.pending_commit = Some(delta);
+            }
+            return;
+        }
+        let Some(m) = self.markets.get_mut(slug) else {
+            return;
+        };
+        if let Some(armed) = delta.set_armed {
+            m.entry.armed = armed;
+        }
+        if let Some(ns) = delta.set_next_entry_ns {
+            m.entry.next_entry_ns = ns;
+        }
+        if delta.inc_clips {
+            m.n_clips = m.n_clips.saturating_add(1);
+            m.entered = true;
+        }
+    }
+
+    fn basis_mom_60s_bps(perp: Option<&PerpState>, spot: &SpotHistory, now_ns: i64) -> f64 {
+        match perp {
+            Some(p) => match (
+                p.basis_frac(spot, now_ns),
+                p.basis_frac(spot, now_ns - 60 * 1_000_000_000),
+            ) {
+                (Some(a), Some(b)) => (a - b) * 1e4,
+                _ => 0.0,
+            },
+            None => 0.0,
         }
     }
 
@@ -794,7 +892,27 @@ impl ShadowCore {
         })
     }
 
-    pub fn decide(&mut self, now_ns: i64) -> Vec<LogEvent> {
+    fn sync_decide_cfg(&mut self) {
+        self.cfg.decide_cfg.edge_threshold = self.cfg.edge_threshold;
+        self.cfg.decide_cfg.min_entry_sigma_bps = self.cfg.min_entry_sigma_bps;
+        self.cfg.decide_cfg.skip_saturday = self.cfg.skip_saturday;
+        self.cfg.decide_cfg.rearm_edge = self.cfg.rearm_edge;
+        self.cfg.decide_cfg.stop_before_close_s = self.cfg.stop_before_close_s;
+        self.cfg.decide_cfg.vol_sizing_ref_bps = self.cfg.vol_sizing_ref_bps;
+        self.cfg.decide_cfg.vol_sizing_lo = self.cfg.vol_sizing_lo;
+        self.cfg.decide_cfg.vol_sizing_hi = self.cfg.vol_sizing_hi;
+        if self.cfg.lane_late_fav {
+            self.cfg.decide_cfg.enter_within_close_s = self.cfg.enter_within_close_s;
+            self.cfg.decide_cfg.entry_mode = EntryMode::Aligned;
+            self.cfg.decide_cfg.align_min_mid = self.cfg.align_min_mid;
+        } else {
+            self.cfg.decide_cfg.enter_within_close_s = 0;
+            self.cfg.decide_cfg.entry_mode = EntryMode::Fade;
+        }
+    }
+
+    pub fn decide(&mut self, now_ns: i64, defer_entry_commit: bool) -> Vec<LogEvent> {
+        self.sync_decide_cfg();
         let spot = self.spot_history();
         let perp = self.perp_state();
         // Warm-up gate: with a partially-filled buffer (post-restart) the
@@ -895,47 +1013,80 @@ impl ShadowCore {
                 };
                 (side, p_side - touch.price, touch)
             } else {
-                // Same side selection as harness execute(): ties go to Up/Yes.
-                let edge_yes = ev.p - up_ask.price;
-                let edge_no = (1.0 - ev.p) - down_ask.price;
-                // Disarmed: watch for the dislocation to close (both edges
-                // below the re-arm level); only a LATER crossing re-enters.
-                if rearm_active && !m.armed {
-                    if edge_yes < self.cfg.rearm_edge && edge_no < self.cfg.rearm_edge {
-                        m.armed = true;
-                    }
-                    continue;
-                }
-                if edge_yes >= edge_no {
-                    (Side::Up, edge_yes, up_ask)
-                } else {
-                    (Side::Down, edge_no, down_ask)
-                }
-            };
-            if edge < self.cfg.edge_threshold {
-                continue;
-            }
-            // Sigma FLOOR (deliberately a minimum, not a cap): below it the
-            // tape is too calm for the edge to clear the fee leg. Applies to
-            // both lanes; the lane runs a higher floor (vol IS its edge), the
-            // fade a lower one (prunes the dead-hours sub-survival entries).
-            if ev.raw.sigma_bar_bps < self.cfg.min_entry_sigma_bps {
-                continue;
-            }
-            // Saturday skip: the structurally dead day (thin weekend
-            // liquidity, breakeven hit). The finalized candidate sits it out.
-            if self.cfg.skip_saturday {
-                use chrono::Datelike;
-                if chrono::DateTime::from_timestamp_nanos(now_ns).weekday()
-                    == chrono::Weekday::Sat
-                {
-                    continue;
-                }
-            }
+                // Fade lane: single SSOT `decide_entry` (identical to backtest harness).
+                let up_mid = self.books.get(&m.up_token).and_then(Ladder::mid);
+                let inputs = DecisionInputs {
+                    p_exo: ev.p,
+                    dir_p_up: None,
+                    dir_model_active: false,
+                    yes_ask: up_ask.price,
+                    no_buy: down_ask.price,
+                    mid: up_mid.unwrap_or((up_ask.price + (1.0 - down_ask.price)) / 2.0),
+                    sigma_bar_bps: ev.raw.sigma_bar_bps,
+                    basis_mom_60s_bps: Self::basis_mom_60s_bps(perp.as_ref(), &spot, now_ns),
+                };
+                let (decision, delta) =
+                    decide_entry(&inputs, now_ns, close_ns, &m.entry, &self.cfg.decide_cfg);
 
-            m.entered = true;
-            m.n_clips += 1;
-            m.armed = false;
+                if let Some(armed) = delta.set_armed {
+                    if decision.action != EntryAction::Enter {
+                        m.entry.armed = armed;
+                    }
+                }
+
+                if decision.action != EntryAction::Enter {
+                    continue;
+                }
+
+                let side = match decision.side {
+                    HarnessSide::Yes => Side::Up,
+                    HarnessSide::No => Side::Down,
+                };
+                let edge = match side {
+                    Side::Up => ev.p - up_ask.price,
+                    Side::Down => (1.0 - ev.p) - down_ask.price,
+                };
+                let touch = match side {
+                    Side::Up => up_ask,
+                    Side::Down => down_ask,
+                };
+
+                if defer_entry_commit {
+                    m.pending_commit = Some(delta);
+                } else {
+                    if let Some(armed) = delta.set_armed {
+                        m.entry.armed = armed;
+                    }
+                    if let Some(ns) = delta.set_next_entry_ns {
+                        m.entry.next_entry_ns = ns;
+                    }
+                    if delta.inc_clips {
+                        m.n_clips = m.n_clips.saturating_add(1);
+                        m.entered = true;
+                    }
+                }
+
+                (side, edge, touch)
+            };
+            if lane {
+                if edge < self.cfg.edge_threshold {
+                    continue;
+                }
+                if ev.raw.sigma_bar_bps < self.cfg.min_entry_sigma_bps {
+                    continue;
+                }
+                if self.cfg.skip_saturday {
+                    use chrono::Datelike;
+                    if chrono::DateTime::from_timestamp_nanos(now_ns).weekday()
+                        == chrono::Weekday::Sat
+                    {
+                        continue;
+                    }
+                }
+                m.entered = true;
+                m.n_clips += 1;
+                m.entry.armed = false;
+            }
             let entry_id = self.next_entry_id;
             self.next_entry_id += 1;
             self.stats.entries_total += 1;
@@ -1314,46 +1465,37 @@ fn now_unix_ms() -> i64 {
     now_unix_ns() / 1_000_000
 }
 
+/// Live-execution feedback: apply (or restore) a deferred entry commit.
+#[derive(Debug, Clone)]
+pub struct EntryCommit {
+    pub slug: String,
+    pub filled: bool,
+}
+
 pub async fn run_shadow(args: ShadowArgs) -> Result<()> {
-    run_shadow_with_sink(args, None).await
+    run_shadow_with_sink(args, None, None).await
 }
 
 /// Same proven shadow engine + feeds + decide loop as `run_shadow`, but each
 /// `WouldEnter` decision is also emitted as an `ExecIntent` over `intent_tx` for
 /// live execution. The decision path is UNCHANGED — live trading driven off this
 /// channel makes byte-identical entry decisions to shadow/backtest. `None` =
-/// pure log-only shadow (the CLI path).
+/// pure log-only shadow (the CLI path). Send [`EntryCommit`] on `commit_tx` after
+/// each submit attempt so deferred entry state stays consistent.
 pub async fn run_shadow_with_sink(
     args: ShadowArgs,
     intent_tx: Option<tokio::sync::mpsc::UnboundedSender<ExecIntent>>,
+    mut commit_rx: Option<tokio::sync::mpsc::UnboundedReceiver<EntryCommit>>,
 ) -> Result<()> {
     let (mut logger, log_path) = Logger::create(&args.out_dir)?;
     tracing::info!(log = %log_path.display(), "shadow mode: LOG ONLY, zero orders");
 
-    let core = std::sync::Arc::new(std::sync::Mutex::new(ShadowCore::new(ShadowConfig {
-        edge_threshold: args.edge_threshold,
-        vol_lookback_s: args.vol_lookback_s,
-        exit_after_s: args.exit_after_s,
-        latency_probe_ms: args.latency_probe_ms,
-        perp_price_weight: args.perp_price_weight,
-        lane_late_fav: args.lane_late_fav,
-        align_min_mid: args.align_min_mid,
-        enter_within_close_s: args.enter_within_close_s,
-        stop_before_close_s: args.stop_before_close_s,
-        min_entry_sigma_bps: args.min_entry_sigma_bps,
-        rearm_edge: args.rearm_edge,
-        max_clips: args.max_clips,
-        vol_estimator: match args.vol_estimator.as_str() {
-            "ewma" => VolEstimator::Ewma {
-                halflife_s: args.ewma_halflife_s,
-            },
-            _ => VolEstimator::Realized,
-        },
-        skip_saturday: args.skip_saturday,
-        vol_sizing_ref_bps: args.vol_sizing_ref_bps,
-        vol_sizing_lo: args.vol_sizing_lo,
-        vol_sizing_hi: args.vol_sizing_hi,
-    })));
+    let defer_entry_commit = intent_tx.is_some();
+    let core = std::sync::Arc::new(std::sync::Mutex::new(ShadowCore::new(
+        shadow_config_from_args(&args),
+    )));
+
+    bootstrap::warm_buffers(core.clone(), args.perp_price_weight).await?;
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let (assets_tx, assets_rx) = tokio::sync::watch::channel(Vec::<String>::new());
@@ -1412,6 +1554,13 @@ pub async fn run_shadow_with_sink(
             }
             _ = tick.tick() => {
                 let now_ns = now_unix_ns();
+                if let Some(rx) = commit_rx.as_mut() {
+                    while let Ok(commit) = rx.try_recv() {
+                        core.lock()
+                            .expect("shadow core poisoned")
+                            .commit_entry(&commit.slug, commit.filled);
+                    }
+                }
                 let mut events = Vec::new();
                 {
                     let mut core = core.lock().expect("shadow core poisoned");
@@ -1419,7 +1568,7 @@ pub async fn run_shadow_with_sink(
                     if now_ns >= next_decide_ns {
                         next_decide_ns = now_ns + 1_000_000_000;
                         core.prune(now_ns);
-                        events.extend(core.decide(now_ns));
+                        events.extend(core.decide(now_ns, defer_entry_commit));
                     }
                     if now_ns >= next_summary_ns {
                         next_summary_ns = now_ns + 60_000_000_000;
@@ -1439,17 +1588,41 @@ pub async fn run_shadow_with_sink(
                     let core = core.lock().expect("shadow core poisoned");
                     for event in &events {
                         if let LogEvent::WouldEnter {
-                            slug, side, p_exo, touch_price, clip, ..
+                            slug,
+                            side,
+                            p_exo,
+                            touch_price,
+                            clip,
+                            edge,
+                            sigma_bar_bps,
+                            strike,
+                            ..
                         } = event
                         {
-                            if let Some(token_id) = core.token_for(slug, side) {
+                            if let Some(m) = core.markets.get(slug) {
+                                let token_id = if *side == "up" {
+                                    m.up_token.clone()
+                                } else {
+                                    m.down_token.clone()
+                                };
+                                let limit = p_exo - core.cfg.decide_cfg.min_marginal_edge;
                                 let _ = tx.send(ExecIntent {
                                     slug: slug.clone(),
-                                    side: side.to_string(),
+                                    side: (*side).to_string(),
                                     token_id,
                                     p_exo: *p_exo,
                                     touch_price: *touch_price,
+                                    marketable_limit_price: limit,
+                                    target_notional: core.cfg.decide_cfg.notional_usdc,
+                                    hold_to_redemption: core.cfg.decide_cfg.exit_after_s == 0,
                                     clip: *clip,
+                                    edge: *edge,
+                                    sigma_bar_bps: *sigma_bar_bps,
+                                    strike: *strike,
+                                    close_ts_s: m.close_ts_s,
+                                    condition_id: m.condition_id.clone(),
+                                    up_index_set: m.up_index_set,
+                                    down_index_set: m.down_index_set,
                                 });
                             }
                         }
@@ -1481,10 +1654,70 @@ pub async fn run_shadow_with_sink(
     Ok(())
 }
 
+/// Pre-warm spot/perp buffers from Binance 1m klines so vol3600 clears on restart.
+mod bootstrap {
+    use super::ShadowCore;
+    use anyhow::Context;
+    use std::sync::{Arc, Mutex};
+
+    type Core = Arc<Mutex<ShadowCore>>;
+
+    pub async fn warm_buffers(core: Core, perp_weight: f64) -> anyhow::Result<()> {
+        match warm_klines(
+            &core,
+            "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=70",
+            false,
+        )
+        .await
+        {
+            Ok(n) => tracing::info!(klines = n, "spot buffer pre-warmed from Binance klines"),
+            Err(e) => tracing::warn!(error = %e, "spot klines pre-warm failed; live warm-up fallback"),
+        }
+        if perp_weight > 0.0 {
+            match warm_klines(
+                &core,
+                "https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=1m&limit=70",
+                true,
+            )
+            .await
+            {
+                Ok(n) => tracing::info!(klines = n, "perp buffer pre-warmed from Binance futures klines"),
+                Err(e) => tracing::warn!(error = %e, "perp klines pre-warm failed; live warm-up fallback"),
+            }
+        }
+        Ok(())
+    }
+
+    async fn warm_klines(core: &Core, url: &str, perp: bool) -> anyhow::Result<usize> {
+        let body: serde_json::Value = reqwest::get(url).await?.json().await?;
+        let arr = body
+            .as_array()
+            .context("binance klines response was not an array")?;
+        let mut core = core.lock().expect("shadow core poisoned");
+        let mut n = 0usize;
+        for k in arr {
+            let close_ms = k.get(6).and_then(serde_json::Value::as_i64);
+            let close_px = k
+                .get(4)
+                .and_then(serde_json::Value::as_str)
+                .and_then(|s| s.parse::<f64>().ok());
+            if let (Some(ms), Some(px)) = (close_ms, close_px) {
+                if perp {
+                    core.push_perp(ms, ms, px, 0.0);
+                } else {
+                    core.push_spot(ms, ms, px, 0.0, false);
+                }
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+}
+
 /// Live data feeds. Read-only consumers of public endpoints: the only
 /// outbound payloads are websocket subscriptions and pings.
 mod feeds {
-    use super::{MarketWindow, ShadowCore, now_unix_ms};
+    use super::{EntryState, MarketWindow, ShadowCore, now_unix_ms};
     use anyhow::{Context, Result};
     use futures::{SinkExt, StreamExt};
     use serde_json::Value;
@@ -2033,16 +2266,30 @@ mod feeds {
             .iter()
             .find_map(|k| value_f64(item.get(*k)))
             .filter(|s| s.is_finite() && *s > 0.0);
+        let up_index_set: u64 = if up_token == tokens[0] { 1 } else { 2 };
+        let down_index_set: u64 = if down_token == tokens[0] { 1 } else { 2 };
+        let condition_id = item
+            .get("conditionId")
+            .or_else(|| item.get("condition_id"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
         Some(MarketWindow {
             slug: slug.to_string(),
             open_ts_s,
             close_ts_s: open_ts_s + 300,
             up_token,
             down_token,
+            up_index_set,
+            down_index_set,
+            condition_id,
             gamma_strike,
             entered: false,
             n_clips: 0,
-            armed: true,
+            entry: EntryState {
+                armed: true,
+                next_entry_ns: i64::MIN,
+            },
+            pending_commit: None,
         })
     }
 
@@ -2317,6 +2564,11 @@ mod tests {
     }
 
     fn cfg() -> ShadowConfig {
+        let mut decide_cfg = frozen_fade_decide_config(50.0);
+        decide_cfg.edge_threshold = 0.16;
+        decide_cfg.min_entry_sigma_bps = 0.0;
+        decide_cfg.skip_saturday = false;
+        decide_cfg.rearm_edge = 0.0;
         ShadowConfig {
             edge_threshold: 0.16,
             vol_lookback_s: 1800,
@@ -2335,6 +2587,7 @@ mod tests {
             vol_sizing_ref_bps: 0.0,
             vol_sizing_lo: 0.5,
             vol_sizing_hi: 2.0,
+            decide_cfg,
         }
     }
 
@@ -2383,10 +2636,17 @@ mod tests {
             close_ts_s: 2100,
             up_token: "up-tok".to_string(),
             down_token: "down-tok".to_string(),
+            up_index_set: 1,
+            down_index_set: 2,
+            condition_id: None,
             gamma_strike: strike,
             entered: false,
             n_clips: 0,
-            armed: true,
+            entry: EntryState {
+                armed: true,
+                next_entry_ns: i64::MIN,
+            },
+            pending_commit: None,
         }
     }
 
@@ -2464,7 +2724,7 @@ mod tests {
         core.upsert_market(market(None));
         set_books(&mut core, 0.50, 0.50);
 
-        let events = core.decide(1900 * NS);
+        let events = core.decide(1900 * NS, false);
         assert_eq!(events.len(), 1);
         match &events[0] {
             LogEvent::WouldEnter { side, edge, strike, strike_source, touch_price, touch_size, p_exo, .. } => {
@@ -2479,7 +2739,7 @@ mod tests {
             other => panic!("expected WouldEnter, got {other:?}"),
         }
         // First crossing only: no duplicate entry on later passes.
-        assert!(core.decide(1901 * NS).is_empty());
+        assert!(core.decide(1901 * NS, false).is_empty());
         assert_eq!(core.stats.entries_total, 1);
     }
 
@@ -2489,7 +2749,7 @@ mod tests {
         core.upsert_market(market(None));
         set_books(&mut core, 0.50, 0.50);
 
-        let events = core.decide(1900 * NS);
+        let events = core.decide(1900 * NS, false);
         assert_eq!(events.len(), 1);
         match &events[0] {
             LogEvent::WouldEnter { side, p_exo, .. } => {
@@ -2511,13 +2771,13 @@ mod tests {
         }
         late.upsert_market(market(None));
         set_books(&mut late, 0.10, 0.95);
-        assert!(late.decide(3000 * NS).is_empty(), "no strike -> stand down");
+        assert!(late.decide(3000 * NS, false).is_empty(), "no strike -> stand down");
 
         // Full history: proxy = last Binance trade at-or-before open.
         let mut core = core_with_spot();
         core.upsert_market(market(None));
         set_books(&mut core, 0.10, 0.95); // cheap up ask so the fade fires
-        let events = core.decide(1900 * NS);
+        let events = core.decide(1900 * NS, false);
         assert_eq!(events.len(), 1);
         match &events[0] {
             LogEvent::WouldEnter { strike_source, strike, .. } => {
@@ -2534,7 +2794,7 @@ mod tests {
         core.upsert_market(market(Some(99_000.0)));
         set_books(&mut core, 0.50, 0.50);
         let entry_ns = 1900 * NS;
-        assert_eq!(core.decide(entry_ns).len(), 1);
+        assert_eq!(core.decide(entry_ns, false).len(), 1);
 
         // Nothing due before the probe time.
         assert!(core.poll_due(entry_ns + 100_000_000).is_empty());
@@ -2616,7 +2876,7 @@ mod tests {
         core.upsert_market(market(Some(99_000.0)));
         set_books(&mut core, 0.50, 0.50);
         let entry_ns = 1900 * NS;
-        assert_eq!(core.decide(entry_ns).len(), 1);
+        assert_eq!(core.decide(entry_ns, false).len(), 1);
         // Better price appears: still quoted, remaining size counts <= 0.50.
         core.apply_price_change("up-tok", false, 0.49, 12.0, Some(1_900_050), 1_900_060);
         let probe = core.poll_due(entry_ns + 150_000_000);
@@ -2640,7 +2900,7 @@ mod tests {
         // Entry 91s before close (inside the 90s deadline); exit_after=120s
         // would land 29s past close and must clamp to close.
         let entry_ns = 2009 * NS;
-        assert_eq!(core.decide(entry_ns).len(), 1);
+        assert_eq!(core.decide(entry_ns, false).len(), 1);
         assert!(core.poll_due(2099 * NS).iter().all(|e| matches!(e, LogEvent::QuoteProbe { .. })));
         let exit = core.poll_due(2100 * NS);
         assert_eq!(exit.len(), 2);
@@ -2654,7 +2914,7 @@ mod tests {
         let mut core = core_with_spot_strike(99_000.0);
         core.upsert_market(market(Some(99_000.0)));
         set_books(&mut core, 0.50, 0.50);
-        assert_eq!(core.decide(1900 * NS).len(), 1);
+        assert_eq!(core.decide(1900 * NS, false).len(), 1);
         // Not due before close + 15s grace.
         assert!(core.resolutions_due(2100 * NS).is_empty());
         let due = core.resolutions_due(2116 * NS);
@@ -2679,7 +2939,7 @@ mod tests {
         let mut core = core_with_spot_strike(99_000.0);
         core.upsert_market(market(Some(99_000.0)));
         set_books(&mut core, 0.50, 0.50);
-        assert_eq!(core.decide(1900 * NS).len(), 1);
+        assert_eq!(core.decide(1900 * NS, false).len(), 1);
         let mut t = 2116 * NS;
         for _ in 0..10 {
             assert_eq!(core.resolutions_due(t).len(), 1);
@@ -2703,7 +2963,7 @@ mod tests {
         );
         core.apply_book_snapshot("down-tok", &[(0.40, 60.0)], &[(0.50, 70.0)], Some(1_899_000), 1_899_040);
         let entry_ns = 1900 * NS;
-        assert_eq!(core.decide(entry_ns).len(), 1);
+        assert_eq!(core.decide(entry_ns, false).len(), 1);
 
         let probe = core.poll_due(entry_ns + 150_000_000);
         let (avg, shares) = match &probe[0] {
@@ -2790,6 +3050,61 @@ mod tests {
         assert!(d.first_arrival(1));
     }
 
+    /// Mirrors `bootstrap::warm_klines`: 70×1m candles spanning ~69 minutes.
+    fn push_klines_bootstrap(core: &mut ShadowCore, count: usize, span_s: i64, end_ms: i64) {
+        let start_ms = end_ms - span_s * 1_000;
+        let step_ms = if count > 1 {
+            (end_ms - start_ms) / (count as i64 - 1)
+        } else {
+            0
+        };
+        let mut price = 99_000.0;
+        for i in 0..count {
+            let ms = start_ms + step_ms * i as i64;
+            price *= if i % 2 == 0 { 1.0001 } else { 0.9999 };
+            core.push_spot(ms, ms + 25, price, 1.0, false);
+        }
+    }
+
+    fn spot_buffer_span_s(core: &ShadowCore) -> i64 {
+        match (core.spot.front(), core.spot.back()) {
+            (Some(first), Some(last)) => (last.ts_ns - first.ts_ns) / NS,
+            _ => 0,
+        }
+    }
+
+    fn vol_warmup_cleared(core: &ShadowCore, vol_lookback_s: u32) -> bool {
+        spot_buffer_span_s(core) >= vol_lookback_s as i64
+    }
+
+    #[test]
+    fn klines_bootstrap_clears_vol3600_warmup_immediately() {
+        let args = frozen_shadow_final_args(PathBuf::from("shadow-final"));
+        assert_eq!(args.vol_lookback_s, 3600);
+
+        // Partial post-restart buffer: warmup gate must block (even with huge edge).
+        let mut cold = ShadowCore::new(shadow_config_from_args(&args));
+        push_klines_bootstrap(&mut cold, 30, 1740, 1_900_000);
+        assert!(
+            spot_buffer_span_s(&cold) < 3600,
+            "short buffer should not span vol lookback"
+        );
+        cold.upsert_market(market(Some(99_000.0)));
+        set_books(&mut cold, 0.10, 0.95);
+        assert!(
+            cold.decide(1900 * NS, false).is_empty(),
+            "partial buffer must stand down"
+        );
+
+        // Live bootstrap geometry: 70×1m Binance klines (~4140s span).
+        let mut warm = ShadowCore::new(shadow_config_from_args(&args));
+        push_klines_bootstrap(&mut warm, 70, 4140, 1_900_000);
+        assert!(
+            vol_warmup_cleared(&warm, args.vol_lookback_s),
+            "bootstrap must clear vol3600 without waiting for 1h of live tape"
+        );
+    }
+
     #[test]
     fn warmup_gate_blocks_entries_until_buffer_spans_lookback() {
         // Buffer covering less than vol_lookback_s: stand down even with a
@@ -2802,7 +3117,7 @@ mod tests {
         }
         core.upsert_market(market(Some(99_000.0)));
         set_books(&mut core, 0.10, 0.95);
-        assert!(core.decide(1900 * NS).is_empty(), "warmup gate must block");
+        assert!(core.decide(1900 * NS, false).is_empty(), "warmup gate must block");
     }
 
     #[test]
@@ -2810,8 +3125,8 @@ mod tests {
         let mut core = core_with_spot_strike(99_000.0);
         core.upsert_market(market(Some(99_000.0)));
         set_books(&mut core, 0.50, 0.50);
-        assert!(core.decide(2095 * NS).is_empty(), "deadline is close - 90s");
-        assert!(core.decide(1700 * NS).is_empty(), "not open yet");
+        assert!(core.decide(2095 * NS, false).is_empty(), "deadline is close - 90s");
+        assert!(core.decide(1700 * NS, false).is_empty(), "not open yet");
     }
 
     #[test]
@@ -2819,13 +3134,13 @@ mod tests {
         let mut core = core_with_spot();
         core.upsert_market(market(None));
         set_books(&mut core, 0.10, 0.95);
-        assert_eq!(core.decide(1900 * NS).len(), 1);
+        assert_eq!(core.decide(1900 * NS, false).len(), 1);
         // Re-discovery now carries the true strike; entered must survive.
         core.upsert_market(market(Some(100_123.0)));
         let m = core.markets.get("btc-updown-5m-1800").unwrap();
         assert!(m.entered);
         assert_eq!(m.gamma_strike, Some(100_123.0));
-        assert!(core.decide(1901 * NS).is_empty());
+        assert!(core.decide(1901 * NS, false).is_empty());
     }
 
     #[test]
@@ -2915,11 +3230,11 @@ mod tests {
         core.upsert_market(market(None));
         set_lane_books(&mut core, 0.94, 0.08);
         // 200s before close: outside the 120s entry window.
-        assert!(core.decide(1900 * NS).is_empty(), "before the window");
+        assert!(core.decide(1900 * NS, false).is_empty(), "before the window");
         // 4s before close: past the 5s lane deadline.
-        assert!(core.decide(2096 * NS).is_empty(), "inside the stop buffer");
+        assert!(core.decide(2096 * NS, false).is_empty(), "inside the stop buffer");
         // 110s before close: inside [close-120, close-5).
-        let events = core.decide(1990 * NS);
+        let events = core.decide(1990 * NS, false);
         assert_eq!(events.len(), 1);
         match &events[0] {
             LogEvent::WouldEnter { side, lane, edge, touch_price, .. } => {
@@ -2931,7 +3246,7 @@ mod tests {
             other => panic!("expected WouldEnter, got {other:?}"),
         }
         // Still one entry per market.
-        assert!(core.decide(1991 * NS).is_empty());
+        assert!(core.decide(1991 * NS, false).is_empty());
         assert_eq!(core.stats.entries_total, 1);
     }
 
@@ -2942,7 +3257,7 @@ mod tests {
         let mut core = lane_core(101_000.0);
         core.upsert_market(market(None));
         set_lane_books(&mut core, 0.08, 0.94);
-        let events = core.decide(1990 * NS);
+        let events = core.decide(1990 * NS, false);
         assert_eq!(events.len(), 1);
         match &events[0] {
             LogEvent::WouldEnter { side, touch_price, .. } => {
@@ -2956,7 +3271,7 @@ mod tests {
         let mut none = lane_core(99_000.0);
         none.upsert_market(market(None));
         set_lane_books(&mut none, 0.50, 0.52); // mids 0.49 / 0.51
-        assert!(none.decide(1990 * NS).is_empty(), "no favourite -> stand down");
+        assert!(none.decide(1990 * NS, false).is_empty(), "no favourite -> stand down");
     }
 
     #[test]
@@ -2966,12 +3281,12 @@ mod tests {
         core.cfg.min_entry_sigma_bps = 1e6;
         core.upsert_market(market(None));
         set_lane_books(&mut core, 0.94, 0.08);
-        assert!(core.decide(1990 * NS).is_empty(), "sigma floor must block");
+        assert!(core.decide(1990 * NS, false).is_empty(), "sigma floor must block");
         // Identical setup at the validated 4bps floor enters.
         let mut core = lane_core(99_000.0);
         core.upsert_market(market(None));
         set_lane_books(&mut core, 0.94, 0.08);
-        assert_eq!(core.decide(1990 * NS).len(), 1);
+        assert_eq!(core.decide(1990 * NS, false).len(), 1);
     }
 
     #[test]
@@ -2980,7 +3295,7 @@ mod tests {
         core.upsert_market(market(None));
         set_lane_books(&mut core, 0.94, 0.08);
         let entry_ns = 1990 * NS;
-        assert_eq!(core.decide(entry_ns).len(), 1);
+        assert_eq!(core.decide(entry_ns, false).len(), 1);
         // Probe telemetry still fires at +latency.
         let probe = core.poll_due(entry_ns + 150_000_000);
         assert_eq!(probe.len(), 1);
@@ -2998,7 +3313,7 @@ mod tests {
         core.upsert_market(market(None));
         set_lane_books(&mut core, 0.94, 0.08);
         let entry_ns = 1990 * NS;
-        assert_eq!(core.decide(entry_ns).len(), 1);
+        assert_eq!(core.decide(entry_ns, false).len(), 1);
         // Probe walks the ladder: $50 against 50 sh @0.94 fills all 50.
         assert_eq!(core.poll_due(entry_ns + 150_000_000).len(), 1);
 
@@ -3027,22 +3342,22 @@ mod tests {
         core.cfg.max_clips = 2;
         core.upsert_market(market(None));
         set_books(&mut core, 0.50, 0.50);
-        assert_eq!(core.decide(1900 * NS).len(), 1);
+        assert_eq!(core.decide(1900 * NS, false).len(), 1);
         set_books(&mut core, 0.99, 0.99);
-        assert!(core.decide(1901 * NS).is_empty());
+        assert!(core.decide(1901 * NS, false).is_empty());
         set_books(&mut core, 0.50, 0.50);
-        assert!(core.decide(1902 * NS).is_empty());
+        assert!(core.decide(1902 * NS, false).is_empty());
 
         // …and rearm_edge without extra clips does too.
         let mut core = core_with_spot_strike(99_000.0);
         core.cfg.rearm_edge = 0.08;
         core.upsert_market(market(None));
         set_books(&mut core, 0.50, 0.50);
-        assert_eq!(core.decide(1900 * NS).len(), 1);
+        assert_eq!(core.decide(1900 * NS, false).len(), 1);
         set_books(&mut core, 0.99, 0.99);
-        assert!(core.decide(1901 * NS).is_empty());
+        assert!(core.decide(1901 * NS, false).is_empty());
         set_books(&mut core, 0.50, 0.50);
-        assert!(core.decide(1902 * NS).is_empty());
+        assert!(core.decide(1902 * NS, false).is_empty());
     }
 
     #[test]
@@ -3052,9 +3367,9 @@ mod tests {
         core.cfg.max_clips = 2;
         core.upsert_market(market(None));
         set_books(&mut core, 0.50, 0.50);
-        assert_eq!(core.decide(1900 * NS).len(), 1);
+        assert_eq!(core.decide(1900 * NS, false).len(), 1);
         for s in 1901..1950i64 {
-            assert!(core.decide(s * NS).is_empty(), "disarmed while edge persists");
+            assert!(core.decide(s * NS, false).is_empty(), "disarmed while edge persists");
         }
         assert_eq!(core.stats.entries_total, 1);
     }
@@ -3066,14 +3381,14 @@ mod tests {
         core.cfg.max_clips = 2;
         core.upsert_market(market(None));
         set_books(&mut core, 0.50, 0.50);
-        assert_eq!(core.decide(1900 * NS).len(), 1);
+        assert_eq!(core.decide(1900 * NS, false).len(), 1);
         // Dislocation closes (both edges < 0.08): the re-arm pass itself
         // must NOT enter, only a later crossing may.
         set_books(&mut core, 0.99, 0.99);
-        assert!(core.decide(1901 * NS).is_empty());
-        // It reopens: second clip.
+        assert!(core.decide(1901 * NS, false).is_empty());
+        // It reopens: second clip (after the 5s clip cooldown from decide_entry).
         set_books(&mut core, 0.50, 0.50);
-        let again = core.decide(1902 * NS);
+        let again = core.decide(1906 * NS, false);
         assert_eq!(again.len(), 1);
         match &again[0] {
             LogEvent::WouldEnter { clip, lane, .. } => {
@@ -3084,9 +3399,9 @@ mod tests {
         }
         // max_clips respected: a third close/reopen cycle is refused.
         set_books(&mut core, 0.99, 0.99);
-        assert!(core.decide(1903 * NS).is_empty());
+        assert!(core.decide(1907 * NS, false).is_empty());
         set_books(&mut core, 0.50, 0.50);
-        assert!(core.decide(1904 * NS).is_empty());
+        assert!(core.decide(1912 * NS, false).is_empty());
         assert_eq!(core.stats.entries_total, 2);
     }
 
@@ -3097,12 +3412,12 @@ mod tests {
         core.cfg.max_clips = 2;
         core.upsert_market(market(None));
         set_books(&mut core, 0.50, 0.50);
-        assert_eq!(core.decide(1900 * NS).len(), 1);
+        assert_eq!(core.decide(1900 * NS, false).len(), 1);
         set_books(&mut core, 0.99, 0.99);
-        assert!(core.decide(1901 * NS).is_empty());
-        // Second Up entry at a different touch so the settles differ.
+        assert!(core.decide(1901 * NS, false).is_empty());
+        // Second Up entry at a different touch so the settles differ (post cooldown).
         set_books(&mut core, 0.60, 0.99);
-        assert_eq!(core.decide(1902 * NS).len(), 1);
+        assert_eq!(core.decide(1906 * NS, false).len(), 1);
 
         let due = core.resolutions_due(2116 * NS);
         assert_eq!(due.len(), 2);

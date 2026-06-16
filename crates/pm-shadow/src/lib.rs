@@ -67,6 +67,37 @@ pub struct ShadowArgs {
     pub vol_sizing_hi: f64,
 }
 
+/// Frozen leading config validated on backtest + the `shadow-final` live twin.
+///
+/// Field-for-field match with `pm_alpha::frozen_fade_decide_config` shadow
+/// parameters and the alpha harness scripts: edge 0.12, perp 0.75, vol3600
+/// realized, hold-to-redemption, rearm 0.08, max_clips 2, sigma floor 3.0,
+/// skip-Saturday, 90s pre-close stop.
+pub fn frozen_shadow_final_args(out_dir: PathBuf) -> ShadowArgs {
+    ShadowArgs {
+        slug_prefix: "btc-updown-5m-".to_string(),
+        edge_threshold: 0.12,
+        vol_lookback_s: 3600,
+        exit_after_s: 0,
+        latency_probe_ms: 150,
+        out_dir,
+        perp_price_weight: 0.75,
+        lane_late_fav: false,
+        align_min_mid: 0.55,
+        enter_within_close_s: 0,
+        stop_before_close_s: 90,
+        min_entry_sigma_bps: 3.0,
+        rearm_edge: 0.08,
+        max_clips: 2,
+        vol_estimator: "realized".to_string(),
+        ewma_halflife_s: 600.0,
+        skip_saturday: true,
+        vol_sizing_ref_bps: 0.0,
+        vol_sizing_lo: 0.5,
+        vol_sizing_hi: 2.0,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
     Up,
@@ -472,6 +503,22 @@ struct SummaryStats {
 /// All shadow decision/bookkeeping state. Pure with respect to I/O: feeds
 /// push events in, the runner polls decisions/probes/exits out. Unit tests
 /// drive it with synthetic events and injected clocks.
+/// An executable entry derived from a `WouldEnter` decision: the engine's
+/// decision plus the venue token to buy. Live execution consumes these over a
+/// channel; the decision itself (slug/side/p_exo/touch_price) is produced by the
+/// UNCHANGED `decide()` so live entries are identical to shadow's by construction.
+/// Sizing (clip notional) and the marketable limit are live-execution concerns
+/// applied by the consumer, not the engine.
+#[derive(Debug, Clone)]
+pub struct ExecIntent {
+    pub slug: String,
+    pub side: String,
+    pub token_id: String,
+    pub p_exo: f64,
+    pub touch_price: f64,
+    pub clip: u32,
+}
+
 pub struct ShadowCore {
     cfg: ShadowConfig,
     model: AlphaModel,
@@ -736,6 +783,17 @@ impl ShadowCore {
     /// One decision pass over all active windows, mirroring the harness:
     /// belief from ExoState, edge per side vs the REAL touch asks, enter on
     /// the first crossing of `edge_threshold`. Call at ~1s cadence.
+    /// The venue token for a decided (slug, side). Used by live execution to
+    /// turn a `WouldEnter` into an order; None if the market isn't tracked.
+    pub fn token_for(&self, slug: &str, side: &str) -> Option<String> {
+        let m = self.markets.get(slug)?;
+        Some(if side == "up" {
+            m.up_token.clone()
+        } else {
+            m.down_token.clone()
+        })
+    }
+
     pub fn decide(&mut self, now_ns: i64) -> Vec<LogEvent> {
         let spot = self.spot_history();
         let perp = self.perp_state();
@@ -1257,6 +1315,18 @@ fn now_unix_ms() -> i64 {
 }
 
 pub async fn run_shadow(args: ShadowArgs) -> Result<()> {
+    run_shadow_with_sink(args, None).await
+}
+
+/// Same proven shadow engine + feeds + decide loop as `run_shadow`, but each
+/// `WouldEnter` decision is also emitted as an `ExecIntent` over `intent_tx` for
+/// live execution. The decision path is UNCHANGED — live trading driven off this
+/// channel makes byte-identical entry decisions to shadow/backtest. `None` =
+/// pure log-only shadow (the CLI path).
+pub async fn run_shadow_with_sink(
+    args: ShadowArgs,
+    intent_tx: Option<tokio::sync::mpsc::UnboundedSender<ExecIntent>>,
+) -> Result<()> {
     let (mut logger, log_path) = Logger::create(&args.out_dir)?;
     tracing::info!(log = %log_path.display(), "shadow mode: LOG ONLY, zero orders");
 
@@ -1361,6 +1431,29 @@ pub async fn run_shadow(args: ShadowArgs) -> Result<()> {
                 for event in &events {
                     tracing::info!(event = %serde_json::to_string(event).unwrap_or_default(), "shadow");
                     logger.write(event)?;
+                }
+                // Live-execution seam: emit each entry decision as an ExecIntent.
+                // The decision is the engine's UNCHANGED WouldEnter; only the
+                // venue token is attached. No-op when no sink is attached.
+                if let Some(tx) = &intent_tx {
+                    let core = core.lock().expect("shadow core poisoned");
+                    for event in &events {
+                        if let LogEvent::WouldEnter {
+                            slug, side, p_exo, touch_price, clip, ..
+                        } = event
+                        {
+                            if let Some(token_id) = core.token_for(slug, side) {
+                                let _ = tx.send(ExecIntent {
+                                    slug: slug.clone(),
+                                    side: side.to_string(),
+                                    token_id,
+                                    p_exo: *p_exo,
+                                    touch_price: *touch_price,
+                                    clip: *clip,
+                                });
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2202,8 +2295,26 @@ mod feeds {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pm_alpha::frozen_fade_decide_config;
 
     const NS: i64 = 1_000_000_000;
+
+    #[test]
+    fn frozen_shadow_final_args_matches_fade_ssot() {
+        let args = frozen_shadow_final_args(PathBuf::from("shadow-final"));
+        let decide = frozen_fade_decide_config(50.0);
+        assert_eq!(args.edge_threshold, decide.edge_threshold);
+        assert_eq!(args.min_entry_sigma_bps, decide.min_entry_sigma_bps);
+        assert_eq!(args.rearm_edge, decide.rearm_edge);
+        assert_eq!(args.max_clips, 2);
+        assert_eq!(args.exit_after_s, decide.exit_after_s);
+        assert_eq!(args.stop_before_close_s, decide.stop_before_close_s);
+        assert!(args.skip_saturday);
+        assert!((args.perp_price_weight - 0.75).abs() < f64::EPSILON);
+        assert_eq!(args.vol_lookback_s, 3600);
+        assert_eq!(args.vol_estimator, "realized");
+        assert!(!args.lane_late_fav);
+    }
 
     fn cfg() -> ShadowConfig {
         ShadowConfig {

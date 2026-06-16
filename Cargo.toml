@@ -10,6 +10,7 @@ members = [
     "crates/pm-engine",
     "crates/pm-app",
     "crates/pm-copytrade",
+    "crates/pm-shadow",
 ]
 
 [workspace.package]
@@ -85,6 +86,7 @@ pm-alpha            = { path = "crates/pm-alpha" }
 pm-strategy        = { path = "crates/pm-strategy" }
 pm-risk             = { path = "crates/pm-risk" }
 pm-engine           = { path = "crates/pm-engine" }
+pm-shadow           = { path = "crates/pm-shadow" }
 
 [profile.release]
 opt-level = 3

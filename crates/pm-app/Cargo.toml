@@ -30,6 +30,7 @@ pm-risk           = { workspace = true }
 pm-model          = { workspace = true }
 pm-alpha          = { workspace = true }
 pm-engine         = { workspace = true }
+pm-shadow         = { workspace = true }
 pm-copytrade      = { path = "../pm-copytrade" }
 
 anyhow             = { workspace = true }

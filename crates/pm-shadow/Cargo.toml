@@ -1,0 +1,24 @@
+[package]
+name = "pm-shadow"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# The proven live-shadow engine + feeds, extracted so the lean (Nautilus-free)
+# polymarket-agent can run the EXACT same engine for live execution as the
+# backtest/shadow. Dependencies are intentionally light — no arrow/parquet/
+# object_store/nautilus.
+[dependencies]
+pm-types          = { workspace = true }
+pm-alpha          = { workspace = true }
+anyhow            = { workspace = true }
+chrono            = { workspace = true }
+futures           = { workspace = true }
+reqwest           = { workspace = true }
+serde             = { workspace = true }
+serde_json        = { workspace = true }
+tokio             = { workspace = true }
+tokio-tungstenite = { workspace = true }
+tracing           = { workspace = true }

@@ -25,6 +25,35 @@
 use crate::harness::{EntryMode, HarnessConfig, Side};
 use chrono::{Datelike, Weekday};
 
+/// Frozen fade `DecideConfig` validated on backtest + the `shadow-final` live twin.
+///
+/// hold@0.12, sigma floor 3.0, skip-Saturday, rearm 0.08, 90s pre-close stop,
+/// hold-to-redemption (`exit_after_s = 0`). `notional_usdc` is a runtime concern
+/// (shadow telemetry uses 50; live clips use env-configured sizing).
+pub fn frozen_fade_decide_config(notional_usdc: f64) -> DecideConfig {
+    DecideConfig {
+        edge_threshold: 0.12,
+        min_marginal_edge: 0.04,
+        min_entry_sigma_bps: 3.0,
+        max_entry_sigma_bps: 0.0,
+        skip_saturday: true,
+        rearm_edge: 0.08,
+        clip_cooldown_ms: 5_000,
+        exit_after_s: 0,
+        enter_within_close_s: 0,
+        stop_before_close_s: 90,
+        notional_usdc,
+        kelly_sizing: false,
+        vol_sizing_ref_bps: 0.0,
+        vol_sizing_lo: 0.5,
+        vol_sizing_hi: 2.0,
+        basis_mom_agree: 1.0,
+        basis_mom_disagree: 1.0,
+        entry_mode: EntryMode::Fade,
+        align_min_mid: 0.55,
+    }
+}
+
 /// Per-tick decision inputs, built identically in the backtest (from a
 /// precomputed `Decision`) and live (from the spot/perp tapes + the book touch).
 #[derive(Debug, Clone, Copy)]
@@ -299,29 +328,8 @@ mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
 
-    // The frozen live/shadow config: hold, edge 0.12, sigma floor 3.0, skip-Sat.
     fn live_cfg() -> DecideConfig {
-        DecideConfig {
-            edge_threshold: 0.12,
-            min_marginal_edge: 0.04,
-            min_entry_sigma_bps: 3.0,
-            max_entry_sigma_bps: 0.0,
-            skip_saturday: true,
-            rearm_edge: 0.08,
-            clip_cooldown_ms: 5000,
-            exit_after_s: 0,
-            enter_within_close_s: 0,
-            stop_before_close_s: 90,
-            notional_usdc: 50.0,
-            kelly_sizing: false,
-            vol_sizing_ref_bps: 0.0,
-            vol_sizing_lo: 0.5,
-            vol_sizing_hi: 2.0,
-            basis_mom_agree: 1.0,
-            basis_mom_disagree: 1.0,
-            entry_mode: EntryMode::Fade,
-            align_min_mid: 0.55,
-        }
+        frozen_fade_decide_config(50.0)
     }
 
     // Up-belief inputs: edge_yes = 0.90 - 0.72 = 0.18 (> 0.12), sigma 10 (> floor).

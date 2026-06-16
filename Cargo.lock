@@ -1874,6 +1874,7 @@ dependencies = [
  "pm-engine",
  "pm-model",
  "pm-risk",
+ "pm-shadow",
  "pm-strategy",
  "pm-telonex-loader",
  "pm-types",
@@ -1935,6 +1936,23 @@ dependencies = [
  "pm-types",
  "serde",
  "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
+name = "pm-shadow"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "futures",
+ "pm-alpha",
+ "pm-types",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
  "tracing",
 ]
 

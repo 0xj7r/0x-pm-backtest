@@ -25,7 +25,7 @@ use std::time::Instant;
 mod alpha;
 mod discovery;
 mod perp;
-mod shadow;
+use pm_shadow as shadow;
 mod engine_driver;
 mod prep_cache;
 mod result_summary;

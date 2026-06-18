@@ -2,6 +2,7 @@
 # Launch color-coded tmux session for all shadow-final WS feed telemetry.
 set -euo pipefail
 
+HOME="${HOME:-/home/ubuntu}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COLORIZE="${COLORIZE_FEEDS:-$SCRIPT_DIR/colorize_feeds.py}"
 JSONL_DIR="${SHADOW_FINAL_OUT:-$HOME/data/pm-alpha/shadow-final}"
@@ -39,12 +40,12 @@ tmux split-window -v -t "$SESSION:0.3" "$(feed_cmd coinbase)"
 
 tmux set-option -t "$SESSION" remain-on-exit on
 tmux set-window-option -t "$SESSION:0" pane-border-status top
-tmux set-pane-option -t "$SESSION:0.0" pane-border-format ' SUMMARY (spot+book ages) '
-tmux set-pane-option -t "$SESSION:0.1" pane-border-format ' BINANCE spot WS '
-tmux set-pane-option -t "$SESSION:0.2" pane-border-format ' PERP futures WS '
-tmux set-pane-option -t "$SESSION:0.3" pane-border-format ' POLYMARKET book WS '
-tmux set-pane-option -t "$SESSION:0.4" pane-border-format ' KRAKEN lead-lag '
-tmux set-pane-option -t "$SESSION:0.5" pane-border-format ' COINBASE lead-lag '
+tmux set-option -p -t "$SESSION:0.0" pane-border-format ' SUMMARY (spot+book ages) '
+tmux set-option -p -t "$SESSION:0.1" pane-border-format ' BINANCE spot WS '
+tmux set-option -p -t "$SESSION:0.2" pane-border-format ' PERP futures WS '
+tmux set-option -p -t "$SESSION:0.3" pane-border-format ' POLYMARKET book WS '
+tmux set-option -p -t "$SESSION:0.4" pane-border-format ' KRAKEN lead-lag '
+tmux set-option -p -t "$SESSION:0.5" pane-border-format ' COINBASE lead-lag '
 tmux select-pane -t "$SESSION:0.0"
 
 echo "wsfeeds session ready"

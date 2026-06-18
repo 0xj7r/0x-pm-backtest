@@ -164,6 +164,16 @@ enum Cmd {
         /// Pause entries after this many consecutive resolved losses (0 = off).
         #[arg(long, default_value = "0")]
         pause_after_consec_losses: u32,
+        /// Skip model-book gap favourites (p_side>open-fav-p-min, ask<open-fav-ask-max).
+        #[arg(long)]
+        skip_open_fav_gap: bool,
+        #[arg(long, default_value = "0.90")]
+        open_fav_p_min: f64,
+        #[arg(long, default_value = "0.60")]
+        open_fav_ask_max: f64,
+        /// Gate window from market open (300 = full 5m window for prod_gap_full).
+        #[arg(long, default_value = "5")]
+        open_fav_secs: u32,
     },
     /// pm-alpha exogenous edge hunt: replay markets through the pm-alpha
     /// validation harness (latency-modeled, cost-aware, leakage-free belief).
@@ -719,6 +729,13 @@ enum Cmd {
         max_per_market_exposure_frac: Option<f64>,
         #[arg(long, default_value = "BTCUSDT")]
         spot_symbol: String,
+        /// Load the perp complex for exo_fade belief (e.g. BTCUSDT). When unset,
+        /// defaults to `spot_symbol` for exo_fade runs (alpha parity).
+        #[arg(long)]
+        perp_symbol: Option<String>,
+        /// Cache root for perp parquets (default: --local-cache-dir or data/cache).
+        #[arg(long)]
+        perp_cache_dir: Option<PathBuf>,
         /// Comma-separated active strategy IDs.
         ///
         /// Active set by default: `exo_fade` (canonical quant implementation).
@@ -1413,6 +1430,10 @@ async fn main() -> Result<()> {
             skip_spot_against_all,
             skip_expanded_high_flip,
             pause_after_consec_losses,
+            skip_open_fav_gap,
+            open_fav_p_min,
+            open_fav_ask_max,
+            open_fav_secs,
         } => {
             shadow::run_shadow(shadow::ShadowArgs {
                 slug_prefix,
@@ -1441,6 +1462,10 @@ async fn main() -> Result<()> {
                 skip_spot_against_all,
                 skip_expanded_high_flip,
                 pause_after_consec_losses,
+                skip_open_fav_gap,
+                open_fav_p_min,
+                open_fav_ask_max,
+                open_fav_secs,
             })
             .await
         }
@@ -1904,6 +1929,8 @@ async fn main() -> Result<()> {
             max_per_market_exposure_usdc,
             max_per_market_exposure_frac,
             spot_symbol,
+            perp_symbol,
+            perp_cache_dir,
             strategies,
             allow_legacy_strategies,
             max_concurrent_fetches,
@@ -2079,15 +2106,17 @@ async fn main() -> Result<()> {
                 max_clip_usdc,
                 max_order_clip_multiplier,
                 max_per_market_exposure_usdc,
-                max_per_market_exposure_frac,
-                spot_symbol,
-                strategies,
-                allow_legacy_strategies,
-                max_concurrent_fetches,
-                replay_sample_ms,
-                taker_latency_ms,
-                replay_event_cache_dir,
-                !disable_pm_trades,
+            max_per_market_exposure_frac,
+            spot_symbol,
+            perp_symbol,
+            perp_cache_dir,
+            strategies,
+            allow_legacy_strategies,
+            max_concurrent_fetches,
+            replay_sample_ms,
+            taker_latency_ms,
+            replay_event_cache_dir,
+            !disable_pm_trades,
                 use_outcome_label,
                 portfolio_mode,
                 volatility_regime_threshold,
@@ -2825,6 +2854,8 @@ async fn walk_forward(
     max_per_market_exposure_usdc: f64,
     max_per_market_exposure_frac: Option<f64>,
     spot_symbol: String,
+    perp_symbol: Option<String>,
+    perp_cache_dir: Option<PathBuf>,
     strategies_csv: String,
     allow_legacy_strategies: bool,
     max_concurrent_fetches: usize,
@@ -3114,6 +3145,8 @@ async fn walk_forward(
         max_per_market_exposure_usdc,
         max_per_market_exposure_frac,
         spot_symbol,
+        perp_symbol,
+        perp_cache_dir: perp_cache_dir.or(local_cache_dir.clone()),
         strategies,
         max_concurrent_fetches,
         replay_sample_ms,

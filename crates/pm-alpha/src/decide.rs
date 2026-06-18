@@ -202,7 +202,8 @@ pub struct DecideConfig {
     pub align_min_mid: f64,
     /// Skip when decision-time regime is `expanded_high_flip`.
     pub skip_expanded_high_flip: bool,
-    /// Skip open-window favourites where model >> book (see open_fav_*).
+    /// Skip favourites where model >> book (see open_fav_*). `open_fav_secs`
+    /// scopes from market open; use 300 for the full btc-5m window (prod_gap_full).
     pub skip_open_fav_gap: bool,
     pub open_fav_p_min: f64,
     pub open_fav_ask_max: f64,
@@ -924,6 +925,30 @@ mod tests {
         let mut inp = up_inputs();
         inp.p_exo = 0.95;
         inp.yes_ask = 0.55; // p_side>0.90, ask<0.60 within 5s of open
+        let (dec, _) = decide_entry(
+            &inp,
+            now,
+            open,
+            close_of(now),
+            &fresh_state(),
+            session_none().as_ref(),
+            &cfg,
+        );
+        assert_eq!(dec.action, EntryAction::Skip);
+    }
+
+    #[test]
+    fn rejects_prod_gap_full_model_book_gap() {
+        let mut cfg = live_cfg();
+        cfg.skip_open_fav_gap = true;
+        cfg.open_fav_p_min = 0.88;
+        cfg.open_fav_ask_max = 0.62;
+        cfg.open_fav_secs = 300;
+        let open = FRI();
+        let now = open + 180 * 1_000_000_000;
+        let mut inp = up_inputs();
+        inp.p_exo = 0.95;
+        inp.yes_ask = 0.52;
         let (dec, _) = decide_entry(
             &inp,
             now,

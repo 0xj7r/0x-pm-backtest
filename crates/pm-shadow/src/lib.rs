@@ -87,6 +87,12 @@ pub struct ShadowArgs {
     pub skip_expanded_high_flip: bool,
     /// Pause entries after this many consecutive resolved losses (0 = off).
     pub pause_after_consec_losses: u32,
+    /// Skip model-book gap favourites (p_side > open_fav_p_min, ask < open_fav_ask_max).
+    pub skip_open_fav_gap: bool,
+    pub open_fav_p_min: f64,
+    pub open_fav_ask_max: f64,
+    /// Gate window from market open (300 = full 5m window for prod_gap_full).
+    pub open_fav_secs: u32,
 }
 
 /// Frozen leading config validated on backtest + the `shadow-final` live twin.
@@ -123,14 +129,22 @@ pub fn frozen_shadow_final_args(out_dir: PathBuf) -> ShadowArgs {
         skip_spot_against_all: false,
         skip_expanded_high_flip: false,
         pause_after_consec_losses: 0,
+        skip_open_fav_gap: false,
+        open_fav_p_min: 0.90,
+        open_fav_ask_max: 0.60,
+        open_fav_secs: 5,
     }
 }
 
-/// Validated live gate package: mom30 + lottery-band floor (touch >= 0.45).
+/// Validated live gate package: mom30 + lottery-band floor + prod_gap_full.
 pub fn gated_shadow_final_args(out_dir: PathBuf) -> ShadowArgs {
     let mut args = frozen_shadow_final_args(out_dir);
     args.skip_spot_misalign_s = 30;
     args.min_entry_ask = 0.45;
+    args.skip_open_fav_gap = true;
+    args.open_fav_p_min = 0.88;
+    args.open_fav_ask_max = 0.62;
+    args.open_fav_secs = 300;
     args
 }
 
@@ -689,6 +703,10 @@ pub struct ShadowConfig {
     pub skip_spot_against_all: bool,
     pub skip_expanded_high_flip: bool,
     pub pause_after_consec_losses: u32,
+    pub skip_open_fav_gap: bool,
+    pub open_fav_p_min: f64,
+    pub open_fav_ask_max: f64,
+    pub open_fav_secs: u32,
     /// Shared `decide_entry` config — byte-identical to backtest harness.
     pub decide_cfg: DecideConfig,
 }
@@ -724,6 +742,10 @@ pub fn shadow_config_from_args(args: &ShadowArgs) -> ShadowConfig {
         skip_spot_against_all: args.skip_spot_against_all,
         skip_expanded_high_flip: args.skip_expanded_high_flip,
         pause_after_consec_losses: args.pause_after_consec_losses,
+        skip_open_fav_gap: args.skip_open_fav_gap,
+        open_fav_p_min: args.open_fav_p_min,
+        open_fav_ask_max: args.open_fav_ask_max,
+        open_fav_secs: args.open_fav_secs,
         decide_cfg: frozen_fade_decide_config(SHADOW_NOTIONAL_USDC),
     }
 }
@@ -1090,6 +1112,10 @@ impl ShadowCore {
         self.cfg.decide_cfg.skip_spot_against_all = self.cfg.skip_spot_against_all;
         self.cfg.decide_cfg.skip_expanded_high_flip = self.cfg.skip_expanded_high_flip;
         self.cfg.decide_cfg.pause_after_consec_losses = self.cfg.pause_after_consec_losses;
+        self.cfg.decide_cfg.skip_open_fav_gap = self.cfg.skip_open_fav_gap;
+        self.cfg.decide_cfg.open_fav_p_min = self.cfg.open_fav_p_min;
+        self.cfg.decide_cfg.open_fav_ask_max = self.cfg.open_fav_ask_max;
+        self.cfg.decide_cfg.open_fav_secs = self.cfg.open_fav_secs;
         if self.cfg.lane_late_fav {
             self.cfg.decide_cfg.enter_within_close_s = self.cfg.enter_within_close_s;
             self.cfg.decide_cfg.entry_mode = EntryMode::Aligned;
@@ -2855,9 +2881,15 @@ mod tests {
         let args = gated_shadow_final_args(PathBuf::from("shadow-final"));
         assert_eq!(args.skip_spot_misalign_s, 30);
         assert!((args.min_entry_ask - 0.45).abs() < f64::EPSILON);
+        assert!(args.skip_open_fav_gap);
+        assert!((args.open_fav_p_min - 0.88).abs() < f64::EPSILON);
+        assert!((args.open_fav_ask_max - 0.62).abs() < f64::EPSILON);
+        assert_eq!(args.open_fav_secs, 300);
         let cfg = shadow_config_from_args(&args);
         assert_eq!(cfg.skip_spot_misalign_s, 30);
         assert!((cfg.min_entry_ask - 0.45).abs() < f64::EPSILON);
+        assert!(cfg.skip_open_fav_gap);
+        assert_eq!(cfg.open_fav_secs, 300);
     }
 
     fn cfg() -> ShadowConfig {
@@ -2890,6 +2922,10 @@ mod tests {
             skip_spot_against_all: false,
             skip_expanded_high_flip: false,
             pause_after_consec_losses: 0,
+            skip_open_fav_gap: false,
+            open_fav_p_min: 0.90,
+            open_fav_ask_max: 0.60,
+            open_fav_secs: 5,
             decide_cfg,
         }
     }

@@ -164,8 +164,11 @@ def main() -> int:
         live = parse_live_line(line, day)
         if not live:
             continue
-        if since_epoch > 0.0 and live["epoch"] > 0.0 and live["epoch"] < since_epoch:
-            continue
+        if since_epoch > 0.0:
+            if live["epoch"] <= 0.0:
+                continue
+            if live["epoch"] < since_epoch:
+                continue
         lives.append(live)
 
     ref_sides = Counter(side_label(s["side"]) for s in shadow)

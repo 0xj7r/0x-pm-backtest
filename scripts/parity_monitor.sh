@@ -56,7 +56,6 @@ fi
 
 combined="/tmp/shadow-final-combined.jsonl"
 cat "${shadow_files[@]}" > "$combined"
-DAY_UTC="$(date -u +%Y-%m-%d)"
 
 load_telegram
 
@@ -64,7 +63,6 @@ set +e
 out="$(python3 "$COMPARE" \
   --shadow "$combined" \
   --live-log "$LIVE_LOG" \
-  --day "$DAY_UTC" \
   --since-hours "$SINCE_HOURS" 2>&1)"
 rc=$?
 set -e

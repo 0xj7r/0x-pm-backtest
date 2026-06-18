@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Launch color-coded tmux session for all shadow-final WS feed telemetry.
+# Must run as ubuntu (not root) so SSH `tmux attach` finds the socket.
 set -euo pipefail
+
+if [[ "$(id -un)" == "root" ]]; then
+  exec sudo -u ubuntu -H "$0" "$@"
+fi
 
 HOME="${HOME:-/home/ubuntu}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

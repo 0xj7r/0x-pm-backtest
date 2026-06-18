@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Side-by-side REF (shadow-final JSONL) + LIVE/PAPER (shadow_exec_tail.log).
+# Must run as ubuntu (not root) so SSH `tmux attach` finds the socket.
 set -euo pipefail
+
+if [[ "$(id -un)" == "root" ]]; then
+  exec sudo -u ubuntu -H "$0" "$@"
+fi
 
 HOME="${HOME:-/home/ubuntu}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

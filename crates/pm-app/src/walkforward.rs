@@ -16,9 +16,10 @@ use pm_model::{
 };
 use pm_risk::PortfolioLimits;
 use pm_strategy::{
-    BonereaperV2, NoopStrategy, PairedMmDense,
+    BonereaperV2, ExoFadeStrategy, NoopStrategy, PairedMmDense,
     back_to_explore::{BackToExploreConfig, BackToExploreTaker},
     bonereaper_v2::{BonereaperV2Config, BonereaperV2GateStats, ReversalScoreCoeffs},
+    exo_fade::ExoFadeConfig,
     paired_mm::PairedMmDenseConfig,
 };
 use pm_telonex_loader::{
@@ -748,6 +749,8 @@ impl From<BackToExploreProfile> for ResolvedStrategyProfile {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
 pub enum StratId {
+    ExoFade,
+    MayJuneFade,
     PairedMm,
     BonereaperV2,
     BackToExplore,
@@ -769,16 +772,30 @@ impl VolatilityBand {
 }
 
 impl StratId {
-    pub const ACTIVE: [Self; 3] = [Self::BackToExplore, Self::PairedMm, Self::BonereaperV2];
+    pub const ACTIVE: [Self; 5] = [
+        Self::ExoFade,
+        Self::MayJuneFade,
+        Self::BackToExplore,
+        Self::PairedMm,
+        Self::BonereaperV2,
+    ];
 
     // Intentionally empty: all previously archived strategies have been removed.
     // The --allow-legacy-strategies flag is kept to avoid breaking existing scripts.
     pub const ARCHIVED: [Self; 0] = [];
 
-    pub const ALL: [Self; 3] = [Self::PairedMm, Self::BackToExplore, Self::BonereaperV2];
+    pub const ALL: [Self; 5] = [
+        Self::ExoFade,
+        Self::MayJuneFade,
+        Self::PairedMm,
+        Self::BackToExplore,
+        Self::BonereaperV2,
+    ];
 
     pub fn from_name(value: &str) -> Option<Self> {
         match value {
+            "exo_fade" => Some(Self::ExoFade),
+            "mayjune_fade" => Some(Self::MayJuneFade),
             "paired_mm" => Some(Self::PairedMm),
             "bonereaper_v2" => Some(Self::BonereaperV2),
             "back_to_explore" => Some(Self::BackToExplore),
@@ -788,6 +805,8 @@ impl StratId {
 
     pub fn name(self) -> &'static str {
         match self {
+            StratId::ExoFade => "exo_fade",
+            StratId::MayJuneFade => "mayjune_fade",
             StratId::PairedMm => "paired_mm",
             StratId::BonereaperV2 => "bonereaper_v2",
             StratId::BackToExplore => "back_to_explore",
@@ -4375,6 +4394,7 @@ async fn run_markets(
                 match run_one_strategy(
                     strat,
                     cfg,
+                    &m.slug,
                     &events_for_run,
                     &spot,
                     &trades,
@@ -4441,6 +4461,7 @@ async fn run_markets(
                     match run_one_strategy(
                         strat,
                         cfg,
+                        &m.slug,
                         &events_for_run,
                         &spot,
                         &trades,
@@ -4491,6 +4512,7 @@ async fn run_markets(
 fn run_one_strategy(
     strat: StratId,
     cfg: &WalkForwardConfig,
+    market_slug: &str,
     events: &[pm_types::ReplayEvent],
     spot: &SpotHistory,
     trades: &TradeHistory,
@@ -4500,6 +4522,35 @@ fn run_one_strategy(
     bte_external_risk_multiplier: f64,
 ) -> Result<StrategyMarketResult> {
     let (report, bonereaper_v2_gate_stats) = match strat {
+        StratId::ExoFade | StratId::MayJuneFade => {
+            let slug = market_slug.to_ascii_lowercase();
+            let token = if slug.starts_with("eth-updown-") {
+                "eth"
+            } else if slug.starts_with("sol-updown-") {
+                "sol"
+            } else if slug.starts_with("xrp-updown-") {
+                "xrp"
+            } else {
+                "btc"
+            };
+            let window_secs = market_duration_secs_from_slug(market_slug).max(300) as u32;
+            let base = match strat {
+                StratId::MayJuneFade => ExoFadeConfig::mayjune_btc5m(),
+                _ => ExoFadeConfig::champion_1k(),
+            };
+            let mut s = ExoFadeStrategy::new(ExoFadeConfig {
+                bankroll_usdc: bankroll,
+                clip_usdc: clip,
+                kelly_fraction: cfg.kelly_fraction,
+                token: token.into(),
+                window_secs,
+                ..base
+            });
+            (
+                run_backtest(events, spot, trades, &mut s, runner_cfg)?,
+                None,
+            )
+        }
         StratId::PairedMm => {
             let mut s = PairedMmDense::new(PairedMmDenseConfig {
                 clip_shares: (clip * 0.3 / 5.0).max(0.05), // scale with clip
@@ -4963,6 +5014,7 @@ async fn run_portfolio(
             match run_one_strategy(
                 strat,
                 cfg,
+                &m.slug,
                 events_for_run,
                 &spot,
                 &trades,

@@ -10,6 +10,7 @@ publish = false
 pm-types  = { workspace = true }
 pm-risk   = { workspace = true }
 pm-model  = { workspace = true }
+pm-alpha  = { workspace = true }
 serde     = { workspace = true }
 chrono    = { workspace = true }
 tracing   = { workspace = true }

@@ -146,6 +146,24 @@ enum Cmd {
         vol_sizing_lo: f64,
         #[arg(long, default_value = "2.0")]
         vol_sizing_hi: f64,
+        /// Skip when entry ask is below this (0 = off). Validated live: 0.45.
+        #[arg(long, default_value = "0.0")]
+        min_entry_ask: f64,
+        /// Skip when entry ask exceeds this (1.0 = off).
+        #[arg(long, default_value = "1.0")]
+        max_entry_ask: f64,
+        /// Skip when spot return over this lookback (seconds) disagrees with side (0 = off).
+        #[arg(long, default_value = "0")]
+        skip_spot_misalign_s: u32,
+        /// Skip when 60/300/600/900s spot all disagree with entry side.
+        #[arg(long)]
+        skip_spot_against_all: bool,
+        /// Skip when decision-time regime is expanded_high_flip.
+        #[arg(long)]
+        skip_expanded_high_flip: bool,
+        /// Pause entries after this many consecutive resolved losses (0 = off).
+        #[arg(long, default_value = "0")]
+        pause_after_consec_losses: u32,
     },
     /// pm-alpha exogenous edge hunt: replay markets through the pm-alpha
     /// validation harness (latency-modeled, cost-aware, leakage-free belief).
@@ -201,6 +219,21 @@ enum Cmd {
         /// variance equalization); default is flat clips.
         #[arg(long)]
         kelly_sizing: bool,
+        /// Thesis gate: skip when chosen-side belief is below this (0 = off).
+        #[arg(long, default_value = "0.0")]
+        min_p_side: f64,
+        /// Thesis gate: skip when chosen-side belief exceeds this (1.0 = off).
+        #[arg(long, default_value = "1.0")]
+        max_p_side: f64,
+        /// Thesis gate: skip when entry ask is below this (0 = off).
+        #[arg(long, default_value = "0.0")]
+        min_entry_ask: f64,
+        /// Thesis gate: skip when entry ask exceeds this (1.0 = off).
+        #[arg(long, default_value = "1.0")]
+        max_entry_ask: f64,
+        /// No entries until this many seconds after market open (0 = off).
+        #[arg(long, default_value = "0")]
+        min_secs_from_open: u32,
         /// Vol-responsive sizing reference (bps): clip = notional *
         /// clamp(sigma_bar_bps/ref, lo, hi). 0 = off (flat).
         #[arg(long, default_value = "0.0")]
@@ -234,6 +267,12 @@ enum Cmd {
         /// Skip entries when realized vol (bps/bar) exceeds this (0 = off).
         #[arg(long, default_value = "0.0")]
         max_entry_sigma_bps: f64,
+        /// Vol floor: skip when sigma_bar_bps is below this (shadow-final: 3.0).
+        #[arg(long, default_value = "0.0")]
+        min_entry_sigma_bps: f64,
+        /// Skip UTC-Saturday entries (shadow-final behaviour).
+        #[arg(long)]
+        skip_saturday: bool,
         /// Post-entry selldown stop (hold mode only): sell taker when the
         /// entry side's ask prints at-or-below fill - eps. Negative = off.
         #[arg(long, default_value = "-1.0", allow_hyphen_values = true)]
@@ -304,6 +343,30 @@ enum Cmd {
         /// Tail hedge notional as a fraction of the clip.
         #[arg(long, default_value = "0.25")]
         tail_frac: f64,
+        /// Skip entries when decision-time regime is expanded_high_flip.
+        #[arg(long)]
+        skip_expanded_high_flip: bool,
+        /// Skip :00 favourites where model >> book (p_side>open-fav-p-min, ask<open-fav-ask-max).
+        #[arg(long)]
+        skip_open_fav_gap: bool,
+        #[arg(long, default_value = "0.90")]
+        open_fav_p_min: f64,
+        #[arg(long, default_value = "0.60")]
+        open_fav_ask_max: f64,
+        #[arg(long, default_value = "5")]
+        open_fav_secs: u32,
+        /// Pause entries after this many consecutive resolved losses (0 = off).
+        #[arg(long, default_value = "0")]
+        pause_after_consec_losses: u32,
+        /// On rearm clips, skip when entry ask exceeds this (0 = off).
+        #[arg(long, default_value = "0.0")]
+        max_rearm_entry_ask: f64,
+        /// Skip when spot return over this lookback (seconds) disagrees with entry side (0 = off).
+        #[arg(long, default_value = "0")]
+        skip_spot_misalign_s: u32,
+        /// Skip when 60/300/600/900s spot all disagree with entry side.
+        #[arg(long)]
+        skip_spot_against_all: bool,
         /// Infer missing outcome labels from the final tape mid.
         #[arg(long)]
         infer_outcome: bool,
@@ -658,10 +721,10 @@ enum Cmd {
         spot_symbol: String,
         /// Comma-separated active strategy IDs.
         ///
-        /// Active set by default:
-        /// `back_to_explore,paired_mm,bonereaper_v2`.
+        /// Active set by default: `exo_fade` (canonical quant implementation).
+        /// Also available: `back_to_explore,paired_mm,bonereaper_v2`.
         /// Use `--allow-legacy-strategies` to enable legacy names.
-        #[arg(long, default_value = "back_to_explore,paired_mm,bonereaper_v2")]
+        #[arg(long, default_value = "exo_fade")]
         strategies: String,
         /// Allow previously archived strategy identifiers (for historical experiments).
         #[arg(long, default_value_t = false)]
@@ -1344,6 +1407,12 @@ async fn main() -> Result<()> {
             vol_sizing_ref_bps,
             vol_sizing_lo,
             vol_sizing_hi,
+            min_entry_ask,
+            max_entry_ask,
+            skip_spot_misalign_s,
+            skip_spot_against_all,
+            skip_expanded_high_flip,
+            pause_after_consec_losses,
         } => {
             shadow::run_shadow(shadow::ShadowArgs {
                 slug_prefix,
@@ -1366,6 +1435,12 @@ async fn main() -> Result<()> {
                 vol_sizing_ref_bps,
                 vol_sizing_lo,
                 vol_sizing_hi,
+                min_entry_ask,
+                max_entry_ask,
+                skip_spot_misalign_s,
+                skip_spot_against_all,
+                skip_expanded_high_flip,
+                pause_after_consec_losses,
             })
             .await
         }
@@ -1386,6 +1461,11 @@ async fn main() -> Result<()> {
             fee_exit_margin,
             notional_usdc,
             kelly_sizing,
+            min_p_side,
+            max_p_side,
+            min_entry_ask,
+            max_entry_ask,
+            min_secs_from_open,
             vol_sizing_ref_bps,
             vol_sizing_lo,
             vol_sizing_hi,
@@ -1397,6 +1477,8 @@ async fn main() -> Result<()> {
             stop_before_close_s,
             enter_within_close_s,
             max_entry_sigma_bps,
+            min_entry_sigma_bps,
+            skip_saturday,
             selldown_stop_eps,
             entry_stability_s,
             entry_stability_eps,
@@ -1415,6 +1497,15 @@ async fn main() -> Result<()> {
             align_min_mid,
             tail_max_price,
             tail_frac,
+            skip_expanded_high_flip,
+            skip_open_fav_gap,
+            open_fav_p_min,
+            open_fav_ask_max,
+            open_fav_secs,
+            pause_after_consec_losses,
+            max_rearm_entry_ask,
+            skip_spot_misalign_s,
+            skip_spot_against_all,
             infer_outcome,
             vol_lookback_s,
             vol_estimator,
@@ -1467,6 +1558,11 @@ async fn main() -> Result<()> {
                     fee_exit_margin,
                     notional_usdc,
                     kelly_sizing,
+                    min_p_side,
+                    max_p_side,
+                    min_entry_ask,
+                    max_entry_ask,
+                    min_secs_from_open,
                     vol_sizing_ref_bps,
                     vol_sizing_lo,
                     vol_sizing_hi,
@@ -1478,6 +1574,8 @@ async fn main() -> Result<()> {
                     stop_before_close_s,
                     enter_within_close_s,
                     max_entry_sigma_bps,
+                    min_entry_sigma_bps,
+                    skip_saturday,
                     selldown_stop_eps,
                     entry_stability_s,
                     stability_eps: entry_stability_eps,
@@ -1496,6 +1594,15 @@ async fn main() -> Result<()> {
                     align_min_mid,
                     tail_max_price,
                     tail_frac,
+                    skip_expanded_high_flip,
+                    skip_open_fav_gap,
+                    open_fav_p_min,
+                    open_fav_ask_max,
+                    open_fav_secs,
+                    pause_after_consec_losses,
+                    max_rearm_entry_ask,
+                    skip_spot_misalign_s,
+                    skip_spot_against_all,
                     infer_outcome,
                     vol_lookback_s,
                     vol_estimator,

@@ -16,3 +16,4 @@ frontier_out/
 __pycache__/
 *.pyc
 *.trades.jsonl
+shadow_tail_state.json

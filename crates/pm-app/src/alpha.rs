@@ -5,7 +5,10 @@
 use anyhow::{Context, Result, anyhow};
 use futures::StreamExt;
 use pm_alpha::harness::{BookTick, EntryMode, HarnessConfig, HuntReport, MarketRunOutput, MarketSeries, aggregate, run_market_grid};
-use pm_alpha::{AlphaModel, AlphaModelConfig, ExoCalibrator, MarketMeta, Token, TrainingConfig, TrainingSample, VolEstimator};
+use pm_alpha::{
+    AlphaModel, AlphaModelConfig, DecideConfig, ExoCalibrator, MarketMeta, SessionGateState, Token,
+    TrainingConfig, TrainingSample, VolEstimator, session_gates_active, session_observe_trades,
+};
 use pm_telonex_loader::TelonexStore;
 use pm_types::MarketId;
 use std::io::{BufRead, BufReader};
@@ -37,6 +40,16 @@ pub struct AlphaArgs {
     pub fee_exit_margin: f64,
     pub notional_usdc: f64,
     pub kelly_sizing: bool,
+    /// Thesis gate: skip when chosen-side belief is below this (0 = off).
+    pub min_p_side: f64,
+    /// Thesis gate: skip when chosen-side belief exceeds this (1.0 = off).
+    pub max_p_side: f64,
+    /// Thesis gate: skip when entry ask is below this (0 = off).
+    pub min_entry_ask: f64,
+    /// No entries until this many seconds after market open (0 = off).
+    pub min_secs_from_open: u32,
+    /// Thesis gate: skip when entry ask exceeds this (1.0 = off).
+    pub max_entry_ask: f64,
     pub vol_sizing_ref_bps: f64,
     pub vol_sizing_lo: f64,
     pub vol_sizing_hi: f64,
@@ -50,6 +63,9 @@ pub struct AlphaArgs {
     /// seconds (0 = disabled).
     pub enter_within_close_s: u32,
     pub max_entry_sigma_bps: f64,
+    /// Vol floor (shadow-final uses 3.0); 0 = off.
+    pub min_entry_sigma_bps: f64,
+    pub skip_saturday: bool,
     /// Post-entry selldown stop eps (hold mode only): sell when the entry
     /// side's ask prints at-or-below fill - eps. Negative disables.
     pub selldown_stop_eps: f64,
@@ -125,6 +141,16 @@ pub struct AlphaArgs {
     /// Weight on the basis-adjusted perp last in the effective-spot blend
     /// (0 disables; requires --perp-symbol).
     pub perp_price_weight: f64,
+    /// Whipsaw/chop decision gates (SSOT in pm_alpha::decide).
+    pub skip_expanded_high_flip: bool,
+    pub skip_open_fav_gap: bool,
+    pub open_fav_p_min: f64,
+    pub open_fav_ask_max: f64,
+    pub open_fav_secs: u32,
+    pub pause_after_consec_losses: u32,
+    pub max_rearm_entry_ask: f64,
+    pub skip_spot_misalign_s: u32,
+    pub skip_spot_against_all: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -410,6 +436,66 @@ async fn process_markets(
         ref_spot_by_market.push(ref_spot);
     }
 
+    let edge0 = edge_thresholds.first().copied().unwrap_or(0.12);
+    let serial_session = session_gates_active(&DecideConfig::from_harness(base_cfg, edge0));
+    if serial_session {
+        let mut session = SessionGateState::default();
+        let mut session_date: Option<String> = None;
+        for (idx, market) in markets.iter().enumerate() {
+            if session_date.as_deref() != Some(market.date.as_str()) {
+                session = SessionGateState::default();
+                session_date = Some(market.date.clone());
+            }
+            let spot = spot_by_market[idx].clone();
+            let ref_spot = ref_spot_by_market[idx].clone();
+            let official_strike = strikes_by_slug.get(&market.slug).copied();
+            let seasonal_factors = seasonal_tables.and_then(|t| t.get(&market.date).copied());
+            let down = down_by_slug.get(&market.slug).cloned();
+            let item = fetch_market_item(
+                store,
+                store_inner.clone(),
+                market,
+                idx,
+                down,
+                replay_event_cache_dir,
+                tick_cache_dir,
+                spot,
+                ref_spot,
+                official_strike,
+                perp.clone(),
+                infer_outcome,
+                model,
+                seasonal_factors,
+                base_cfg,
+                latencies_ms,
+                edge_thresholds,
+                Some(&session),
+            )
+            .await;
+            match item {
+                Item::SkipNoOutcome => *n_no_outcome += 1,
+                Item::SkipNoStrike => *n_no_strike += 1,
+                Item::SkipLoadError => *n_load_error += 1,
+                Item::Done(boxed) => {
+                    let (meta, outputs) = *boxed;
+                    if let Some(out) = outputs.first() {
+                        session_observe_trades(&mut session, &out.trades);
+                    }
+                    for (cell, mut market_out) in outputs.into_iter().enumerate() {
+                        out.train_samples.append(&mut market_out.train_samples);
+                        out.dir_samples.append(&mut market_out.dir_samples);
+                        out.per_cell[cell].push((meta, market_out));
+                    }
+                    *n_run += 1;
+                    if *n_run % 500 == 0 {
+                        tracing::info!(n_run = *n_run, total = markets.len(), "alpha progress (serial)");
+                    }
+                }
+            }
+        }
+        return Ok(out);
+    }
+
     const PREFETCH: usize = 24;
     let compute_lanes = std::thread::available_parallelism()
         .map(|n| n.get().saturating_sub(2).max(2))
@@ -436,66 +522,27 @@ async fn process_markets(
         let tick_cache = tick_cache_dir.map(|p| p.to_path_buf());
         let perp = perp.clone();
         async move {
-            let has_down = down.is_some();
-            let cache_path = tick_cache
-                .as_deref()
-                .map(|d| tick_cache_path(d, &market, has_down));
-            let cached: Option<Vec<BookTick>> = match &cache_path {
-                Some(p) => {
-                    let p = p.clone();
-                    tokio::task::spawn_blocking(move || read_tick_cache(&p))
-                        .await
-                        .ok()
-                        .flatten()
-                }
-                None => None,
-            };
-            let (events, down_events) = if cached.is_some() {
-                (Ok(Vec::new()), Vec::new())
-            } else {
-                let events = load_replay_events_for_market(
-                    &store,
-                    store_inner.clone(),
-                    &market,
-                    MarketId(idx as u32),
-                    cache_dir.as_deref(),
-                )
-                .await;
-                let down_events = match &down {
-                    Some(d) => load_replay_events_for_market(
-                        &store,
-                        store_inner,
-                        d,
-                        MarketId(idx as u32 | 0x8000_0000),
-                        cache_dir.as_deref(),
-                    )
-                    .await
-                    .unwrap_or_default(),
-                    None => Vec::new(),
-                };
-                (events, down_events)
-            };
-            tokio::task::spawn_blocking(move || {
-                compute_market(
-                    &market,
-                    events,
-                    down_events,
-                    cached,
-                    cache_path.as_deref(),
-                    spot,
-                    ref_spot,
-                    official_strike,
-                    perp,
-                    infer_outcome,
-                    &model,
-                    seasonal_factors,
-                    &base_cfg,
-                    &latencies,
-                    &thresholds,
-                )
-            })
+            fetch_market_item(
+                &store,
+                store_inner,
+                &market,
+                idx,
+                down,
+                cache_dir.as_deref(),
+                tick_cache.as_deref(),
+                spot,
+                ref_spot,
+                official_strike,
+                perp,
+                infer_outcome,
+                &model,
+                seasonal_factors,
+                &base_cfg,
+                &latencies,
+                &thresholds,
+                None,
+            )
             .await
-            .unwrap_or(Item::SkipLoadError)
         }
     }))
     .buffered(PREFETCH.max(compute_lanes));
@@ -523,6 +570,95 @@ async fn process_markets(
 }
 
 #[allow(clippy::too_many_arguments)]
+async fn fetch_market_item(
+    store: &TelonexStore,
+    store_inner: std::sync::Arc<dyn object_store::ObjectStore>,
+    market: &MarketHandle,
+    idx: usize,
+    down: Option<MarketHandle>,
+    replay_event_cache_dir: Option<&Path>,
+    tick_cache_dir: Option<&Path>,
+    spot: Option<std::sync::Arc<pm_types::SpotHistory>>,
+    ref_spot: Option<std::sync::Arc<pm_types::SpotHistory>>,
+    official_strike: Option<f64>,
+    perp: Option<std::sync::Arc<pm_alpha::PerpState>>,
+    infer_outcome: bool,
+    model: &AlphaModel,
+    seasonal_factors: Option<[f64; 24]>,
+    base_cfg: &HarnessConfig,
+    latencies_ms: &[u64],
+    edge_thresholds: &[f64],
+    session: Option<&SessionGateState>,
+) -> Item {
+    let has_down = down.is_some();
+    let cache_path = tick_cache_dir
+        .map(|d| tick_cache_path(d, market, has_down));
+    let cached: Option<Vec<BookTick>> = match &cache_path {
+        Some(p) => tokio::task::spawn_blocking({
+            let p = p.clone();
+            move || read_tick_cache(&p)
+        })
+        .await
+        .ok()
+        .flatten(),
+        None => None,
+    };
+    let (events, down_events) = if cached.is_some() {
+        (Ok(Vec::new()), Vec::new())
+    } else {
+        let events = load_replay_events_for_market(
+            store,
+            store_inner.clone(),
+            market,
+            MarketId(idx as u32),
+            replay_event_cache_dir,
+        )
+        .await;
+        let down_events = match &down {
+            Some(d) => load_replay_events_for_market(
+                store,
+                store_inner,
+                d,
+                MarketId(idx as u32 | 0x8000_0000),
+                replay_event_cache_dir,
+            )
+            .await
+            .unwrap_or_default(),
+            None => Vec::new(),
+        };
+        (events, down_events)
+    };
+    let market = market.clone();
+    let model = model.clone();
+    let base_cfg = *base_cfg;
+    let latencies_ms = latencies_ms.to_vec();
+    let edge_thresholds = edge_thresholds.to_vec();
+    let session = session.copied();
+    tokio::task::spawn_blocking(move || {
+        compute_market(
+            &market,
+            events,
+            down_events,
+            cached,
+            cache_path.as_deref(),
+            spot,
+            ref_spot,
+            official_strike,
+            perp,
+            infer_outcome,
+            &model,
+            seasonal_factors,
+            &base_cfg,
+            &latencies_ms,
+            &edge_thresholds,
+            session.as_ref(),
+        )
+    })
+    .await
+    .unwrap_or(Item::SkipLoadError)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn compute_market(
     market: &MarketHandle,
     events_res: Result<Vec<pm_types::ReplayEvent>>,
@@ -539,6 +675,7 @@ fn compute_market(
     base_cfg: &HarnessConfig,
     latencies_ms: &[u64],
     edge_thresholds: &[f64],
+    session: Option<&SessionGateState>,
 ) -> Item {
     // Seasonal estimator: swap in this market date's factor table.
     let model_override;
@@ -644,7 +781,17 @@ fn compute_market(
             date: market.date.clone(),
         };
 
-        let outputs = run_market_grid(&series, &spot, perp.as_deref(), ref_spot.as_deref(), model, base_cfg, latencies_ms, edge_thresholds);
+        let outputs = run_market_grid(
+            &series,
+            &spot,
+            perp.as_deref(),
+            ref_spot.as_deref(),
+            model,
+            base_cfg,
+            latencies_ms,
+            edge_thresholds,
+            session,
+        );
         Item::Done(Box::new((series.meta, outputs)))
     }
 }
@@ -695,6 +842,11 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
         edge_threshold: *args.edge_thresholds.first().unwrap_or(&0.05),
         notional_usdc: args.notional_usdc,
         kelly_sizing: args.kelly_sizing,
+        min_p_side: args.min_p_side,
+        max_p_side: args.max_p_side,
+        min_entry_ask: args.min_entry_ask,
+        max_entry_ask: args.max_entry_ask,
+        min_secs_from_open: args.min_secs_from_open,
         vol_sizing_ref_bps: args.vol_sizing_ref_bps,
         vol_sizing_lo: args.vol_sizing_lo,
         vol_sizing_hi: args.vol_sizing_hi,
@@ -706,6 +858,8 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
         stop_before_close_s: args.stop_before_close_s,
         enter_within_close_s: args.enter_within_close_s,
         max_entry_sigma_bps: args.max_entry_sigma_bps,
+        min_entry_sigma_bps: args.min_entry_sigma_bps,
+        skip_saturday: args.skip_saturday,
         selldown_stop_eps: args.selldown_stop_eps,
         entry_stability_s: args.entry_stability_s,
         stability_eps: args.stability_eps,
@@ -726,6 +880,15 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
         tail_frac: args.tail_frac,
         collect_training: false,
         train_sample_dt_s: 15,
+        skip_expanded_high_flip: args.skip_expanded_high_flip,
+        skip_open_fav_gap: args.skip_open_fav_gap,
+        open_fav_p_min: args.open_fav_p_min,
+        open_fav_ask_max: args.open_fav_ask_max,
+        open_fav_secs: args.open_fav_secs,
+        pause_after_consec_losses: args.pause_after_consec_losses,
+        max_rearm_entry_ask: args.max_rearm_entry_ask,
+        skip_spot_misalign_s: args.skip_spot_misalign_s,
+        skip_spot_against_all: args.skip_spot_against_all,
     };
     let mut spot_cache = SpotCache::default();
     let seasonal_tables: Option<SeasonalTables> =
@@ -932,6 +1095,14 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
                     "stop_hold_pnl": t.stop_hold_pnl,
                     "sigma_bar_bps": t.sigma_bar_bps,
                     "maker_entry": t.maker_entry,
+                    "regime_at_decision": t.regime_at_decision.map(|r| r.as_str()),
+                    "secs_from_open": t.secs_from_open,
+                    "spot_ret_10s_bps": t.spot_ret_10s_bps,
+                    "spot_ret_30s_bps": t.spot_ret_30s_bps,
+                    "spot_ret_60s_bps": t.spot_ret_60s_bps,
+                    "spot_ret_120s_bps": t.spot_ret_120s_bps,
+                    "basis_mom_60s_bps": t.basis_mom_60s_bps,
+                    "side_aligned_30s": t.side_aligned_30s,
                 });
                 writeln!(f, "{row}")?;
             }

@@ -9,7 +9,25 @@ for e in events:
     ts = e.get("ts_utc", "")[11:19]
     if t == "would_enter":
         touch = e.get("touch_price") or (e.get("touch") or {}).get("price")
-        print(f"{ts} ENTER   {e['slug'][-10:]} {e['side']:4s} p={e.get('p_exo', 0):.2f} touch={touch}")
+        p_exo = e.get("p_exo", 0)
+        side = e.get("side", "")
+        p_side = e.get("p_side")
+        if p_side is None:
+            p_side = p_exo if side == "up" else 1.0 - p_exo
+        edge = e.get("edge")
+        clip = e.get("clip")
+        limit = e.get("marketable_limit_price")
+        extra = ""
+        if edge is not None:
+            extra += f" edge={edge:.3f}"
+        if clip is not None:
+            extra += f" clip={clip}"
+        if limit is not None:
+            extra += f" limit={limit:.2f}"
+        print(
+            f"{ts} ENTER   {e['slug'][-10:]} {side:4s} "
+            f"p_up={p_exo:.3f} p_side={p_side:.3f} touch={touch}{extra}"
+        )
     elif t == "quote_probe":
         print(f"{ts} PROBE   still_quoted={e['still_quoted']} remaining={e.get('remaining_size') or 0:.0f}")
     elif t == "would_exit":

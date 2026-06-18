@@ -23,7 +23,8 @@ pub mod vol;
 pub use calibrator::{ExoCalibrator, ExoCalibratorSnapshot, ExoFeatures, TrainingConfig, TrainingSample};
 pub use decide::{
     DecideConfig, DecisionInputs, EntryAction, EntryDecision, EntryState, EntryStateDelta,
-    decide_entry, frozen_fade_decide_config,
+    SessionGateState, decide_entry, frozen_fade_decide_config, session_gates_active,
+    session_observe_trades,
 };
 pub use directional::{DIR_FEATURE_NAMES, DIR_FEATURES, DirFeatures, DirModel, dir_features};
 pub use fair_value::{FairValueEstimate, FairValueModel, NoSignalReason};

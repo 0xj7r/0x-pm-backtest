@@ -105,6 +105,21 @@ pub struct HarnessConfig {
     /// reliability-discounted edge and equalizes per-trade variance
     /// (cheap lottery entries shrink hard). false = flat clips.
     pub kelly_sizing: bool,
+    /// Thesis gate: skip when chosen-side belief is below this (0 = off).
+    #[serde(default)]
+    pub min_p_side: f64,
+    /// Thesis gate: skip when chosen-side belief exceeds this (1.0 = off).
+    #[serde(default = "default_max_entry_ask")]
+    pub max_p_side: f64,
+    /// Thesis gate: skip when entry ask is below this (0 = off).
+    #[serde(default)]
+    pub min_entry_ask: f64,
+    /// No entries until this many seconds after market open (0 = off).
+    #[serde(default)]
+    pub min_secs_from_open: u32,
+    /// Thesis gate: skip when entry ask exceeds this (1.0 = off).
+    #[serde(default = "default_max_entry_ask")]
+    pub max_entry_ask: f64,
     /// Vol-responsive sizing: when > 0, clip = notional * clamp(sigma_bar_bps
     /// / ref, lo, hi). Sizes up on high-movement tape (real edges), down on
     /// pinned tape (phantom edges). 0 = off. Causal (uses entry sigma).
@@ -174,6 +189,13 @@ pub struct HarnessConfig {
     /// Skip entries when sigma_bar_bps at decision exceeds this (regime
     /// gate for vol-sensitive lanes; 0 disables).
     pub max_entry_sigma_bps: f64,
+    /// Vol floor: skip when belief sigma_bar_bps is below this (shadow/live
+    /// uses 3.0; 0 = off).
+    #[serde(default)]
+    pub min_entry_sigma_bps: f64,
+    /// Skip UTC-Saturday entries (shadow-final behaviour).
+    #[serde(default)]
+    pub skip_saturday: bool,
     /// Post-entry selldown stop (hold mode only, `exit_after_s == 0`):
     /// after the fill, sell (taker, crossing the bid, exit-leg fee) at the
     /// first subsequent tick where the entry side's ask prints at-or-below
@@ -216,10 +238,50 @@ pub struct HarnessConfig {
     pub collect_training: bool,
     /// Cadence of training-sample collection (seconds into the window).
     pub train_sample_dt_s: u32,
+    /// Skip when decision-time regime is `expanded_high_flip`.
+    #[serde(default)]
+    pub skip_expanded_high_flip: bool,
+    /// Skip open-window favourites where model >> book.
+    #[serde(default)]
+    pub skip_open_fav_gap: bool,
+    #[serde(default = "default_open_fav_p_min")]
+    pub open_fav_p_min: f64,
+    #[serde(default = "default_open_fav_ask_max")]
+    pub open_fav_ask_max: f64,
+    #[serde(default = "default_open_fav_secs")]
+    pub open_fav_secs: u32,
+    /// Pause entries when consecutive resolved losses >= this (0 = off).
+    #[serde(default)]
+    pub pause_after_consec_losses: u32,
+    /// On rearm clips, skip when entry ask exceeds this (0 = off).
+    #[serde(default)]
+    pub max_rearm_entry_ask: f64,
+    /// Skip when spot return over this lookback (seconds) disagrees with side (0 = off).
+    #[serde(default)]
+    pub skip_spot_misalign_s: u32,
+    /// Skip when 60/300/600/900s spot all disagree with entry side.
+    #[serde(default)]
+    pub skip_spot_against_all: bool,
+}
+
+fn default_open_fav_p_min() -> f64 {
+    0.90
+}
+
+fn default_open_fav_ask_max() -> f64 {
+    0.60
+}
+
+fn default_open_fav_secs() -> u32 {
+    5
 }
 
 fn default_selldown_stop_eps() -> f64 {
     -1.0
+}
+
+fn default_max_entry_ask() -> f64 {
+    1.0
 }
 
 fn default_maker_entry_offset() -> f64 {
@@ -237,6 +299,11 @@ impl Default for HarnessConfig {
             edge_threshold: 0.05,
             notional_usdc: 50.0,
             kelly_sizing: false,
+            min_p_side: 0.0,
+            max_p_side: 1.0,
+            min_entry_ask: 0.0,
+            max_entry_ask: 1.0,
+            min_secs_from_open: 0,
             vol_sizing_ref_bps: 0.0,
             vol_sizing_lo: 0.5,
             vol_sizing_hi: 2.0,
@@ -258,6 +325,8 @@ impl Default for HarnessConfig {
             tail_max_price: 0.0,
             tail_frac: 0.25,
             max_entry_sigma_bps: 0.0,
+            min_entry_sigma_bps: 0.0,
+            skip_saturday: false,
             selldown_stop_eps: -1.0,
             entry_stability_s: 0,
             stability_eps: 0.005,
@@ -268,6 +337,15 @@ impl Default for HarnessConfig {
             maker_entry_offset: -1.0,
             collect_training: false,
             train_sample_dt_s: 15,
+            skip_expanded_high_flip: false,
+            skip_open_fav_gap: false,
+            open_fav_p_min: 0.90,
+            open_fav_ask_max: 0.60,
+            open_fav_secs: 5,
+            pause_after_consec_losses: 0,
+            max_rearm_entry_ask: 0.0,
+            skip_spot_misalign_s: 0,
+            skip_spot_against_all: false,
         }
     }
 }
@@ -334,6 +412,30 @@ pub struct TradeRecord {
     /// a mid existed at the horizon).
     #[serde(default)]
     pub pnl_exit_mid_optimistic: Option<f64>,
+    /// Exogenous regime at entry decision (None when spot history is thin).
+    #[serde(default)]
+    pub regime_at_decision: Option<crate::regime::Regime>,
+    /// Seconds from window open at entry decision.
+    #[serde(default)]
+    pub secs_from_open: u32,
+    /// Spot return over the 10s before decision (bps).
+    #[serde(default)]
+    pub spot_ret_10s_bps: Option<f64>,
+    /// Spot return over the 30s before decision (bps); diagnostic for whipsaw.
+    #[serde(default)]
+    pub spot_ret_30s_bps: Option<f64>,
+    /// Spot return over the 60s before decision (bps).
+    #[serde(default)]
+    pub spot_ret_60s_bps: Option<f64>,
+    /// Spot return over the 120s before decision (bps).
+    #[serde(default)]
+    pub spot_ret_120s_bps: Option<f64>,
+    /// 60s change in perp-minus-spot basis, bps of spot (0 when no perp).
+    #[serde(default)]
+    pub basis_mom_60s_bps: f64,
+    /// True when 30s spot momentum agrees with the entry side.
+    #[serde(default)]
+    pub side_aligned_30s: Option<bool>,
     /// True for a pair-completion leg (opposite-side buy locking the pair).
     #[serde(default)]
     pub is_completion: bool,

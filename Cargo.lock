@@ -1961,6 +1961,7 @@ name = "pm-strategy"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "pm-alpha",
  "pm-model",
  "pm-risk",
  "pm-types",

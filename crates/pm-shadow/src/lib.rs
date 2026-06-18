@@ -7,12 +7,17 @@
 //! Up/Down touch asks, first threshold crossing per market, 1s cadence) and
 //! logs WOULD_ENTER / QUOTE_PROBE / WOULD_EXIT / SUMMARY records as JSONL.
 
+mod tape;
+pub use tape::{BookLevel, TapeEvent, TapeStore};
+
 use anyhow::{Context, Result};
 use pm_alpha::harness::{EntryMode, Side as HarnessSide};
 use pm_alpha::{
-    decide_entry, frozen_fade_decide_config, AlphaModel, AlphaModelConfig, DecideConfig,
-    DecisionInputs, EntryAction, EntryState, EntryStateDelta, ExoState, MarketMeta, PerpState,
-    Token, VolEstimator,
+    calibrator::{exo_features, EXO_FEATURES},
+    decide_entry, dir_features, frozen_fade_decide_config, harness::spot_ret_bps, regime,
+    AlphaModel, AlphaModelConfig, DecideConfig, DecisionInputs, EntryAction, EntryState,
+    EntryStateDelta, ExoState, MarketMeta, PerpState, SessionGateState, Token, VolEstimator,
+    DIR_FEATURES,
 };
 use pm_types::{SpotHistory, SpotTick};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -70,6 +75,18 @@ pub struct ShadowArgs {
     pub vol_sizing_ref_bps: f64,
     pub vol_sizing_lo: f64,
     pub vol_sizing_hi: f64,
+    /// Skip when entry ask is below this (0 = off). Live candidate: 0.45.
+    pub min_entry_ask: f64,
+    /// Skip when entry ask exceeds this (1.0 = off).
+    pub max_entry_ask: f64,
+    /// Skip when spot return over this lookback (seconds) disagrees with side (0 = off).
+    pub skip_spot_misalign_s: u32,
+    /// Skip when 60/300/600/900s spot all disagree with entry side.
+    pub skip_spot_against_all: bool,
+    /// Skip when decision-time regime is `expanded_high_flip`.
+    pub skip_expanded_high_flip: bool,
+    /// Pause entries after this many consecutive resolved losses (0 = off).
+    pub pause_after_consec_losses: u32,
 }
 
 /// Frozen leading config validated on backtest + the `shadow-final` live twin.
@@ -100,7 +117,21 @@ pub fn frozen_shadow_final_args(out_dir: PathBuf) -> ShadowArgs {
         vol_sizing_ref_bps: 0.0,
         vol_sizing_lo: 0.5,
         vol_sizing_hi: 2.0,
+        min_entry_ask: 0.0,
+        max_entry_ask: 1.0,
+        skip_spot_misalign_s: 0,
+        skip_spot_against_all: false,
+        skip_expanded_high_flip: false,
+        pause_after_consec_losses: 0,
     }
+}
+
+/// Validated live gate package: mom30 + lottery-band floor (touch >= 0.45).
+pub fn gated_shadow_final_args(out_dir: PathBuf) -> ShadowArgs {
+    let mut args = frozen_shadow_final_args(out_dir);
+    args.skip_spot_misalign_s = 30;
+    args.min_entry_ask = 0.45;
+    args
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,10 +164,49 @@ pub enum LogEvent {
         ts_utc: String,
         slug: String,
         side: &'static str,
+        /// Belief P(up) from the exogenous model (always, regardless of side).
         p_exo: f64,
+        /// Belief on the entered side: `p_exo` for Up, `1 - p_exo` for Down.
+        p_side: f64,
+        /// Belief P(down) = `1 - p_exo` (decision-layer telemetry).
+        p_down: f64,
+        /// Edge if buying UP: `p_exo - yes_ask`.
+        edge_up: f64,
+        /// Edge if buying DOWN: `(1 - p_exo) - no_ask`.
+        edge_down: f64,
+        /// Trailing spot simple returns, bps (exogenous trend hints).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        spot_ret_10s_bps: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        spot_ret_30s_bps: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        spot_ret_60s_bps: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        spot_ret_120s_bps: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        spot_ret_300s_bps: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        spot_ret_600s_bps: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        spot_ret_900s_bps: Option<f64>,
+        /// Belief on entered side minus touch ask (book disagreement proxy).
+        model_book_gap: f64,
+        /// Seconds since window open at entry.
+        secs_from_open: u32,
+        /// Spot vs strike in bps: `(S - K) / K * 10_000`.
+        delta_bps: f64,
+        /// `pm_alpha::calibrator::exo_features` vector (16); see `EXO_FEATURE_NAMES`.
+        exo_features: Vec<f32>,
+        /// `pm_alpha::directional::dir_features` vector (14); see `DIR_FEATURE_NAMES`.
+        dir_features: Vec<f32>,
+        /// CEX path-shape regime from `pm_alpha::regime` (not used in belief).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        regime: Option<&'static str>,
         touch_price: f64,
         touch_size: f64,
         edge: f64,
+        /// Marketable IOC cap from `decide_entry`: `p_side - min_marginal_edge`.
+        marketable_limit_price: f64,
         strike: f64,
         strike_source: &'static str,
         sigma_bar_bps: f64,
@@ -145,6 +215,15 @@ pub enum LogEvent {
         lane: &'static str,
         /// 1-based entry index within the market (re-entry ladders only).
         clip: u32,
+        /// Venue token to buy (so a JSONL-tailing executor needs no gamma lookup).
+        token_id: String,
+        /// Clip notional from frozen decide config.
+        target_notional: f64,
+        /// Market close (unix s) for redeem scheduling.
+        close_ts_s: i64,
+        condition_id: Option<String>,
+        up_index_set: u64,
+        down_index_set: u64,
     },
     QuoteProbe {
         ts_utc: String,
@@ -520,12 +599,28 @@ struct SummaryStats {
 /// UNCHANGED `decide()` so live entries are identical to shadow's by construction.
 /// Sizing (clip notional) and the marketable limit are live-execution concerns
 /// applied by the consumer, not the engine.
+
+/// Side-oriented belief for live IOC orders.
+pub fn p_side_for_entry(p_exo: f64, side: &str) -> f64 {
+    if side == "up" {
+        p_exo
+    } else {
+        1.0 - p_exo
+    }
+}
+
+pub fn marketable_limit_for_entry(p_exo: f64, side: &str, min_marginal_edge: f64) -> f64 {
+    p_side_for_entry(p_exo, side) - min_marginal_edge
+}
+
 #[derive(Debug, Clone)]
 pub struct ExecIntent {
     pub slug: String,
     pub side: String,
     pub token_id: String,
     pub p_exo: f64,
+    /// Belief on the entered side (not always `p_exo`).
+    pub p_side: f64,
     pub touch_price: f64,
     pub marketable_limit_price: f64,
     pub target_notional: f64,
@@ -561,6 +656,8 @@ pub struct ShadowCore {
     vbuf_coinbase: VenueBuf,
     /// Binance futures prints (perp-led state input; empty when disabled).
     perp_buf: VecDeque<SpotTick>,
+    /// Cross-market loss streak for `pause_after_consec_losses`.
+    session: SessionGateState,
 }
 
 #[derive(Debug, Clone)]
@@ -586,6 +683,12 @@ pub struct ShadowConfig {
     pub vol_sizing_ref_bps: f64,
     pub vol_sizing_lo: f64,
     pub vol_sizing_hi: f64,
+    pub min_entry_ask: f64,
+    pub max_entry_ask: f64,
+    pub skip_spot_misalign_s: u32,
+    pub skip_spot_against_all: bool,
+    pub skip_expanded_high_flip: bool,
+    pub pause_after_consec_losses: u32,
     /// Shared `decide_entry` config — byte-identical to backtest harness.
     pub decide_cfg: DecideConfig,
 }
@@ -615,6 +718,12 @@ pub fn shadow_config_from_args(args: &ShadowArgs) -> ShadowConfig {
         vol_sizing_ref_bps: args.vol_sizing_ref_bps,
         vol_sizing_lo: args.vol_sizing_lo,
         vol_sizing_hi: args.vol_sizing_hi,
+        min_entry_ask: args.min_entry_ask,
+        max_entry_ask: args.max_entry_ask,
+        skip_spot_misalign_s: args.skip_spot_misalign_s,
+        skip_spot_against_all: args.skip_spot_against_all,
+        skip_expanded_high_flip: args.skip_expanded_high_flip,
+        pause_after_consec_losses: args.pause_after_consec_losses,
         decide_cfg: frozen_fade_decide_config(SHADOW_NOTIONAL_USDC),
     }
 }
@@ -651,6 +760,7 @@ impl ShadowCore {
             vbuf_kraken: VenueBuf::default(),
             vbuf_coinbase: VenueBuf::default(),
             perp_buf: VecDeque::new(),
+            session: SessionGateState::default(),
             stats: SummaryStats::default(),
         }
     }
@@ -877,6 +987,79 @@ fn push_capped(buf: &mut VecDeque<i64>, value: i64) {
     }
 }
 
+/// Decision-layer context for cluster/trend monitoring (does not affect belief).
+fn entry_decision_telemetry(
+    state: &ExoState<'_>,
+    belief: &pm_alpha::Belief,
+    vol_lookback_s: u32,
+    spot: &SpotHistory,
+    now_ns: i64,
+    open_ns: i64,
+    p_exo: f64,
+    p_side: f64,
+    touch_price: f64,
+    yes_ask: f64,
+    no_ask: f64,
+) -> (
+    f64,
+    f64,
+    f64,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    f64,
+    u32,
+    f64,
+    Vec<f32>,
+    Vec<f32>,
+    Option<&'static str>,
+) {
+    let p_down = 1.0 - p_exo;
+    let edge_up = p_exo - yes_ask;
+    let edge_down = p_down - no_ask;
+    let spot_ret_10s_bps = spot_ret_bps(spot, now_ns, 10);
+    let spot_ret_30s_bps = spot_ret_bps(spot, now_ns, 30);
+    let spot_ret_60s_bps = spot_ret_bps(spot, now_ns, 60);
+    let spot_ret_120s_bps = spot_ret_bps(spot, now_ns, 120);
+    let spot_ret_300s_bps = spot_ret_bps(spot, now_ns, 300);
+    let spot_ret_600s_bps = spot_ret_bps(spot, now_ns, 600);
+    let spot_ret_900s_bps = spot_ret_bps(spot, now_ns, 900);
+    let regime = regime::classify(spot, now_ns).map(|r| r.as_str());
+    let secs_from_open = ((now_ns.saturating_sub(open_ns)) / 1_000_000_000).max(0) as u32;
+    let model_book_gap = p_side - touch_price;
+    let delta_bps = state
+        .spot_now()
+        .filter(|s| s.is_finite() && state.market.strike > 0.0)
+        .map(|s| ((s - state.market.strike) / state.market.strike * 10_000.0).clamp(-300.0, 300.0))
+        .unwrap_or(0.0);
+    let exo = exo_features(state, belief, vol_lookback_s).values.to_vec();
+    debug_assert_eq!(exo.len(), EXO_FEATURES);
+    let dir = dir_features(state, belief.sigma_bar_bps).values.to_vec();
+    debug_assert_eq!(dir.len(), DIR_FEATURES);
+    (
+        p_down,
+        edge_up,
+        edge_down,
+        spot_ret_10s_bps,
+        spot_ret_30s_bps,
+        spot_ret_60s_bps,
+        spot_ret_120s_bps,
+        spot_ret_300s_bps,
+        spot_ret_600s_bps,
+        spot_ret_900s_bps,
+        model_book_gap,
+        secs_from_open,
+        delta_bps,
+        exo,
+        dir,
+        regime,
+    )
+}
+
 impl ShadowCore {
     /// One decision pass over all active windows, mirroring the harness:
     /// belief from ExoState, edge per side vs the REAL touch asks, enter on
@@ -901,6 +1084,12 @@ impl ShadowCore {
         self.cfg.decide_cfg.vol_sizing_ref_bps = self.cfg.vol_sizing_ref_bps;
         self.cfg.decide_cfg.vol_sizing_lo = self.cfg.vol_sizing_lo;
         self.cfg.decide_cfg.vol_sizing_hi = self.cfg.vol_sizing_hi;
+        self.cfg.decide_cfg.min_entry_ask = self.cfg.min_entry_ask;
+        self.cfg.decide_cfg.max_entry_ask = self.cfg.max_entry_ask;
+        self.cfg.decide_cfg.skip_spot_misalign_s = self.cfg.skip_spot_misalign_s;
+        self.cfg.decide_cfg.skip_spot_against_all = self.cfg.skip_spot_against_all;
+        self.cfg.decide_cfg.skip_expanded_high_flip = self.cfg.skip_expanded_high_flip;
+        self.cfg.decide_cfg.pause_after_consec_losses = self.cfg.pause_after_consec_losses;
         if self.cfg.lane_late_fav {
             self.cfg.decide_cfg.enter_within_close_s = self.cfg.enter_within_close_s;
             self.cfg.decide_cfg.entry_mode = EntryMode::Aligned;
@@ -1024,9 +1213,25 @@ impl ShadowCore {
                     mid: up_mid.unwrap_or((up_ask.price + (1.0 - down_ask.price)) / 2.0),
                     sigma_bar_bps: ev.raw.sigma_bar_bps,
                     basis_mom_60s_bps: Self::basis_mom_60s_bps(perp.as_ref(), &spot, now_ns),
+                    regime_at_decision: regime::classify(&spot, now_ns),
+                    clip_index: m.n_clips,
+                    spot_ret_10s_bps: pm_alpha::harness::spot_ret_bps(&spot, now_ns, 10),
+                    spot_ret_30s_bps: pm_alpha::harness::spot_ret_bps(&spot, now_ns, 30),
+                    spot_ret_60s_bps: pm_alpha::harness::spot_ret_bps(&spot, now_ns, 60),
+                    spot_ret_120s_bps: pm_alpha::harness::spot_ret_bps(&spot, now_ns, 120),
+                    spot_ret_300s_bps: pm_alpha::harness::spot_ret_bps(&spot, now_ns, 300),
+                    spot_ret_600s_bps: pm_alpha::harness::spot_ret_bps(&spot, now_ns, 600),
+                    spot_ret_900s_bps: pm_alpha::harness::spot_ret_bps(&spot, now_ns, 900),
                 };
-                let (decision, delta) =
-                    decide_entry(&inputs, now_ns, close_ns, &m.entry, &self.cfg.decide_cfg);
+                let (decision, delta) = decide_entry(
+                    &inputs,
+                    now_ns,
+                    open_ns,
+                    close_ns,
+                    &m.entry,
+                    Some(&self.session),
+                    &self.cfg.decide_cfg,
+                );
 
                 if let Some(armed) = delta.set_armed {
                     if decision.action != EntryAction::Enter {
@@ -1090,19 +1295,80 @@ impl ShadowCore {
             let entry_id = self.next_entry_id;
             self.next_entry_id += 1;
             self.stats.entries_total += 1;
+            let p_side = p_side_for_entry(ev.p, side.as_str());
+            let marketable_limit =
+                marketable_limit_for_entry(ev.p, side.as_str(), self.cfg.decide_cfg.min_marginal_edge);
+            let (
+                p_down,
+                edge_up,
+                edge_down,
+                spot_ret_10s_bps,
+                spot_ret_30s_bps,
+                spot_ret_60s_bps,
+                spot_ret_120s_bps,
+                spot_ret_300s_bps,
+                spot_ret_600s_bps,
+                spot_ret_900s_bps,
+                model_book_gap,
+                secs_from_open,
+                delta_bps,
+                exo_features,
+                dir_features,
+                regime,
+            ) = entry_decision_telemetry(
+                &state,
+                &ev.raw,
+                self.cfg.vol_lookback_s,
+                &spot,
+                now_ns,
+                open_ns,
+                ev.p,
+                p_side,
+                touch.price,
+                up_ask.price,
+                down_ask.price,
+            );
+            let token_id = match side {
+                Side::Up => m.up_token.clone(),
+                Side::Down => m.down_token.clone(),
+            };
             out.push(LogEvent::WouldEnter {
                 ts_utc: ts_utc(now_ns),
                 slug: m.slug.clone(),
                 side: side.as_str(),
                 p_exo: ev.p,
+                p_side,
+                p_down,
+                edge_up,
+                edge_down,
+                spot_ret_10s_bps,
+                spot_ret_30s_bps,
+                spot_ret_60s_bps,
+                spot_ret_120s_bps,
+                spot_ret_300s_bps,
+                spot_ret_600s_bps,
+                spot_ret_900s_bps,
+                model_book_gap,
+                secs_from_open,
+                delta_bps,
+                exo_features,
+                dir_features,
+                regime,
                 touch_price: touch.price,
                 touch_size: touch.size,
                 edge,
+                marketable_limit_price: marketable_limit,
                 strike,
                 strike_source,
                 sigma_bar_bps: ev.raw.sigma_bar_bps,
                 lane: if lane { "late_fav" } else { "fade" },
                 clip: m.n_clips,
+                token_id: token_id.clone(),
+                target_notional: self.cfg.decide_cfg.notional_usdc,
+                close_ts_s: m.close_ts_s,
+                condition_id: m.condition_id.clone(),
+                up_index_set: m.up_index_set,
+                down_index_set: m.down_index_set,
             });
             entries.push(PendingTrade {
                 entry_id,
@@ -1208,6 +1474,7 @@ impl ShadowCore {
             .iter()
             .position(|w| w.entry_id == entry_id)?;
         let w = self.resolutions.swap_remove(idx);
+        self.session.observe_trade(won);
         let settle = if won {
             1.0 - w.entry_touch_price
         } else {
@@ -1591,7 +1858,9 @@ pub async fn run_shadow_with_sink(
                             slug,
                             side,
                             p_exo,
+                            p_side,
                             touch_price,
+                            marketable_limit_price,
                             clip,
                             edge,
                             sigma_bar_bps,
@@ -1605,14 +1874,14 @@ pub async fn run_shadow_with_sink(
                                 } else {
                                     m.down_token.clone()
                                 };
-                                let limit = p_exo - core.cfg.decide_cfg.min_marginal_edge;
                                 let _ = tx.send(ExecIntent {
                                     slug: slug.clone(),
                                     side: (*side).to_string(),
                                     token_id,
                                     p_exo: *p_exo,
+                                    p_side: *p_side,
                                     touch_price: *touch_price,
-                                    marketable_limit_price: limit,
+                                    marketable_limit_price: *marketable_limit_price,
                                     target_notional: core.cfg.decide_cfg.notional_usdc,
                                     hold_to_redemption: core.cfg.decide_cfg.exit_after_s == 0,
                                     clip: *clip,
@@ -2547,6 +2816,22 @@ mod tests {
     const NS: i64 = 1_000_000_000;
 
     #[test]
+    fn marketable_limit_uses_p_side_on_down_not_p_exo() {
+        // Live log shape: ENTER DOWN p_up=0.319 touch=0.51 edge=0.171
+        let p_exo = 0.319;
+        assert!((p_side_for_entry(p_exo, "down") - 0.681).abs() < 1e-9);
+        let limit = marketable_limit_for_entry(p_exo, "down", 0.04);
+        assert!(
+            (limit - 0.641).abs() < 1e-9,
+            "limit must be p_side - min_marginal, got {limit}"
+        );
+        assert!(
+            limit > 0.51,
+            "DOWN IOC cap must clear touch=0.51; old bug used p_exo-0.04=0.279"
+        );
+    }
+
+    #[test]
     fn frozen_shadow_final_args_matches_fade_ssot() {
         let args = frozen_shadow_final_args(PathBuf::from("shadow-final"));
         let decide = frozen_fade_decide_config(50.0);
@@ -2561,6 +2846,18 @@ mod tests {
         assert_eq!(args.vol_lookback_s, 3600);
         assert_eq!(args.vol_estimator, "realized");
         assert!(!args.lane_late_fav);
+        assert_eq!(args.skip_spot_misalign_s, 0);
+        assert_eq!(args.min_entry_ask, 0.0);
+    }
+
+    #[test]
+    fn gated_shadow_final_args_enables_mom30_and_lottery_floor() {
+        let args = gated_shadow_final_args(PathBuf::from("shadow-final"));
+        assert_eq!(args.skip_spot_misalign_s, 30);
+        assert!((args.min_entry_ask - 0.45).abs() < f64::EPSILON);
+        let cfg = shadow_config_from_args(&args);
+        assert_eq!(cfg.skip_spot_misalign_s, 30);
+        assert!((cfg.min_entry_ask - 0.45).abs() < f64::EPSILON);
     }
 
     fn cfg() -> ShadowConfig {
@@ -2587,6 +2884,12 @@ mod tests {
             vol_sizing_ref_bps: 0.0,
             vol_sizing_lo: 0.5,
             vol_sizing_hi: 2.0,
+            min_entry_ask: 0.0,
+            max_entry_ask: 1.0,
+            skip_spot_misalign_s: 0,
+            skip_spot_against_all: false,
+            skip_expanded_high_flip: false,
+            pause_after_consec_losses: 0,
             decide_cfg,
         }
     }
@@ -2727,7 +3030,19 @@ mod tests {
         let events = core.decide(1900 * NS, false);
         assert_eq!(events.len(), 1);
         match &events[0] {
-            LogEvent::WouldEnter { side, edge, strike, strike_source, touch_price, touch_size, p_exo, .. } => {
+            LogEvent::WouldEnter {
+                side,
+                edge,
+                edge_up,
+                edge_down,
+                p_exo,
+                p_down,
+                strike,
+                strike_source,
+                touch_price,
+                touch_size,
+                ..
+            } => {
                 assert_eq!(*side, "up");
                 assert_eq!(*strike, 99_000.0);
                 assert_eq!(*strike_source, "binance_proxy");
@@ -2735,8 +3050,30 @@ mod tests {
                 assert_eq!(*touch_size, 50.0);
                 assert!(*p_exo > 0.9, "p_exo={p_exo}");
                 assert!(*edge > 0.16);
+                assert!((*p_down - (1.0 - p_exo)).abs() < 1e-9);
+                assert!((*edge_up - *edge).abs() < 1e-9);
+                assert!(*edge_down < *edge_up);
             }
             other => panic!("expected WouldEnter, got {other:?}"),
+        }
+        if let LogEvent::WouldEnter {
+            model_book_gap,
+            secs_from_open,
+            delta_bps,
+            exo_features,
+            dir_features,
+            spot_ret_300s_bps,
+            ..
+        } = &events[0]
+        {
+            assert!(*model_book_gap > 0.35);
+            assert_eq!(*secs_from_open, 100);
+            assert!(*delta_bps > 0.0);
+            assert_eq!(exo_features.len(), EXO_FEATURES);
+            assert_eq!(dir_features.len(), DIR_FEATURES);
+            assert!(spot_ret_300s_bps.is_some());
+        } else {
+            panic!("expected WouldEnter");
         }
         // First crossing only: no duplicate entry on later passes.
         assert!(core.decide(1901 * NS, false).is_empty());
@@ -2752,9 +3089,18 @@ mod tests {
         let events = core.decide(1900 * NS, false);
         assert_eq!(events.len(), 1);
         match &events[0] {
-            LogEvent::WouldEnter { side, p_exo, .. } => {
+            LogEvent::WouldEnter {
+                side,
+                p_exo,
+                p_side,
+                marketable_limit_price,
+                touch_price,
+                ..
+            } => {
                 assert_eq!(*side, "down");
                 assert!(*p_exo < 0.1, "p_exo={p_exo}");
+                assert!((*p_side - (1.0 - p_exo)).abs() < 1e-9);
+                assert!(*marketable_limit_price > *touch_price);
             }
             other => panic!("expected WouldEnter, got {other:?}"),
         }

@@ -61,6 +61,21 @@ outages. Prime suspects: the perp-bootstrap-from-klines biasing the 0.75-weighte
 resets overnight created stale-book windows; same-side double-clips (rearm +
 max_clips=2) amplified each wrong-side loss to −$40.
 
+**Smoking gun (2026-06-16 10:20 UTC):** same market, same second — `shadow-final`
+`p_exo=0.871` → ENTER UP; `shadow_live` `p_exo=0.319` → ENTER DOWN. Sign-flipped
+moneyness: one engine has `eff_spot` above strike, the other below. With
+`perp_price_weight=0.75`, a cold 1m-klines perp buffer + tick-level spot buffer
+produces a wrong median basis → wrong `eff_spot` → wrong Φ(d₂) → opposite side.
+Fixing spot to 1s alone is insufficient; any agent-side re-warm repeats the failure.
+
+**Orphan entry (2026-06-16 11:10 UTC):** LIVE `ENTER UP btc-updown-5m-1781608200
+p=0.947 touch=0.52 edge=0.427` with **no** matching `would_enter` in shadow-final.
+Math is internally consistent (`0.947−0.52=0.427`) but `p≈0.95` on a 52¢ UP ask
+implies extreme moneyness — almost always a **wrong `eff_spot` on the live engine**,
+not a shadow-final decision. REF counter frozen at `entries=376` while LIVE climbs
+confirms the two processes are not the same decision stream. **Do not trade** until
+LIVE only executes shadow-final JSONL (`scripts/compare_live_ref.py` for audits).
+
 ---
 
 ## 4. Why monitoring didn't catch it sooner (the real miss)
@@ -88,8 +103,16 @@ validated engine's decisions, market by market.
 **Root fix (in progress) — run live off the EXACT shared engine:**
 - **P1 (done):** Exposed `pm-app::shadow` as a library. `cargo check` clean, 28 shadow tests pass (engine behavior unchanged).
 - **P2 (done):** Added `run_shadow_with_sink(args, intent_tx)` which emits an `ExecIntent` for each entry decision produced by the **unchanged** `decide()`. The decision path is identical to shadow/backtest; only the venue token is attached. 28 tests still pass.
-- **P3 (next):** Extract a lightweight `pm-shadow` crate (pm-app pulls Nautilus + arrow/parquet — too heavy for the lean agent). Build a `shadow_live` consumer in polymarket-exec that drains `ExecIntent`s and submits via the **already-proven** execution adapter + arming + kill-switch + redemption (reused from fade_live/redeem_once, minus the broken engine). Default = shadow/paper (no real orders).
-- **P4 (gate):** Run `shadow_live` in paper alongside `shadow` and prove trade-by-trade decision parity for a full session. **No real money until this passes.**
+- **P3 (done in pm-backtest):** `pm-shadow` crate extracted; `run_shadow_with_sink` emits `ExecIntent`;
+  `would_enter` JSONL records now carry execution fields (`token_id`, `marketable_limit_price`,
+  `p_side`, `target_notional`, `condition_id`, redeem index sets) — flushed per line.
+- **P3b (next, polymarket-exec):** **JSONL-tailing executor** — do NOT run a second bootstrapped
+  engine. Keep `shadow-final` untouched (days-warm tick buffers; never restart for live). A thin
+  process tails `shadow-final/shadow-*.jsonl`, submits on each `would_enter`, redeems at resolution.
+  Reuse fade_live adapter + arming + kill-switch + redeem; delete belief/bootstrap code entirely.
+- **P4 (gate):** Paper executor for one session: every submit must match a `would_enter` line
+  byte-for-byte on `(slug, side, clip)`. Divergence detector alerts on orphan submits or side skew.
+  **No real money until this passes.**
 - **P5 (gated):** Re-arm real money only after P4 + explicit go. Caps + kill switch + $20 clips.
 
 ---

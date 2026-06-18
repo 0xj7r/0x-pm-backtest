@@ -69,6 +69,11 @@ fn frozen_cfg() -> DecideConfig {
         stop_before_close_s: STOP_BEFORE_CLOSE_S as u32,
         notional_usdc: SHADOW_NOTIONAL_USDC,
         kelly_sizing: false,
+        min_p_side: 0.0,
+        max_p_side: 1.0,
+        min_entry_ask: 0.0,
+        max_entry_ask: 1.0,
+        min_secs_from_open: 0,
         vol_sizing_ref_bps: 0.0,
         vol_sizing_lo: 0.5,
         vol_sizing_hi: 2.0,
@@ -76,6 +81,15 @@ fn frozen_cfg() -> DecideConfig {
         basis_mom_disagree: 1.0,
         entry_mode: EntryMode::Fade,
         align_min_mid: 0.55,
+        skip_expanded_high_flip: false,
+        skip_open_fav_gap: false,
+        open_fav_p_min: 0.90,
+        open_fav_ask_max: 0.60,
+        open_fav_secs: 5,
+        pause_after_consec_losses: 0,
+        max_rearm_entry_ask: 0.0,
+        skip_spot_misalign_s: 0,
+        skip_spot_against_all: false,
     }
 }
 
@@ -226,6 +240,15 @@ fn backtest_inputs(
         mid,
         sigma_bar_bps: ev.raw.sigma_bar_bps,
         basis_mom_60s_bps,
+        regime_at_decision: None,
+        clip_index: 0,
+        spot_ret_10s_bps: crate::harness::spot_ret_bps(spot, ts_ns, 10),
+        spot_ret_30s_bps: crate::harness::spot_ret_bps(spot, ts_ns, 30),
+        spot_ret_60s_bps: crate::harness::spot_ret_bps(spot, ts_ns, 60),
+        spot_ret_120s_bps: crate::harness::spot_ret_bps(spot, ts_ns, 120),
+        spot_ret_300s_bps: crate::harness::spot_ret_bps(spot, ts_ns, 300),
+        spot_ret_600s_bps: crate::harness::spot_ret_bps(spot, ts_ns, 600),
+        spot_ret_900s_bps: crate::harness::spot_ret_bps(spot, ts_ns, 900),
     })
 }
 
@@ -346,6 +369,15 @@ fn live_inputs(
         mid,
         sigma_bar_bps: ev.raw.sigma_bar_bps,
         basis_mom_60s_bps,
+        regime_at_decision: None,
+        clip_index: 0,
+        spot_ret_10s_bps: crate::harness::spot_ret_bps(&spot, ts_ns, 10),
+        spot_ret_30s_bps: crate::harness::spot_ret_bps(&spot, ts_ns, 30),
+        spot_ret_60s_bps: crate::harness::spot_ret_bps(&spot, ts_ns, 60),
+        spot_ret_120s_bps: crate::harness::spot_ret_bps(&spot, ts_ns, 120),
+        spot_ret_300s_bps: crate::harness::spot_ret_bps(&spot, ts_ns, 300),
+        spot_ret_600s_bps: crate::harness::spot_ret_bps(&spot, ts_ns, 600),
+        spot_ret_900s_bps: crate::harness::spot_ret_bps(&spot, ts_ns, 900),
     })
 }
 
@@ -521,8 +553,8 @@ fn compare_one(
         && (bt.no_buy - lv.no_buy).abs() < PX_TOL
         && (bt.mid - lv.mid).abs() < PX_TOL;
 
-    let (bt_dec, bt_delta) = decide_entry(&bt, ts_ns, close_ns, state, cfg);
-    let (lv_dec, lv_delta) = decide_entry(&lv, ts_ns, close_ns, state, cfg);
+    let (bt_dec, bt_delta) = decide_entry(&bt, ts_ns, open_ns, close_ns, state, None, cfg);
+    let (lv_dec, lv_delta) = decide_entry(&lv, ts_ns, open_ns, close_ns, state, None, cfg);
     let q_bt = quantize(&bt_dec);
     let q_lv = quantize(&lv_dec);
 

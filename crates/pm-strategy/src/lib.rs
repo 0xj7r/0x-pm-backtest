@@ -9,6 +9,7 @@
 pub mod back_to_explore;
 pub mod convex;
 pub mod bonereaper_v2;
+pub mod exo_fade;
 pub mod paired_mm;
 pub mod regime;
 pub mod signals;
@@ -143,6 +144,7 @@ pub trait Strategy {
 }
 
 pub use back_to_explore::{BackToExploreConfig, BackToExploreTaker};
+pub use exo_fade::{ExoFadeConfig, ExoFadeGateStats, ExoFadeStrategy};
 pub use convex::{ConvexBookConfig, ConvexBookStrategy};
 pub use convex::position::PositionConfig;
 pub use bonereaper_v2::{BonereaperV2, BonereaperV2Config};

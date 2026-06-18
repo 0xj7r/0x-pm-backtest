@@ -1,0 +1,26 @@
+# Quant-grade exogenous fade @ $1K bankroll (champion config).
+# Run via walk-forward with portfolio mode:
+#
+#   pm-app walk-forward \
+#     --markets data/manifests/canonical/btc-updown-5m_up.jsonl \
+#     --local-cache-dir data/cache \
+#     --strategies exo_fade \
+#     --starting-cash 1000 \
+#     --portfolio-mode \
+#     --clip-fraction-of-equity 0.025 \
+#     --max-clip-usdc 30 \
+#     --use-outcome-label \
+#     --spot-symbol BTCUSDT
+
+[strategy.exo_fade]
+bankroll_usdc = 1000.0
+clip_usdc = 25.0
+edge_threshold = 0.16
+min_marginal_edge = 0.08
+max_clips = 2
+rearm_edge = 0.08
+exit_after_s = 30
+stop_before_close_s = 90
+vol_lookback_s = 3600
+perp_price_weight = 0.75
+entry_mode = "fade"

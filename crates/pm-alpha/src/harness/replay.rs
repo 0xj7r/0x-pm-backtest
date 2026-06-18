@@ -32,6 +32,38 @@ struct Decision {
     sigma_bar_bps: f64,
     /// 60s change in perp-minus-spot basis, bps of spot. 0 when no perp.
     basis_mom_60s_bps: f64,
+    regime_at_decision: Option<crate::regime::Regime>,
+    spot_ret_10s_bps: Option<f64>,
+    spot_ret_30s_bps: Option<f64>,
+    spot_ret_60s_bps: Option<f64>,
+    spot_ret_120s_bps: Option<f64>,
+    spot_ret_300s_bps: Option<f64>,
+    spot_ret_600s_bps: Option<f64>,
+    spot_ret_900s_bps: Option<f64>,
+}
+
+pub fn spot_ret_bps(spot: &SpotHistory, ts_ns: i64, lookback_s: i64) -> Option<f64> {
+    spot.simple_return(ts_ns, lookback_s * 1_000_000_000)
+        .filter(|r| r.is_finite())
+        .map(|r| r * 1e4)
+}
+
+fn side_aligned_spot(ret_30s_bps: Option<f64>, side: Side) -> Option<bool> {
+    ret_30s_bps.map(|bps| match side {
+        Side::Yes => bps > 0.0,
+        Side::No => bps < 0.0,
+    })
+}
+
+fn momentum_from_decision(d: &Decision, side: Side) -> (Option<f64>, Option<f64>, Option<f64>, Option<f64>, f64, Option<bool>) {
+    (
+        d.spot_ret_10s_bps,
+        d.spot_ret_30s_bps,
+        d.spot_ret_60s_bps,
+        d.spot_ret_120s_bps,
+        d.basis_mom_60s_bps,
+        side_aligned_spot(d.spot_ret_30s_bps, side),
+    )
 }
 
 struct BeliefPass {
@@ -168,6 +200,13 @@ fn belief_pass(
                 Some((bn - bp) * 1e4)
             })
             .unwrap_or(0.0);
+        let spot_ret_10s_bps = spot_ret_bps(spot, tick.ts_ns, 10);
+        let spot_ret_30s_bps = spot_ret_bps(spot, tick.ts_ns, 30);
+        let spot_ret_60s_bps = spot_ret_bps(spot, tick.ts_ns, 60);
+        let spot_ret_120s_bps = spot_ret_bps(spot, tick.ts_ns, 120);
+        let spot_ret_300s_bps = spot_ret_bps(spot, tick.ts_ns, 300);
+        let spot_ret_600s_bps = spot_ret_bps(spot, tick.ts_ns, 600);
+        let spot_ret_900s_bps = spot_ret_bps(spot, tick.ts_ns, 900);
         pass.decisions.push(Decision {
             tick_idx: i,
             ts_ns: tick.ts_ns,
@@ -178,6 +217,14 @@ fn belief_pass(
             no_buy,
             sigma_bar_bps: ev.raw.sigma_bar_bps,
             basis_mom_60s_bps,
+            regime_at_decision: crate::regime::classify(spot, tick.ts_ns),
+            spot_ret_10s_bps,
+            spot_ret_30s_bps,
+            spot_ret_60s_bps,
+            spot_ret_120s_bps,
+            spot_ret_300s_bps,
+            spot_ret_600s_bps,
+            spot_ret_900s_bps,
         });
     }
 
@@ -250,7 +297,9 @@ fn execute(
     latency_ms: u64,
     edge_threshold: f64,
     cfg: &HarnessConfig,
+    session: Option<&crate::decide::SessionGateState>,
 ) -> (Vec<TradeRecord>, u32) {
+    let open_ns = series.meta.open_ts_ns;
     let close_ns = series.meta.close_ts_ns;
     let latency_ns = latency_ms as i64 * 1_000_000;
     let cooldown_ns = cfg.clip_cooldown_ms as i64 * 1_000_000;
@@ -310,6 +359,7 @@ fn execute(
                 t1.fee_hold = false;
                 t1.hold_alt_sell_pnl = None;
                 t1.hold_alt_exit_fee = None;
+                let (r10, r30, r60, r120, basis, aligned) = momentum_from_decision(d, opp);
                 trades.push(TradeRecord {
                     sigma_bar_bps: d.sigma_bar_bps,
                     side_ask_at_decision: 0.0,
@@ -317,6 +367,14 @@ fn execute(
                     trail_min_ask_20s: None,
                     trail_min_ask_40s: None,
                     stable_entry: true,
+                    regime_at_decision: d.regime_at_decision,
+                    secs_from_open: 0,
+                    spot_ret_10s_bps: r10,
+                    spot_ret_30s_bps: r30,
+                    spot_ret_60s_bps: r60,
+                    spot_ret_120s_bps: r120,
+                    basis_mom_60s_bps: basis,
+                    side_aligned_30s: aligned,
                     side: opp,
                     decision_ts_ns: d.ts_ns,
                     fill_ts_ns: fill_tick.ts_ns,
@@ -363,13 +421,24 @@ fn execute(
             mid: d.mid,
             sigma_bar_bps: d.sigma_bar_bps,
             basis_mom_60s_bps: d.basis_mom_60s_bps,
+            regime_at_decision: d.regime_at_decision,
+            clip_index: n_clips as u32,
+            spot_ret_10s_bps: d.spot_ret_10s_bps,
+            spot_ret_30s_bps: d.spot_ret_30s_bps,
+            spot_ret_60s_bps: d.spot_ret_60s_bps,
+            spot_ret_120s_bps: d.spot_ret_120s_bps,
+            spot_ret_300s_bps: d.spot_ret_300s_bps,
+            spot_ret_600s_bps: d.spot_ret_600s_bps,
+            spot_ret_900s_bps: d.spot_ret_900s_bps,
         };
         let dcfg = crate::decide::DecideConfig::from_harness(cfg, edge_threshold);
         let (decision, delta) = crate::decide::decide_entry(
             &inputs,
             d.ts_ns,
+            open_ns,
             close_ns,
             &crate::decide::EntryState { armed, next_entry_ns },
+            session,
             &dcfg,
         );
         match decision.action {
@@ -433,6 +502,7 @@ fn execute(
                             Side::Yes => m,
                             Side::No => 1.0 - m,
                         });
+                    let (r10, r30, r60, r120, basis, aligned) = momentum_from_decision(d, side);
                     trades.push(TradeRecord {
                         side,
                         decision_ts_ns: d.ts_ns,
@@ -447,6 +517,14 @@ fn execute(
                         exit_price: None,
                         mark_60s,
                         pnl_exit_mid_optimistic: None,
+                        regime_at_decision: d.regime_at_decision,
+                        secs_from_open: 0,
+                        spot_ret_10s_bps: r10,
+                        spot_ret_30s_bps: r30,
+                        spot_ret_60s_bps: r60,
+                        spot_ret_120s_bps: r120,
+                        basis_mom_60s_bps: basis,
+                        side_aligned_30s: aligned,
                         is_completion: false,
                         exit_filled_at_mid: None,
                         fee_hold: false,
@@ -454,7 +532,6 @@ fn execute(
                         hold_alt_exit_fee: None,
                         sigma_bar_bps: d.sigma_bar_bps,
                         maker_entry: true,
-                    
                         side_ask_at_decision: 0.0,
                         trail_min_ask_10s: None,
                         trail_min_ask_20s: None,
@@ -698,6 +775,9 @@ fn execute(
                 Side::No => 1.0 - m,
             });
 
+        let secs_from_open =
+            ((d.ts_ns.saturating_sub(open_ns)) / 1_000_000_000).max(0) as u32;
+        let (r10, r30, r60, r120, basis, aligned) = momentum_from_decision(d, side);
         trades.push(TradeRecord {
             sigma_bar_bps: d.sigma_bar_bps,
             side_ask_at_decision: side_ask_now,
@@ -705,6 +785,14 @@ fn execute(
             trail_min_ask_20s: Some(trail_min_20),
             trail_min_ask_40s: Some(trail_min_40),
             stable_entry,
+            regime_at_decision: d.regime_at_decision,
+            secs_from_open,
+            spot_ret_10s_bps: r10,
+            spot_ret_30s_bps: r30,
+            spot_ret_60s_bps: r60,
+            spot_ret_120s_bps: r120,
+            basis_mom_60s_bps: basis,
+            side_aligned_30s: aligned,
             side,
             decision_ts_ns: d.ts_ns,
             fill_ts_ns: fill_tick.ts_ns,
@@ -769,6 +857,7 @@ fn execute(
                     Side::No => !series.resolved_yes,
                 };
                 let tail_payout = if tail_won { 1.0 } else { 0.0 };
+                let (r10, r30, r60, r120, basis, aligned) = momentum_from_decision(d, tail_side);
                 trades.push(TradeRecord {
                     sigma_bar_bps: d.sigma_bar_bps,
                     side_ask_at_decision: 0.0,
@@ -776,6 +865,14 @@ fn execute(
                     trail_min_ask_20s: None,
                     trail_min_ask_40s: None,
                     stable_entry: true,
+                    regime_at_decision: d.regime_at_decision,
+                    secs_from_open: 0,
+                    spot_ret_10s_bps: r10,
+                    spot_ret_30s_bps: r30,
+                    spot_ret_60s_bps: r60,
+                    spot_ret_120s_bps: r120,
+                    basis_mom_60s_bps: basis,
+                    side_aligned_30s: aligned,
                     side: tail_side,
                     decision_ts_ns: d.ts_ns,
                     fill_ts_ns: fill_tick.ts_ns,
@@ -961,6 +1058,7 @@ pub fn run_market_grid(
     cfg: &HarnessConfig,
     latencies_ms: &[u64],
     edge_thresholds: &[f64],
+    session: Option<&crate::decide::SessionGateState>,
 ) -> Vec<MarketRunOutput> {
     let mut outputs = Vec::with_capacity(latencies_ms.len() * edge_thresholds.len());
     if series.ticks.is_empty() {
@@ -1003,7 +1101,7 @@ pub fn run_market_grid(
             let (trades, maker_placed) = if calm_blocked {
                 (Vec::new(), 0)
             } else {
-                execute(series, &pass, latency_ms, threshold, cfg)
+                execute(series, &pass, latency_ms, threshold, cfg, session)
             };
             outputs.push(MarketRunOutput {
                 trades,
@@ -1036,6 +1134,7 @@ pub fn run_market(
         cfg,
         &[cfg.latency_ms],
         &[cfg.edge_threshold],
+        None,
     )
     .into_iter()
     .next()

@@ -16,7 +16,8 @@ OUT="${OUT:-data/runs/s05_momentum_burst}"
 MANIFEST="${MANIFEST:-data/manifests/canonical/btc-updown-5m_up.jsonl}"
 CACHE="${CACHE:-data/cache}"
 TICKS="${TICKS:-data/cache/ticks}"
-WINDOWS="${WINDOWS:-TUNE}"
+# PM book cache starts 2026-05-07; TUNE (Feb–Apr) has no telonex books — use VERIFY/HOLDOUT/JUN0117.
+WINDOWS="${WINDOWS:-VERIFY HOLDOUT JUN0117}"
 VARIANTS="${VARIANTS:-prod_mom30_ask045 s05_mom60_aligned s05_mom30_aligned}"
 SKIP_EXISTING="${SKIP_EXISTING:-1}"
 
@@ -28,6 +29,8 @@ fi
 
 COMMON=(
   --markets "$MANIFEST"
+  --slug-prefix btc-updown-5m-
+  --down-assets data/manifests/canonical/down_all.jsonl
   --local-cache-dir "$CACHE"
   --tick-cache-dir "$TICKS"
   --exit-after-s 0
@@ -37,7 +40,7 @@ COMMON=(
   --vol-lookback-s 3600
   --edge-thresholds 0.12
   --notional-usdc 50
-  --latency-ms 250
+  --latency-ms 150
   --max-clips 2
   --rearm-edge 0.08
   --clip-cooldown-ms 5000
@@ -50,9 +53,10 @@ COMMON=(
 
 window_dates() {
   case "$1" in
-    TUNE)    echo "2026-02-12 2026-04-30" ;;
+    TUNE)    echo "2026-02-12 2026-04-30" ;;  # requires telonex books (not in local cache)
     VERIFY)  echo "2026-05-07 2026-05-18" ;;
     HOLDOUT) echo "2026-05-19 2026-05-28" ;;
+    JUN0117) echo "2026-06-01 2026-06-17" ;;
     SMOKE)   echo "2026-06-10 2026-06-10" ;;
     *) echo "unknown window $1" >&2; exit 1 ;;
   esac
@@ -113,6 +117,9 @@ from pathlib import Path
 path, win, var, tsv, ds, de = sys.argv[1:7]
 with open(path) as f:
     r = json.load(f)
+skip_load = int(r.get("n_skipped_load_error", 0))
+if skip_load:
+    print(f"  WARN n_skipped_load_error={skip_load} (bad/missing book cache)", file=sys.stderr)
 cells = r.get("sweep") or [r]
 rep = cells[0].get("report", {})
 agg = rep.get("aggregate") or rep.get("cells", {}).get("BTC-300s", {})

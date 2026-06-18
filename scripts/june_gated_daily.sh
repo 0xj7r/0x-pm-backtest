@@ -128,7 +128,6 @@ run_variant() {
   local day=$1
   local variant=$2
   shift 2
-  local extra_flags=("$@")
   local json="$OUT/${day}_gated_${variant}.json"
   local log="$OUT/${day}_gated_${variant}.log"
   if [[ "$variant" == "base" && ! -s "$json" && -s "$OUT/${day}_gated.json" ]]; then
@@ -140,7 +139,7 @@ run_variant() {
     return 0
   fi
   echo "== gated $day $variant =="
-  "$BIN" alpha "${COMMON[@]}" "${extra_flags[@]}" \
+  "$BIN" alpha "${COMMON[@]}" "$@" \
     --date-start "$day" --date-end "$day" --out-json "$json" > "$log" 2>&1
   append_row "$json" "$day" "$variant" "$daily"
 }

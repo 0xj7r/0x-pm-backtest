@@ -21,7 +21,8 @@ if [ "$N_RESULTS" -eq 0 ] || [ "$N_OK" -ne "$N_RESULTS" ]; then
   echo "$TEST_OUT" | grep -E "FAILED|panicked|test result:" | head
   fail=1
 else
-  echo "$TEST_OUT" | grep -oE "[0-9]+ passed" | paste -sd+ - | bc | xargs -I{} echo "ALL TEST SUITES OK ({} tests)"
+  TOTAL=$(echo "$TEST_OUT" | grep -oE "[0-9]+ passed" | awk '{s+=$1} END {print s+0}')
+  echo "ALL TEST SUITES OK ($TOTAL tests)"
 fi
 
 run_june() {

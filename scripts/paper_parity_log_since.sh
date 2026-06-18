@@ -15,6 +15,20 @@ if [[ -z "${MARKER_LINE:-}" ]]; then
   exit 1
 fi
 
+MARKER_TS="$(sed -n "${MARKER_LINE}p" "$LIVE_LOG" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}' | head -1 || true)"
+HOURS_SINCE=2
+if [[ -n "${MARKER_TS:-}" ]]; then
+  HOURS_SINCE="$(python3 -c "
+from datetime import datetime, timezone
+ts='${MARKER_TS}'
+m=datetime.fromisoformat(ts.replace('Z','+00:00'))
+if m.tzinfo is None:
+    m=m.replace(tzinfo=timezone.utc)
+now=datetime.now(timezone.utc)
+print(max((now-m).total_seconds()/3600, 0.05))
+")"
+fi
+
 TMP_LOG="$(mktemp)"
 tail -n +"$MARKER_LINE" "$LIVE_LOG" > "$TMP_LOG"
 
@@ -22,7 +36,8 @@ shopt -s nullglob
 combined="$(mktemp)"
 cat "$SHADOW_DIR"/shadow-*.jsonl > "$combined"
 
-python3 "$COMPARE" --shadow "$combined" --live-log "$TMP_LOG" --since-hours "${SINCE_HOURS:-0}"
+echo "# Paper session since ${MARKER_TS:-line $MARKER_LINE} (${HOURS_SINCE}h window)"
+python3 "$COMPARE" --shadow "$combined" --live-log "$TMP_LOG" --since-hours "$HOURS_SINCE"
 rc=$?
 rm -f "$TMP_LOG" "$combined"
 exit $rc

@@ -10,9 +10,10 @@
 use crate::{Ctx, OrderRequest, Side as StratSide, Strategy, StrategyOutput};
 use pm_alpha::{
     AlphaModel, AlphaModelConfig, DecideConfig, DecisionInputs, EntryAction, EntryState,
-    EntryStateDelta, ExoState, MarketMeta, Token, VolEstimator, decide_entry,
+    EntryStateDelta, ExoState, MarketMeta, PerpState, Token, VolEstimator, decide_entry,
     harness::EntryMode, harness::Side as AlphaSide, model::belief,
 };
+use std::sync::Arc;
 use pm_risk::fractional_kelly_stake;
 use pm_types::{ReplayEvent, SpotHistory, TradeHistory};
 use serde::{Deserialize, Serialize};
@@ -206,6 +207,7 @@ struct OpenLeg {
 pub struct ExoFadeStrategy {
     cfg: ExoFadeConfig,
     model: AlphaModel,
+    perp: Option<Arc<PerpState>>,
     strike: Option<f64>,
     entry_state: EntryState,
     n_clips: u32,
@@ -230,6 +232,7 @@ impl ExoFadeStrategy {
         Self {
             cfg,
             model,
+            perp: None,
             strike: None,
             entry_state: EntryState {
                 armed: true,
@@ -245,6 +248,23 @@ impl ExoFadeStrategy {
 
     pub fn gate_stats(&self) -> ExoFadeGateStats {
         self.gate_stats
+    }
+
+    /// Attach a shared perp complex (walk-forward / alpha parity).
+    pub fn with_perp(mut self, perp: Arc<PerpState>) -> Self {
+        self.perp = Some(perp);
+        self
+    }
+
+    fn basis_mom_60s_bps(&self, spot: &SpotHistory, ts_ns: i64) -> f64 {
+        self.perp
+            .as_deref()
+            .and_then(|p| {
+                let bn = p.basis_frac(spot, ts_ns)?;
+                let bp = p.basis_frac(spot, ts_ns - 60_000_000_000)?;
+                Some((bn - bp) * 1e4)
+            })
+            .unwrap_or(0.0)
     }
 
     fn market_meta(&self, ctx: &Ctx) -> Option<MarketMeta> {
@@ -371,7 +391,7 @@ impl ExoFadeStrategy {
             market: meta,
             spot,
             now_ns: event.ts_ns,
-            perp: None,
+            perp: self.perp.as_deref(),
             ref_spot: None,
         };
         let Some(b) = belief(&exo, &self.model.cfg) else {
@@ -389,7 +409,7 @@ impl ExoFadeStrategy {
             no_buy,
             mid,
             sigma_bar_bps: b.sigma_bar_bps,
-            basis_mom_60s_bps: 0.0,
+            basis_mom_60s_bps: self.basis_mom_60s_bps(spot, event.ts_ns),
             regime_at_decision: None,
             clip_index: self.n_clips,
             spot_ret_10s_bps: None,
@@ -494,6 +514,7 @@ impl Strategy for ExoFadeStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pm_alpha::{MarketMeta, Token};
     use pm_types::SpotTick;
 
     fn spot_flat(price: f64, secs: i64) -> SpotHistory {
@@ -514,5 +535,75 @@ mod tests {
         assert!((cfg.edge_threshold - 0.16).abs() < 1e-9);
         assert_eq!(cfg.exit_after_s, 30);
         assert!((cfg.clip_usdc - 25.0).abs() < 1e-9);
+        assert!(
+            (cfg.perp_price_weight - 0.75).abs() < 1e-9,
+            "champion uses perp-led blend; walk-forward must load PerpState (alpha parity)"
+        );
+    }
+
+    fn wavy_history(n_secs: i64) -> SpotHistory {
+        let mut ticks = Vec::new();
+        let mut price = 100_000.0;
+        for s in 0..n_secs {
+            ticks.push(SpotTick {
+                ts_ns: s * NS_PER_S,
+                price,
+                quantity: 1.0,
+                is_buyer_maker: false,
+            });
+            price *= if s % 2 == 0 { 1.0001 } else { 0.9999 };
+        }
+        SpotHistory::new(ticks)
+    }
+
+    fn exo_state<'a>(
+        spot: &'a SpotHistory,
+        perp: Option<&'a PerpState>,
+        now_s: i64,
+        strike: f64,
+    ) -> ExoState<'a> {
+        ExoState {
+            spot,
+            perp,
+            ref_spot: None,
+            market: MarketMeta {
+                token: Token::Btc,
+                window_secs: 300,
+                open_ts_ns: (now_s - 100) * NS_PER_S,
+                close_ts_ns: (now_s + 200) * NS_PER_S,
+                strike,
+            },
+            now_ns: now_s * NS_PER_S,
+        }
+    }
+
+    #[test]
+    fn perp_blend_changes_belief_when_weight_nonzero() {
+        let cfg = ExoFadeConfig::champion_1k();
+        let model = cfg.alpha_model();
+        let spot = wavy_history(4000);
+        let mut perp_ticks: Vec<SpotTick> = spot
+            .range(0, 3895 * NS_PER_S)
+            .to_vec();
+        perp_ticks.push(SpotTick {
+            ts_ns: 3899 * NS_PER_S,
+            price: 100_400.0,
+            quantity: 1.0,
+            is_buyer_maker: false,
+        });
+        let perp = PerpState {
+            trades: SpotHistory::new(perp_ticks),
+            ..PerpState::default()
+        };
+        let base = belief(&exo_state(&spot, None, 3900, 100_000.0), &model.cfg).expect("spot");
+        let blended =
+            belief(&exo_state(&spot, Some(&perp), 3900, 100_000.0), &model.cfg).expect("perp");
+        assert!(
+            blended.p_up > base.p_up,
+            "perp_price_weight={} should move belief when perp leads spot (base={} blended={})",
+            cfg.perp_price_weight,
+            base.p_up,
+            blended.p_up
+        );
     }
 }

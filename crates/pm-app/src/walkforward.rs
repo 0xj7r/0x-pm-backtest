@@ -26,6 +26,7 @@ use pm_telonex_loader::{
     Channel, TelonexStore, load_binance_agg_trades_async, load_book_snapshot_async,
     load_pm_trades_async, resolve_binance_day, resolve_pm_trades_day,
 };
+use pm_alpha::PerpState;
 use pm_types::{MarketId, ReplayEvent, SpotHistory, SpotTick, TradeHistory};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -839,6 +840,11 @@ pub struct WalkForwardConfig {
     pub max_per_market_exposure_usdc: f64,
     pub max_per_market_exposure_frac: Option<f64>,
     pub spot_symbol: String,
+    /// Binance USD-M futures symbol for exo_fade perp-led belief (e.g. BTCUSDT).
+    /// When unset and exo_fade is active, defaults to `spot_symbol` if not `auto`.
+    pub perp_symbol: Option<String>,
+    /// Cache root for perp parquets (defaults to `data/cache`).
+    pub perp_cache_dir: Option<PathBuf>,
     pub strategies: Vec<StratId>,
     pub max_concurrent_fetches: usize,
     /// Optional research-speed replay thinning. `0` keeps every raw event.
@@ -1125,6 +1131,8 @@ impl Default for WalkForwardConfig {
             max_per_market_exposure_usdc: 50.0,
             max_per_market_exposure_frac: None,
             spot_symbol: "auto".to_string(),
+            perp_symbol: None,
+            perp_cache_dir: None,
             strategies: StratId::ACTIVE.to_vec(),
             max_concurrent_fetches: 64,
             replay_sample_ms: 0,
@@ -1995,6 +2003,48 @@ fn spot_symbol_override(configured: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+fn needs_perp_for_strategies(strategies: &[StratId]) -> bool {
+    strategies
+        .iter()
+        .any(|s| matches!(s, StratId::ExoFade | StratId::MayJuneFade))
+}
+
+/// Resolve the perp symbol for walk-forward exo_fade parity with the alpha path.
+fn resolve_perp_symbol(cfg: &WalkForwardConfig) -> Option<String> {
+    if let Some(sym) = &cfg.perp_symbol {
+        return Some(sym.clone());
+    }
+    if needs_perp_for_strategies(&cfg.strategies)
+        && !cfg.spot_symbol.eq_ignore_ascii_case("auto")
+        && !cfg.spot_symbol.is_empty()
+    {
+        return Some(cfg.spot_symbol.clone());
+    }
+    None
+}
+
+async fn load_walkforward_perp(
+    store: &TelonexStore,
+    cfg: &WalkForwardConfig,
+    markets: &[MarketHandle],
+) -> Result<Option<Arc<PerpState>>> {
+    let Some(symbol) = resolve_perp_symbol(cfg) else {
+        return Ok(None);
+    };
+    let mut dates: Vec<String> = markets.iter().map(|m| m.date.clone()).collect();
+    dates.sort();
+    dates.dedup();
+    let cache_root = cfg
+        .perp_cache_dir
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("data/cache"));
+    let perp = crate::perp::load_perp_state(store, &cache_root, &symbol, &dates)
+        .await
+        .with_context(|| format!("load perp state {symbol}"))?;
+    tracing::info!(symbol, days = dates.len(), "walk-forward perp state loaded");
+    Ok(Some(Arc::new(perp)))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3021,6 +3071,7 @@ pub async fn run_walkforward(
             .with_context(|| format!("preload spot {symbol} {date}"))?;
     }
     let spot_map_top: HashMap<String, Arc<SpotHistory>> = spot_cache.inner.clone();
+    let perp = load_walkforward_perp(store, cfg, markets).await?;
     if cfg.portfolio_mode && (cfg.walk_forward_folds.is_some() || cfg.fold_size.is_some()) {
         return Err(anyhow!(
             "walk-forward fold configuration is not supported in portfolio mode"
@@ -3103,6 +3154,7 @@ pub async fn run_walkforward(
                 &markets[cfg.min_train_markets..],
                 cfg,
                 &spot_map_top,
+                perp,
                 meta_snapshot,
                 meta_report,
             )
@@ -3135,6 +3187,7 @@ pub async fn run_walkforward(
             markets,
             cfg,
             &spot_map_top,
+            perp,
             preloaded_snapshot,
             meta_report,
         )
@@ -3206,6 +3259,7 @@ pub async fn run_walkforward(
             fold_markets,
             cfg,
             &spot_map_top,
+            perp.clone(),
             *test_start,
             cfg.max_concurrent_fetches,
             meta_snapshot,
@@ -4217,6 +4271,7 @@ async fn run_markets(
     markets: &[MarketHandle],
     cfg: &WalkForwardConfig,
     spot_map: &HashMap<String, Arc<SpotHistory>>,
+    perp: Option<Arc<PerpState>>,
     market_id_offset: usize,
     max_concurrent_fetches: usize,
     meta_calibrator_snapshot: Option<OnlineMetaCalibratorSnapshot>,
@@ -4228,6 +4283,7 @@ async fn run_markets(
     let spot_empty = Arc::new(SpotHistory::default());
     let store_inner = store.store();
     let cfg_arc = Arc::new(cfg.clone());
+    let perp = perp.clone();
     let bte_policy_scales = cfg
         .back_to_explore_policy_scales_jsonl
         .as_deref()
@@ -4406,6 +4462,7 @@ async fn run_markets(
                     } else {
                         1.0
                     },
+                    perp.clone(),
                 ) {
                     Ok(mut r) => {
                         for sample in &mut r.model_training_samples {
@@ -4473,6 +4530,7 @@ async fn run_markets(
                         } else {
                             1.0
                         },
+                        perp.clone(),
                     ) {
                         Ok(mut r) => {
                             for sample in &mut r.model_training_samples {
@@ -4520,6 +4578,7 @@ fn run_one_strategy(
     bankroll: f64,
     clip: f64,
     bte_external_risk_multiplier: f64,
+    perp: Option<Arc<PerpState>>,
 ) -> Result<StrategyMarketResult> {
     let (report, bonereaper_v2_gate_stats) = match strat {
         StratId::ExoFade | StratId::MayJuneFade => {
@@ -4546,6 +4605,9 @@ fn run_one_strategy(
                 window_secs,
                 ..base
             });
+            if let Some(p) = perp {
+                s = s.with_perp(p);
+            }
             (
                 run_backtest(events, spot, trades, &mut s, runner_cfg)?,
                 None,
@@ -4795,6 +4857,7 @@ async fn run_portfolio(
     markets: &[MarketHandle],
     cfg: &WalkForwardConfig,
     spot_map: &HashMap<String, Arc<SpotHistory>>,
+    perp: Option<Arc<PerpState>>,
     meta_calibrator_snapshot: Option<OnlineMetaCalibratorSnapshot>,
     mut meta_report: Option<MetaCalibrationReport>,
 ) -> Result<(Vec<MarketResult>, WalkForwardSummary)> {
@@ -5026,6 +5089,7 @@ async fn run_portfolio(
                 } else {
                     1.0
                 },
+                perp.clone(),
             ) {
                 Ok(mut r) => {
                     for sample in &mut r.model_training_samples {
@@ -6436,5 +6500,24 @@ debug_signals = true
             previous_date("2026-03-01").unwrap(),
             Some("2026-02-28".to_string())
         );
+    }
+
+    #[test]
+    fn resolve_perp_symbol_defaults_to_spot_for_exo_fade() {
+        let mut cfg = WalkForwardConfig::default();
+        cfg.spot_symbol = "BTCUSDT".into();
+        cfg.strategies = vec![StratId::ExoFade];
+        assert_eq!(resolve_perp_symbol(&cfg).as_deref(), Some("BTCUSDT"));
+
+        cfg.perp_symbol = Some("ETHUSDT".into());
+        assert_eq!(resolve_perp_symbol(&cfg).as_deref(), Some("ETHUSDT"));
+
+        cfg.perp_symbol = None;
+        cfg.spot_symbol = "auto".into();
+        assert!(resolve_perp_symbol(&cfg).is_none());
+
+        cfg.strategies = vec![StratId::BonereaperV2];
+        cfg.spot_symbol = "BTCUSDT".into();
+        assert!(resolve_perp_symbol(&cfg).is_none());
     }
 }

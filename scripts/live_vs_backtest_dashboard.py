@@ -47,6 +47,24 @@ def strip_ansi(text: str) -> str:
     return ANSI_RE.sub("", text)
 
 
+def curve_fee(rate: float, price: float, shares: float) -> float:
+    """Polymarket taker fee: rate * p * (1-p) per share (pm-alpha harness)."""
+    return rate * price * (1.0 - price) * shares
+
+
+def leg_pnl(
+    touch: float, won: bool, clip_usd: float, fee_curve_rate: float
+) -> tuple[float, float, float]:
+    """Return (gross_usd, fee_usd, net_usd) for hold-to-resolution entry."""
+    if touch <= 0:
+        return 0.0, 0.0, 0.0
+    shares = clip_usd / touch
+    sps = (1.0 - touch) if won else (-touch)
+    gross = sps * shares
+    fee = curve_fee(fee_curve_rate, touch, shares)
+    return gross, fee, gross - fee
+
+
 def wilson_ci(wins: int, n: int, z: float = 1.96) -> tuple[float, float]:
     if n == 0:
         return 0.0, 0.0
@@ -70,8 +88,11 @@ class EraStats:
     hit_pct: float
     hit_ci_lo: float
     hit_ci_hi: float
+    gross_usd: float
     net_usd: float
+    fee_usd: float
     usd_per_trade: float
+    gross_usd_per_trade: float
     span_days: float
     usd_per_day: float
     first_ts: str | None
@@ -152,6 +173,7 @@ def match_legs(
     res_idx: dict[tuple[str, str, int], dict],
     redeemed: set[str],
     clip_usd: float,
+    fee_curve_rate: float = 0.07,
     *,
     since: datetime | None = None,
     until: datetime | None = None,
@@ -196,12 +218,12 @@ def match_legs(
         touch = float(best.get("touch_price") or 0)
         res = res_idx.get((slug, best["side"], clip))
         won: bool | None = None
-        pnl: float | None = None
+        gross_pnl: float | None = None
+        fee: float | None = None
+        net_pnl: float | None = None
         if slug in redeemed and res:
             won = bool(res.get("won"))
-            if touch > 0:
-                sps = (1.0 - touch) if won else (-touch)
-                pnl = sps * (clip_usd / touch)
+            gross_pnl, fee, net_pnl = leg_pnl(touch, won, clip_usd, fee_curve_rate)
         legs.append(
             {
                 "ts": t,
@@ -210,7 +232,10 @@ def match_legs(
                 "clip": clip,
                 "touch": touch,
                 "won": won,
-                "pnl": pnl,
+                "gross_pnl": gross_pnl,
+                "fee": fee,
+                "net_pnl": net_pnl,
+                "pnl": net_pnl,
             }
         )
     return legs
@@ -223,6 +248,7 @@ def ref_legs_in_window(
     clip_usd: float,
     since: datetime,
     until: datetime | None = None,
+    fee_curve_rate: float = 0.07,
 ) -> list[dict]:
     by_ss_ent: dict[tuple[str, str], list[dict]] = defaultdict(list)
     for e in entries:
@@ -245,24 +271,33 @@ def ref_legs_in_window(
                 continue
             touch = float(ent.get("touch_price") or 0)
             won = bool(res.get("won"))
-            pnl = 0.0
-            if touch > 0:
-                sps = (1.0 - touch) if won else (-touch)
-                pnl = sps * (clip_usd / touch)
-            legs.append({"ts": t, "won": won, "pnl": pnl})
+            gross_pnl, fee, net_pnl = leg_pnl(touch, won, clip_usd, fee_curve_rate)
+            legs.append(
+                {
+                    "ts": t,
+                    "won": won,
+                    "gross_pnl": gross_pnl,
+                    "fee": fee,
+                    "net_pnl": net_pnl,
+                    "pnl": net_pnl,
+                }
+            )
     return legs
 
 
 def summarize(name: str, legs: list[dict]) -> EraStats:
-    resolved = [l for l in legs if l.get("pnl") is not None]
+    resolved = [l for l in legs if l.get("net_pnl") is not None]
     open_n = len(legs) - len(resolved)
     wins = sum(1 for l in resolved if l.get("won"))
     losses = len(resolved) - wins
     n = len(resolved)
     hit = 100.0 * wins / n if n else 0.0
     lo, hi = wilson_ci(wins, n)
-    net = sum(float(l["pnl"]) for l in resolved)
+    gross = sum(float(l.get("gross_pnl") or 0) for l in resolved)
+    fee = sum(float(l.get("fee") or 0) for l in resolved)
+    net = sum(float(l["net_pnl"]) for l in resolved)
     upt = net / n if n else 0.0
+    gupt = gross / n if n else 0.0
     ts_list = [l["ts"] for l in legs if isinstance(l.get("ts"), datetime)]
     span = 0.0
     first_s = last_s = None
@@ -283,8 +318,11 @@ def summarize(name: str, legs: list[dict]) -> EraStats:
         hit_pct=hit,
         hit_ci_lo=100 * lo,
         hit_ci_hi=100 * hi,
+        gross_usd=gross,
         net_usd=net,
+        fee_usd=fee,
         usd_per_trade=upt,
+        gross_usd_per_trade=gupt,
         span_days=span,
         usd_per_day=net / span if span else 0.0,
         first_ts=first_s,
@@ -471,8 +509,10 @@ def fmt_era(e: EraStats) -> str:
         f"  resolved: {e.n_resolved}  open: {e.n_open}  submits: {e.n_submitted}\n"
         f"  hit: {e.hit_pct:.1f}%  CI [{e.hit_ci_lo:.1f}%, {e.hit_ci_hi:.1f}%]  "
         f"({e.wins}W/{e.losses}L)\n"
-        f"  NET: ${e.net_usd:+,.0f}  ${e.usd_per_trade:+.2f}/trade  "
-        f"${e.usd_per_day:+,.0f}/day over {e.span_days:.1f}d"
+        f"  GROSS: ${e.gross_usd:+,.0f}  fees: ${e.fee_usd:,.0f}  "
+        f"NET: ${e.net_usd:+,.0f}\n"
+        f"  ${e.usd_per_trade:+.2f}/trade net  ${e.gross_usd_per_trade:+.2f}/trade gross  "
+        f"${e.usd_per_day:+,.0f}/day net over {e.span_days:.1f}d"
     )
 
 
@@ -481,6 +521,12 @@ def main() -> int:
     ap.add_argument("--shadow-dir", default=os.path.expanduser("~/data/pm-alpha/shadow-final"))
     ap.add_argument("--live-log", default=os.path.expanduser("~/data/pm-alpha/shadow_exec_tail.log"))
     ap.add_argument("--clip-usd", type=float, default=50.0)
+    ap.add_argument(
+        "--fee-curve-rate",
+        type=float,
+        default=0.07,
+        help="Polymarket taker fee curve rate (fee = rate * p * (1-p) per share)",
+    )
     ap.add_argument("--tz", default="Europe/Dublin")
     ap.add_argument(
         "--clean-since",
@@ -530,8 +576,9 @@ def main() -> int:
     else:
         clean_since = datetime.now(timezone.utc) - timedelta(days=1)
 
+    fee_rate = args.fee_curve_rate
     live_clean = match_legs(
-        fills, entries, res_idx, redeemed, args.clip_usd, since=clean_since
+        fills, entries, res_idx, redeemed, args.clip_usd, fee_rate, since=clean_since
     )
     live_ungated = match_legs(
         fills,
@@ -539,6 +586,7 @@ def main() -> int:
         res_idx,
         redeemed,
         args.clip_usd,
+        fee_rate,
         since=clean_since,
         gated_live_only=False,
     )
@@ -548,12 +596,15 @@ def main() -> int:
         res_idx,
         redeemed,
         args.clip_usd,
+        fee_rate,
         since=max(clean_since, GATED_LIVE_SINCE),
         gated_live_only=True,
     )
-    ref_clean = ref_legs_in_window(entries, resolutions, res_idx, args.clip_usd, clean_since)
+    ref_clean = ref_legs_in_window(
+        entries, resolutions, res_idx, args.clip_usd, clean_since, fee_curve_rate=fee_rate
+    )
     ref_gated = ref_legs_in_window(
-        entries, resolutions, res_idx, args.clip_usd, GATED_LIVE_SINCE
+        entries, resolutions, res_idx, args.clip_usd, GATED_LIVE_SINCE, fee_curve_rate=fee_rate
     )
 
     eras = [
@@ -586,7 +637,7 @@ def main() -> int:
     bt_gated_stress = backtest_aggregate(gated_stress)
     fill_real = load_fill_realization_summary(Path(args.out_dir))
 
-    live_pnls = [float(l["pnl"]) for l in live_clean if l.get("pnl") is not None]
+    live_pnls = [float(l["net_pnl"]) for l in live_clean if l.get("net_pnl") is not None]
     sig_upt = trades_to_detect_mean_shift(live_pnls, args.verify_upt)
     sig_hit = trades_to_bound_hit_rate(
         eras[0].n_resolved, eras[0].wins, args.verify_hit / 100.0
@@ -605,6 +656,7 @@ def main() -> int:
         "clean_since_utc": clean_since.isoformat(),
         "gated_live_since_utc": GATED_LIVE_SINCE.isoformat(),
         "clip_usd": args.clip_usd,
+        "fee_curve_rate": args.fee_curve_rate,
         "eras": {e.name: asdict(e) for e in eras},
         "backtest_baseline": bt_base,
         "backtest_gated_june": bt_gated,
@@ -633,6 +685,7 @@ def main() -> int:
         f"({datetime.now(timezone.utc).strftime('%H:%M')} UTC)",
         f"Clean era since: {clean_since.astimezone(tz).strftime('%Y-%m-%d %H:%M %Z')}",
         f"Gated LIVE since: {GATED_LIVE_SINCE.astimezone(tz).strftime('%Y-%m-%d %H:%M %Z')}",
+        f"Fee curve rate: {args.fee_curve_rate:g} (entry taker, hold-to-resolution)",
         "=" * 68,
         "",
     ]

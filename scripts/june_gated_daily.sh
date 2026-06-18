@@ -44,6 +44,10 @@ COMMON=(
   --fee-curve-rate 0.07
   --skip-spot-misalign-s 30
   --min-entry-ask 0.45
+  --skip-open-fav-gap
+  --open-fav-p-min 0.88
+  --open-fav-ask-max 0.62
+  --open-fav-secs 300
 )
 
 daily="$OUT/daily.tsv"

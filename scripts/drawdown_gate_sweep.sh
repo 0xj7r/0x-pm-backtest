@@ -29,6 +29,8 @@ fi
 
 COMMON=(
   --markets "$MANIFEST"
+  --slug-prefix btc-updown-5m-
+  --down-assets data/manifests/canonical/down_all.jsonl
   --local-cache-dir "$CACHE"
   --tick-cache-dir "$TICKS"
   --exit-after-s 0
@@ -38,7 +40,7 @@ COMMON=(
   --vol-lookback-s 3600
   --edge-thresholds 0.12
   --notional-usdc 50
-  --latency-ms 250
+  --latency-ms 150
   --max-clips 2
   --rearm-edge 0.08
   --clip-cooldown-ms 5000

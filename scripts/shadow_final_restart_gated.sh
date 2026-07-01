@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Restart shadow-final with SSOT decide gates (mom30 + min_entry_ask 0.45 + prod_gap_full).
-# shadow_exec_tail is untouched — it follows gated would_enter from JSONL.
+# Regime stand-down flags removed 2026-07-01 (overfit; see shadow_final_gated_flags.sh).
+# shadow_exec_tail is untouched: it follows would_enter from JSONL.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

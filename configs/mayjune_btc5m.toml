@@ -41,6 +41,16 @@ open_fav_p_min = 0.88
 open_fav_ask_max = 0.62
 open_fav_secs = 300
 skip_spot_misalign_s = 60
+skip_expanded_high_flip = false
+skip_expanded_mixed = false
+skip_calm = false
+directional_tilt_strength = 0.0
+
+# Regime gates OFF (2026-07-01): the Jun 14-19 live sweep that selected
+# skip-calm + skip-expanded-mixed was overfit; out-of-sample Jun 20-30 those
+# gates blocked 99% of entries (10 in 10 days). All-window May research also
+# rejected regime gating (calm +$10.1k, mixed +$15.7k of W3 NET). Do not
+# re-enable without all-window backtest evidence + 48h paper parity.
 
 [calibration]
 # In-script split — train calibrator on pre-split only, never on June val.

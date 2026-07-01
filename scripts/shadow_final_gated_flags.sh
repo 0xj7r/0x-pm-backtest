@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# SSOT CLI flags for gated shadow-final (mom30 + min_entry_ask 0.45 + prod_gap_full).
+# SSOT CLI flags for prod shadow-final (mom30 + lottery-band floor + prod_gap_full).
+# Regime stand-down flags (--skip-calm / --skip-expanded-mixed) were removed
+# 2026-07-01: fit on Jun 14-19 live tape only, they blocked 99% of entries
+# out-of-sample Jun 20-30 (10 entries in 10 days). Do not re-add without
+# all-window backtest evidence + 48h paper parity.
 # Source this file for arrays, or run standalone to print a single line for append.
 set -euo pipefail
 

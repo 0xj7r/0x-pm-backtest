@@ -1,3 +1,5 @@
+> **SUPERSEDED 2026-07-01.** The regime gates this handoff deployed (skip_calm, skip_expanded_mixed) were overfit on 6 days of live tape and blocked 99% of entries out-of-sample Jun 20-30; they were removed from prod. The prod config and deploy reference is now docs/PROD.md. Historical record below; do not copy-paste its command lines.
+
 # Agent Handoff: Regime Gates + High-Variance Strategy Research
 
 **Date:** 2026-06-19  
@@ -58,9 +60,8 @@ pm-app shadow \
   --skip-open-fav-gap \
   --open-fav-p-min 0.88 \
   --open-fav-ask-max 0.62 \
-  --open-fav-secs 300 \
-  --skip-calm \
-  --skip-expanded-mixed
+  --open-fav-secs 300
+# --skip-calm --skip-expanded-mixed  (removed from prod 2026-07-01: overfit, see banner)
 ```
 
 SSOT for gated flags array: `scripts/ops/shadow_final_gated_flags.sh`  
@@ -457,8 +458,8 @@ python3 scripts/research/june_regime_compare.py
 | `open_fav_p_min` | 0.88 |
 | `open_fav_ask_max` | 0.62 |
 | `open_fav_secs` | 300 |
-| **`skip_calm`** | **true** (new) |
-| **`skip_expanded_mixed`** | **true** (new) |
+| `skip_calm` | false (removed 2026-07-01, overfit) |
+| `skip_expanded_mixed` | false (removed 2026-07-01, overfit) |
 | `skip_expanded_high_flip` | false |
 | `only_calm` | false |
 
@@ -474,6 +475,8 @@ AlphaModel: `vol_lookback_s=3600`, `perp_price_weight=0.75`, `vol_estimator=real
 | VERIFY | 2026-05-07 → 2026-05-18 | Confirm frozen config |
 | HOLDOUT | 2026-05-19 → 2026-05-28 | One-shot |
 | June+ | sealed | Live shadow only — **never select on June** |
+
+June: BURNED for selection; July = new sealed window.
 
 ---
 

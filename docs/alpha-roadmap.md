@@ -1,6 +1,6 @@
 # pm-alpha Execution Roadmap (2026-06-10)
 
-Status base: BTC-5m fade validated Feb-June (hardened June holdout +$11,912; capture-stress floor +$4.5k/wk at 10% depth). BTC-15m promising. ETH/SOL/XRP rejected as-is (feed-leadership finding). Champion config: vol3600, thr 0.16, exit_after_s 30, 150ms, real-NO, canonical labels.
+Status base: BTC-5m fade validated Feb-May (June burned, July sealed; historical hardened June holdout +$11,912; capture-stress floor +$4.5k/wk at 10% depth). BTC-15m promising. ETH/SOL/XRP rejected as-is (feed-leadership finding). Champion config: the frozen hold config (thr 0.12, hold-to-redemption, perp 0.75, vol3600); see docs/PROD.md. The thr 0.16 / exit_after_s 30 timed-exit variant is retired.
 
 Each phase is a self-contained subagent-sized task with its own verification. Protocol invariants for every phase: tune/test splits only, June + any new holdout untouched by selection, config-count disclosure, determinism checks on harness changes, honest rejection is a valid outcome.
 

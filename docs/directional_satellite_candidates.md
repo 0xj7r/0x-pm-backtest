@@ -1,3 +1,5 @@
+> **PREMISE RETRACTED 2026-07-01.** This doc assumes the fade is regime-gated in prod; those gates were removed as overfit (99% OOS entry blockage Jun 20-30). The satellite candidates below remain valid research ideas but must be re-grounded against the ungated fade's actual regime P&L profile (June backfill run).
+
 # Directional Satellite Candidates for Gated Fade (2026-06-19)
 
 ## Context

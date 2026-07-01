@@ -58,6 +58,8 @@ The harness is for fast research; walk-forward is the authoritative backtest.
 
 June 2026 is sealed. Never use it for selection.
 
+June 2026: BURNED (selection leaked into it during the regime-gate episode). July 2026 = the new sealed window.
+
 ## Adoption criteria
 
 Signal screen (Phase A, TUNE only): t-stat\((\varepsilon^{\text{net}}) > 2\) on fee-adjusted

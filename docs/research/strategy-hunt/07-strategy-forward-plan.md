@@ -216,6 +216,8 @@ before sizing live.
 | **HOLDOUT** | 2026-05-19 → 2026-05-28 (10d) | One-shot final test | Winners only; no re-tune |
 | **June+** | sealed | Live shadow / forward only | Measure, never select |
 
+June 2026: BURNED (selection leaked into it during the regime-gate episode). July 2026 = the new sealed window.
+
 ### Phase A — TUNE (select + gates)
 
 Run on TUNE only before full backtest spend:

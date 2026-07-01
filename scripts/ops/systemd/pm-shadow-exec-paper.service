@@ -1,0 +1,20 @@
+[Unit]
+Description=shadow_exec_tail PAPER executor (parity soak; no live orders)
+After=network-online.target pm-shadow-final.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu
+EnvironmentFile=/home/ubuntu/.config/polymarket-exec/shadow_exec_tail.env
+Environment=PAPER_MODE=1
+Environment=PM_SHADOW_PAPER_MODE=true
+Environment=PM_SHADOW_LIVE_TRADE=false
+ExecStart=/home/ubuntu/deploy-main/polymarket-agent/target/release/shadow_exec_tail --paper
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/ubuntu/data/pm-alpha/shadow_exec_tail.log
+StandardError=append:/home/ubuntu/data/pm-alpha/shadow_exec_tail.log
+
+[Install]
+WantedBy=default.target

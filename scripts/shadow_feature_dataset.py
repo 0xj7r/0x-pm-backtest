@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 """Build labeled entry dataset from shadow-final JSONL feature telemetry.
 
-Joins would_enter rows (with exo/dir feature vectors) to resolution outcomes
-for offline gate screens and calibrator training.
+Joins would_enter rows (with exo/dir + binance flow features) to resolution
+outcomes for offline gate screens and calibrator training.
 
 Usage:
   python3 scripts/shadow_feature_dataset.py \\
     --shadow-dir /home/ubuntu/data/pm-alpha/shadow-final \\
+    --out data/runs/shadow_features/entries.jsonl
+
+  # With daily regime sidecar (scripts/shadow_day_regime.py):
+  python3 scripts/shadow_feature_dataset.py \\
+    --shadow-dir /home/ubuntu/data/pm-alpha/shadow-final \\
+    --day-regime data/runs/shadow_features/day_regime.json \\
     --out data/runs/shadow_features/entries.jsonl
 
 Feature name lists match pm-alpha:
@@ -32,6 +38,11 @@ DIR_NAMES = [
     "perp_flow_imbal_60s", "perp_burst_300s", "liq_proxy",
     "spot_flow_imbal_60s", "trend_60s_sigma", "trend_300s_sigma",
     "trend_1800s_sigma", "trend_alignment", "vol_expansion", "tau_fraction",
+]
+FLOW_NAMES = [
+    "binance_flow_imbal_5s", "binance_flow_imbal_15s", "binance_flow_imbal_30s",
+    "binance_adverse_vol_5s", "binance_adverse_vol_15s", "binance_adverse_vol_30s",
+    "basis_d60_bps",
 ]
 
 
@@ -59,15 +70,37 @@ def named_features(values: list[float] | None, names: list[str]) -> dict[str, fl
     return {n: float(v) for n, v in zip(names, values)}
 
 
+def utc_day(ts_utc: str) -> str:
+    return ts_utc[:10]
+
+
+def load_day_regime(path: Path | None) -> dict[str, dict]:
+    if path is None or not path.is_file():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def flow_from_entry(ent: dict) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for name in FLOW_NAMES:
+        if name in ent and ent[name] is not None:
+            out[name] = float(ent[name])
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--shadow-dir", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--day-regime", default=None, help="JSON sidecar from shadow_day_regime.py")
     ap.add_argument("--require-features", action="store_true",
                     help="skip rows missing exo_features/dir_features")
+    ap.add_argument("--require-flow", action="store_true",
+                    help="skip rows missing binance flow telemetry")
     args = ap.parse_args()
 
     shadow_dir = Path(args.shadow_dir)
+    day_regime = load_day_regime(Path(args.day_regime) if args.day_regime else None)
     entries: list[dict] = []
     resolutions: list[dict] = []
     for fp in sorted(glob.glob(str(shadow_dir / "shadow-*.jsonl"))):
@@ -97,8 +130,14 @@ def main() -> int:
             ):
                 n_skip += 1
                 continue
+            flow = flow_from_entry(ent)
+            if args.require_flow and len(flow) < len(FLOW_NAMES):
+                n_skip += 1
+                continue
+            day = utc_day(ent["ts_utc"])
             row = {
                 "ts_utc": ent["ts_utc"],
+                "utc_day": day,
                 "slug": slug,
                 "side": side,
                 "clip": clip,
@@ -119,10 +158,12 @@ def main() -> int:
                 "spot_ret_900s_bps": ent.get("spot_ret_900s_bps"),
                 "exo": named_features(ent.get("exo_features"), EXO_NAMES),
                 "dir": named_features(ent.get("dir_features"), DIR_NAMES),
+                "flow": flow or None,
+                "day_regime": day_regime.get(day),
             }
             out.write(json.dumps(row) + "\n")
 
-    print(f"wrote {out_path} rows={len(paired) - n_skip} skipped_no_features={n_skip}")
+    print(f"wrote {out_path} rows={len(paired) - n_skip} skipped={n_skip}")
     return 0
 
 

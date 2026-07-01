@@ -10,7 +10,7 @@ Events:
   roller_would_redeem  — T+redeem_after_close_s after window close
 
 Usage:
-  python3 scripts/shadow_roller_logger.py \\
+  python3 scripts/ops/shadow_roller_logger.py \\
     --out-dir ~/data/pm-alpha/shadow-roller \\
     --clip-usd 1111 --dump-clip-shares 200
 """

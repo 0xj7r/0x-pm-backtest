@@ -7,7 +7,7 @@ Checks:
      accidental side cutoff, submit failures, tail lag)
 
 Usage:
-  python3 scripts/compare_live_ref.py \\
+  python3 scripts/ops/compare_live_ref.py \\
     --shadow /path/to/combined-shadow.jsonl \\
     --live-log /path/to/shadow_exec_tail.log \\
     --since-hours 3

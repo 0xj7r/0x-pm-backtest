@@ -3,7 +3,7 @@
 polymarket.com/api/crypto/crypto-price. Kills the Binance-open strike proxy
 and gives an independent resolution check (closePrice vs openPrice).
 
-Usage: python3 scripts/polymarket_strikes_fetch.py <manifest.jsonl> <out.jsonl> [slug_prefix]
+Usage: python3 scripts/pipeline/polymarket_strikes_fetch.py <manifest.jsonl> <out.jsonl> [slug_prefix]
 Manifest rows: MarketHandle JSON (asset_id, slug, close_ts, outcome, date).
 Output rows: {"slug", "open_ts", "open_price", "close_price", "completed"}.
 Resumable: existing out rows are skipped. ~8 req/s with retry on 429.

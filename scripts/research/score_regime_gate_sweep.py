@@ -5,7 +5,7 @@ Uses `regime` logged on each `would_enter` (decision-time 30m spot classifier).
 Joins entries to `resolution` rows for ladder_settle_pnl_usd @ clip.
 
 Usage:
-  python3 scripts/score_regime_gate_sweep.py \\
+  python3 scripts/research/score_regime_gate_sweep.py \\
     --shadow-dir ~/data/pm-alpha/shadow-final \\
     --since 2026-06-14
 """

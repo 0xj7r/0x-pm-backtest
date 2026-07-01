@@ -9,7 +9,7 @@ directional signal suite:
 Liquidations are not published historically; the cascade proxy is perp
 aggTrade bursts + OI drawdown from metrics.
 
-Usage: python3 scripts/binance_perp_fetch.py BTCUSDT 2026-02-12 2026-06-08
+Usage: python3 scripts/pipeline/binance_perp_fetch.py BTCUSDT 2026-02-12 2026-06-08
 """
 import io
 import sys

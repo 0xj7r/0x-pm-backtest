@@ -9,8 +9,8 @@ Joins:
 Outputs markdown report to data/runs/june_regime_compare/report.md
 
 Usage:
-  python3 scripts/june_regime_compare.py
-  python3 scripts/june_regime_compare.py --trades data/runs/june_gated_daily/2026-06-15_trades.jsonl
+  python3 scripts/research/june_regime_compare.py
+  python3 scripts/research/june_regime_compare.py --trades data/runs/june_gated_daily/2026-06-15_trades.jsonl
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from pathlib import Path
 import numpy as np
 import pyarrow.parquet as pq
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 FADE_TSV = ROOT / "data/runs/june_gated_daily/daily.tsv"
 OUT_DIR = ROOT / "data/runs/june_regime_compare"
 SPOT_DIR = ROOT / "data/cache/raw/binance/exchange=binance/channel=agg_trades"

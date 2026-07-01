@@ -2,9 +2,13 @@
 # Fetch rolling live vs backtest dashboard from Dublin (with local replay TSVs).
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 SSH_KEY="${SHADOW_SSH_KEY:-$HOME/.ssh/whale_pair_dublin_ed25519.pem}"
-SSH_HOST="${SHADOW_SSH_HOST:-ubuntu@34.242.101.97}"
+SSH_HOST="${SHADOW_SSH_HOST:-}"
+if [[ -z "$SSH_HOST" ]]; then
+  echo "SHADOW_SSH_HOST is not set; set SHADOW_SSH_HOST=ubuntu@<current-ip>" >&2
+  exit 1
+fi
 REMOTE="/tmp/live_vs_backtest_dashboard.py"
 BASELINE_TSV="${BASELINE_TSV:-$REPO_ROOT/data/runs/june_baseline_daily/daily.tsv}"
 GATED_TSV="${GATED_TSV:-$REPO_ROOT/data/runs/june_gated_daily/daily.tsv}"
@@ -21,7 +25,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-scp -q -i "$SSH_KEY" "$REPO_ROOT/scripts/live_vs_backtest_dashboard.py" "$SSH_HOST:$REMOTE"
+scp -q -i "$SSH_KEY" "$REPO_ROOT/scripts/ops/live_vs_backtest_dashboard.py" "$SSH_HOST:$REMOTE"
 scp -q -i "$SSH_KEY" "$BASELINE_TSV" "$SSH_HOST:/tmp/june_baseline_daily.tsv" 2>/dev/null || true
 scp -q -i "$SSH_KEY" "$GATED_TSV" "$SSH_HOST:/tmp/june_gated_daily.tsv" 2>/dev/null || true
 

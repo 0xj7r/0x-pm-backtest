@@ -14,8 +14,8 @@
 #     --clip-fraction-of-equity 0.025 --max-clip-usdc 50 \
 #     --use-outcome-label --spot-symbol BTCUSDT
 #
-# Alpha harness + May-only calibrator (see scripts/mayjune_strategy_calibrate.sh):
-#   ./scripts/mayjune_strategy_calibrate.sh
+# Alpha harness + May-only calibrator (see scripts/archive/2026-07-cleanup/mayjune_strategy_calibrate.sh):
+#   ./scripts/archive/2026-07-cleanup/mayjune_strategy_calibrate.sh
 
 [strategy]
 name = "mayjune_fade"

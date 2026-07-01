@@ -4,7 +4,7 @@
 Compares shadow_roller_logger JSONL against whale /activity cache or live pull.
 
 Usage:
-  python3 scripts/shadow_roller_parity.py \\
+  python3 scripts/ops/shadow_roller_parity.py \\
     --shadow-dir ~/data/pm-alpha/shadow-roller \\
     --wallet 0x4d64518a17816c43719e4337294b61107611e544 \\
     --since-hours 6

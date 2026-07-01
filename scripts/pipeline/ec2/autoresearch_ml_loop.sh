@@ -7,9 +7,9 @@ set -euo pipefail
 usage() {
     cat <<'USAGE'
 Usage:
-  scripts/autoresearch_ml_loop.sh plan
-  scripts/autoresearch_ml_loop.sh gate BASELINE_SUMMARY CANDIDATE_SUMMARY [STRATEGY]
-  scripts/autoresearch_ml_loop.sh run --budget N --baseline SUMMARY --commands FILE [--strategy NAME] [--execute]
+  scripts/pipeline/ec2/autoresearch_ml_loop.sh plan
+  scripts/pipeline/ec2/autoresearch_ml_loop.sh gate BASELINE_SUMMARY CANDIDATE_SUMMARY [STRATEGY]
+  scripts/pipeline/ec2/autoresearch_ml_loop.sh run --budget N --baseline SUMMARY --commands FILE [--strategy NAME] [--execute]
 
 Environment:
   AUTORESEARCH_LOG_LOSS_DELTA   Required log-loss improvement. Default: 0.0
@@ -84,9 +84,9 @@ Autoresearch loop:
   7. PASS leaves the worktree for review; FAIL removes the worktree.
 
 Useful commands:
-  scripts/autoresearch_ml_loop.sh gate /tmp/base.json /tmp/candidate.json bonereaper_v2
-  scripts/autoresearch_ml_loop.sh run --budget 3 --baseline /tmp/base.json --commands /tmp/candidates.txt --strategy bonereaper_v2
-  scripts/autoresearch_ml_loop.sh run --budget 3 --baseline /tmp/base.json --commands /tmp/candidates.txt --strategy bonereaper_v2 --execute
+  scripts/pipeline/ec2/autoresearch_ml_loop.sh gate /tmp/base.json /tmp/candidate.json bonereaper_v2
+  scripts/pipeline/ec2/autoresearch_ml_loop.sh run --budget 3 --baseline /tmp/base.json --commands /tmp/candidates.txt --strategy bonereaper_v2
+  scripts/pipeline/ec2/autoresearch_ml_loop.sh run --budget 3 --baseline /tmp/base.json --commands /tmp/candidates.txt --strategy bonereaper_v2 --execute
 PLAN
 }
 

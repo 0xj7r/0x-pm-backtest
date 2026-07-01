@@ -2,11 +2,11 @@
 # Parity check using only log lines after paper executor restart (avoids pre-paper noise).
 set -euo pipefail
 
-REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 DATA="${DATA:-$HOME/data/pm-alpha}"
 LIVE_LOG="${LIVE_LOG:-$DATA/shadow_exec_tail.log}"
 SHADOW_DIR="${SHADOW_DIR:-$DATA/shadow-final}"
-COMPARE="${COMPARE:-$REPO/scripts/compare_live_ref.py}"
+COMPARE="${COMPARE:-$REPO/scripts/ops/compare_live_ref.py}"
 SINCE_MARKER="${SINCE_MARKER:-shadow_exec_tail: JSONL consumer}"
 
 MARKER_LINE="$(grep -n "$SINCE_MARKER" "$LIVE_LOG" 2>/dev/null | tail -1 | cut -d: -f1 || true)"

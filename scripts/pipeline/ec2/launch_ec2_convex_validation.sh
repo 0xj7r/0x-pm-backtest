@@ -17,11 +17,11 @@
 # last, overriding CLI br2 knobs), while sizing stays fixed across combos.
 #
 # CROSS-ASSET NOTE: For ETH/SOL etc. diversification, stage per-asset lists first
-# with scripts/prepare_asset_markets.py, then pass --slug-prefixes + --spot-symbol
+# with scripts/pipeline/prepare_asset_markets.py, then pass --slug-prefixes + --spot-symbol
 # + the staged --markets-key / --train-markets-key exactly as in launch_ec2_fullhist_configB.sh.
 #
 # Usage:
-#   AWS_PROFILE=visumlabs ./scripts/launch_ec2_convex_validation.sh \
+#   AWS_PROFILE=visumlabs ./scripts/pipeline/ec2/launch_ec2_convex_validation.sh \
 #     --start-date 2026-02-12 --end-date 2026-05-20 \
 #     --train-markets 20000 \
 #     --profiles configs/bonereaper_v2_leader.toml,configs/bonereaper_v2_convex_scaled.toml,configs/bonereaper_v2_convex_reversal.toml \

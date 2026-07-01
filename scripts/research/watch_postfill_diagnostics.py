@@ -48,7 +48,7 @@ def line_count(path: Path) -> int:
 def run_diagnostics(args: argparse.Namespace, local_path: Path) -> None:
     cmd = [
         sys.executable,
-        "scripts/run_postfill_diagnostics.py",
+        "scripts/research/run_postfill_diagnostics.py",
         str(local_path),
         "--recent-days",
         str(args.recent_days),

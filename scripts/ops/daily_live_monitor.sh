@@ -5,14 +5,14 @@
 # Appends human logs + JSONL under ~/data/pm-alpha/week_monitor/.
 set -euo pipefail
 
-REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 DATA="${DATA:-$HOME/data/pm-alpha}"
 MONITOR_DIR="${MONITOR_DIR:-$DATA/week_monitor}"
 SHADOW_DIR="${SHADOW_DIR:-$DATA/shadow-final}"
 LIVE_LOG="${LIVE_LOG:-$DATA/shadow_exec_tail.log}"
 GATED_TSV="${GATED_TSV:-$REPO/data/runs/june_gated_daily/daily.tsv}"
-COMPARE="${COMPARE:-$REPO/scripts/compare_live_ref.py}"
-DASHBOARD="${DASHBOARD:-$REPO/scripts/live_vs_backtest_dashboard.py}"
+COMPARE="${COMPARE:-$REPO/scripts/ops/compare_live_ref.py}"
+DASHBOARD="${DASHBOARD:-$REPO/scripts/ops/live_vs_backtest_dashboard.py}"
 PARITY_HOURS="${PARITY_HOURS:-24}"
 SKIP_GATED="${SKIP_GATED:-0}"
 
@@ -37,7 +37,7 @@ maybe_run_gated_daily() {
     return 0
   fi
   log "june_gated_daily: running (missing $today in $GATED_TSV)"
-  SKIP_EXISTING=1 "$REPO/scripts/june_gated_daily.sh" >> "$MONITOR_DIR/gated_daily.log" 2>&1 || {
+  SKIP_EXISTING=1 "$REPO/scripts/pipeline/june_gated_daily.sh" >> "$MONITOR_DIR/gated_daily.log" 2>&1 || {
     log "june_gated_daily: WARN exit=$?"
   }
 }

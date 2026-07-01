@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Systematic strategy matrix — fresh validation, $1K bankroll.
-# Usage: WINDOWS=VERIFY STRATEGIES=F1,F2 MARKETS=btc5m,eth5m ./scripts/strategy_hunt_matrix.sh
+# Usage: WINDOWS=VERIFY STRATEGIES=F1,F2 MARKETS=btc5m,eth5m ./scripts/research/strategy_hunt_matrix.sh
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 BIN="${BIN:-./target/fast/pm-app}"
 OUT="${OUT:-data/runs/strategy_hunt}"
 mkdir -p "$OUT"

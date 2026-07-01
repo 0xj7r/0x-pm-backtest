@@ -7,9 +7,9 @@ fetched directly from api.telonex.io. Layout matches prep-cache / walk-forward:
   data/cache/raw/telonex/exchange=polymarket/channel={ch}/date={d}/asset_id={aid}/
 
 Usage:
-  python3 scripts/telonex_fetch_range.py 2026-06-08 2026-06-17
-  python3 scripts/telonex_fetch_range.py 2026-06-08 2026-06-17 --slug-prefix btc-updown-5m-
-  TELONEX_API_KEY=tlx_... python3 scripts/telonex_fetch_range.py ...
+  python3 scripts/pipeline/telonex_fetch_range.py 2026-06-08 2026-06-17
+  python3 scripts/pipeline/telonex_fetch_range.py 2026-06-08 2026-06-17 --slug-prefix btc-updown-5m-
+  TELONEX_API_KEY=tlx_... python3 scripts/pipeline/telonex_fetch_range.py ...
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 CACHE = REPO / "data/cache/raw/telonex/exchange=polymarket"
 API = "https://api.telonex.io/v1/downloads/polymarket"
 CHANNELS = ("book_snapshot_25", "trades")

@@ -1,9 +1,9 @@
 #!/bin/bash
 # Sync ETH book tapes for a (horizon, date-range) into the local cache, foreground.
 # Standalone (no exported functions) so it survives xargs under any shell.
-# Usage: scripts/eth_sync_books.sh <keyfile>   where keyfile lines are "<date>\t<asset_id>"
+# Usage: scripts/pipeline/eth_sync_books.sh <keyfile>   where keyfile lines are "<date>\t<asset_id>"
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 KEYFILE=$1
 CACHE=data/cache
 BB=raw/telonex/exchange=polymarket/channel=book_snapshot_25

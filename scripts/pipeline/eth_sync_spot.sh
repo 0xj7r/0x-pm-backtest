@@ -1,8 +1,8 @@
 #!/bin/bash
 # Sync ETHUSDT agg_trades spot parquet for given dates (one per line) into cache.
-# Usage: scripts/eth_sync_spot.sh <datesfile>
+# Usage: scripts/pipeline/eth_sync_spot.sh <datesfile>
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 DATESFILE=$1
 CACHE=data/cache
 SB=raw/binance/exchange=binance/channel=agg_trades/symbol=ETHUSDT

@@ -8,11 +8,11 @@ Pairs venue avg_fill_price (when logged on SUBMITTED) with REF touch for true
 fill realization. Also reports decision-stream touch parity and submit reliability.
 
 Usage (Dublin):
-  python3 scripts/fill_realization_audit.py
-  python3 scripts/fill_realization_audit.py --since-hours 24
+  python3 scripts/ops/fill_realization_audit.py
+  python3 scripts/ops/fill_realization_audit.py --since-hours 24
 
 From Mac:
-  ./scripts/fill_realization_audit.sh
+  ./scripts/ops/fill_realization_audit.sh
 """
 from __future__ import annotations
 

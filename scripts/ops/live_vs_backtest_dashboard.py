@@ -5,11 +5,11 @@ Designed for the JSONL-tail clean era (post fade_live). Uses shadow SUBMITTED
 fills matched to shadow-final would_enter + resolution for LIVE P&L @ touch.
 
 Usage (Dublin):
-  python3 scripts/live_vs_backtest_dashboard.py
-  python3 scripts/live_vs_backtest_dashboard.py --json
+  python3 scripts/ops/live_vs_backtest_dashboard.py
+  python3 scripts/ops/live_vs_backtest_dashboard.py --json
 
 From Mac:
-  ./scripts/live_vs_backtest_dashboard.sh
+  ./scripts/ops/live_vs_backtest_dashboard.sh
 
 Appends JSONL snapshots to --out-dir/live_bt_dashboard.jsonl when not --json.
 """
@@ -725,7 +725,7 @@ def main() -> int:
             f"${bt_gated_stress['usd_per_day']:+,.0f}/day  [pessimistic]"
         )
     if bt_gated and not bt_gated_depth25:
-        lines.append("  (run scripts/june_gated_daily.sh for depth25/stress rows)")
+        lines.append("  (run scripts/pipeline/june_gated_daily.sh for depth25/stress rows)")
     lines.append(
         f"VERIFY champion: hit={args.verify_hit:.1f}%  ${args.verify_upt:.2f}/trade  (4,952 tr)"
     )

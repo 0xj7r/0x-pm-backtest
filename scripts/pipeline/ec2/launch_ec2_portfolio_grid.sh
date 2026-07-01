@@ -10,7 +10,7 @@
 #   6. terminates itself.
 #
 # Usage:
-#   AWS_PROFILE=visumlabs ./scripts/launch_ec2_portfolio_grid.sh \
+#   AWS_PROFILE=visumlabs ./scripts/pipeline/ec2/launch_ec2_portfolio_grid.sh \
 #     --start-date 2026-02-12 --end-date 2026-05-20 \
 #     --train-markets 20000 \
 #     --clip-fractions 0.003,0.005,0.0075,0.01 \

@@ -5,12 +5,12 @@
 # Optional Telegram via ~/.config/polymarket-watchdog/telegram.env (TG_TOKEN, TG_CHAT_ID).
 set -euo pipefail
 
-REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 DATA="${DATA:-$HOME/data/pm-alpha}"
 OUT_DIR="${OUT_DIR:-$DATA/week_monitor}"
 SHADOW_DIR="${SHADOW_DIR:-$DATA/shadow-final}"
 LIVE_LOG="${LIVE_LOG:-$DATA/shadow_exec_tail.log}"
-COMPARE="${COMPARE:-$REPO/scripts/compare_live_ref.py}"
+COMPARE="${COMPARE:-$REPO/scripts/ops/compare_live_ref.py}"
 
 SINCE_HOURS="${SINCE_HOURS:-4}"
 MAX_ORPHANS="${MAX_ORPHANS:-0}"

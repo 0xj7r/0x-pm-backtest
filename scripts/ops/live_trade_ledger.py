@@ -5,12 +5,12 @@ Idempotent offset-tracked ingest from shadow-final JSONL and shadow_exec_tail.lo
 Matched legs carry gross_pnl, fee (curve), and net_pnl.
 
 Usage (Dublin):
-  python3 scripts/live_trade_ledger.py ingest
-  python3 scripts/live_trade_ledger.py daily-report
-  python3 scripts/live_trade_ledger.py query --date 2026-06-17
+  python3 scripts/ops/live_trade_ledger.py ingest
+  python3 scripts/ops/live_trade_ledger.py daily-report
+  python3 scripts/ops/live_trade_ledger.py query --date 2026-06-17
 
 From Mac:
-  ./scripts/live_trade_ledger.sh ingest
+  ./scripts/ops/live_trade_ledger.sh ingest
 """
 from __future__ import annotations
 
@@ -85,7 +85,7 @@ def default_db() -> Path:
     dublin = Path.home() / "data" / "pm-alpha" / "live_ledger.db"
     if dublin.parent.is_dir():
         return dublin
-    local = Path(__file__).resolve().parent.parent / "data" / "runs" / "live_ledger.db"
+    local = Path(__file__).resolve().parents[2] / "data" / "runs" / "live_ledger.db"
     local.parent.mkdir(parents=True, exist_ok=True)
     return local
 

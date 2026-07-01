@@ -4,7 +4,7 @@
 # 4h (and 15m XRP) cells whose books were never synced to the local cache.
 # Usage: ingest_4h_w3.sh <manifest.jsonl>
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 MANI="${1:?usage: ingest_4h_w3.sh <manifest>}"
 BUCKET="pm-research-data-prod"
 CACHE="data/cache/raw/telonex/exchange=polymarket"

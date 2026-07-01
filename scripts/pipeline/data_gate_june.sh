@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Fail-fast data quality gate before backtest claims.
-# Usage: ./scripts/data_gate_june.sh [DATE_START] [DATE_END]
+# Usage: ./scripts/pipeline/data_gate_june.sh [DATE_START] [DATE_END]
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 START="${1:-2026-06-10}"
 END="${2:-2026-06-16}"

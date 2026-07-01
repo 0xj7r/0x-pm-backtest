@@ -5,7 +5,7 @@ Joins gate_eval with shadow-final resolutions (slug+side+clip) for P&L @ $50 REF
 telemetry (scale ×0.5 for $25 live).
 
 Usage:
-  python3 scripts/score_shadow_gate_ab.py \\
+  python3 scripts/research/score_shadow_gate_ab.py \\
     --gate-ab ~/data/pm-alpha/shadow-gate-ab/gate_ab.jsonl \\
     --shadow-dir ~/data/pm-alpha/shadow-final
 """

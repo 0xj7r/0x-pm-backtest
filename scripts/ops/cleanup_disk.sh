@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Reclaim local disk without touching data/cache (re-downloadable from S3).
-# Usage: ./scripts/cleanup_disk.sh [--aggressive]
+# Usage: ./scripts/ops/cleanup_disk.sh [--aggressive]
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 echo "Before:"
 df -g /System/Volumes/Data | tail -1

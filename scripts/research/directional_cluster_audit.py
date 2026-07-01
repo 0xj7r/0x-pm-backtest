@@ -6,7 +6,7 @@ resolutions, enriches with Binance 1m momentum at entry, and scores which
 gates would have blocked cluster trades.
 
 Usage:
-  python3 scripts/directional_cluster_audit.py \\
+  python3 scripts/research/directional_cluster_audit.py \\
     --shadow-dir /home/ubuntu/data/pm-alpha/shadow-final \\
     --start 2026-06-18T03:00:00Z --end 2026-06-18T05:00:00Z
 """

@@ -2,7 +2,7 @@
 # Ungated shadow-final parity: daily P&L for June (pre-gate live config).
 # Runs every calendar day in [DATE_START, DATE_END] that has manifest rows.
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 BIN="${BIN:-./target/release/pm-app}"
 OUT="${OUT:-data/runs/june_baseline_daily}"

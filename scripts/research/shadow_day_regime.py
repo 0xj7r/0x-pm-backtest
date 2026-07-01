@@ -2,14 +2,14 @@
 """Daily UTC spot regime labels for shadow discovery joins.
 
 Computes trend_eff, rv_bps, sign_flips, and a coarse regime tag from Binance
-BTC spot agg_trades (same logic as scripts/june_regime_compare.py).
+BTC spot agg_trades (same logic as scripts/research/june_regime_compare.py).
 
 Writes JSON sidecar:
   {"2026-06-19": {"trend_eff": 0.22, "rv_bps": 55.1, ...}, ...}
 
 Usage:
-  python3 scripts/shadow_day_regime.py
-  python3 scripts/shadow_day_regime.py --start 2026-06-14 --end 2026-06-20 \\
+  python3 scripts/research/shadow_day_regime.py
+  python3 scripts/research/shadow_day_regime.py --start 2026-06-14 --end 2026-06-20 \\
     --out data/runs/shadow_features/day_regime.json
 """
 from __future__ import annotations
@@ -29,7 +29,7 @@ try:
 except ImportError:
     HAS_PARQUET = False
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 SPOT_DIR = ROOT / "data/cache/raw/binance/exchange=binance/channel=agg_trades"
 DEFAULT_OUT = ROOT / "data/runs/shadow_features/day_regime.json"
 

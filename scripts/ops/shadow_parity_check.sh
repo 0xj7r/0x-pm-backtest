@@ -4,8 +4,12 @@
 set -euo pipefail
 
 SSH_KEY="${SHADOW_SSH_KEY:-$HOME/.ssh/whale_pair_dublin_ed25519.pem}"
-SSH_HOST="${SHADOW_SSH_HOST:-ubuntu@34.242.101.97}"
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SSH_HOST="${SHADOW_SSH_HOST:-}"
+if [[ -z "$SSH_HOST" ]]; then
+  echo "SHADOW_SSH_HOST is not set; set SHADOW_SSH_HOST=ubuntu@<current-ip>" >&2
+  exit 1
+fi
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
 SHADOW_DIR="/home/ubuntu/data/pm-alpha/shadow-final"
 LIVE_LOG="/home/ubuntu/data/pm-alpha/shadow_exec_tail.log"
@@ -43,8 +47,8 @@ EOF
 done
 
 scp -q -i "$SSH_KEY" \
-  "$REPO_ROOT/scripts/shadow_pnl_hour.py" \
-  "$REPO_ROOT/scripts/compare_live_ref.py" \
+  "$REPO_ROOT/scripts/ops/shadow_pnl_hour.py" \
+  "$REPO_ROOT/scripts/ops/compare_live_ref.py" \
   "$SSH_HOST:/tmp/"
 
 ssh -i "$SSH_KEY" "$SSH_HOST" bash -s <<REMOTE

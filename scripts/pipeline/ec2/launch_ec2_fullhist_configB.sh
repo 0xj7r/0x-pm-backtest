@@ -19,11 +19,11 @@
 #
 # CROSS-ASSET DIVERSIFICATION (ETH-5m, SOL-5m, etc.):
 #   The engine already supports other assets via discovery.rs (infer_spot_symbol_from_slug).
-#   You must stage per-asset markets lists (see scripts/prepare_asset_markets.py).
+#   You must stage per-asset markets lists (see scripts/pipeline/prepare_asset_markets.py).
 #   Then launch with the correct --slug-prefixes + --spot-symbol + staged keys.
 #
 #   Example for ETH (after running the prepare script):
-#     AWS_PROFILE=visumlabs ./scripts/launch_ec2_fullhist_configB.sh \
+#     AWS_PROFILE=visumlabs ./scripts/pipeline/ec2/launch_ec2_fullhist_configB.sh \
 #       --start-date 2026-02-18 --end-date 2026-05-20 \
 #       --slug-prefixes "eth-updown-5m-" \
 #       --spot-symbol ETHUSDT \
@@ -39,7 +39,7 @@
 #   for the portfolio Sharpe calculation. Repeat for SOL/XRP etc.
 #
 # Usage (BTC champion baseline, the reference):
-#   AWS_PROFILE=visumlabs ./scripts/launch_ec2_fullhist_configB.sh \
+#   AWS_PROFILE=visumlabs ./scripts/pipeline/ec2/launch_ec2_fullhist_configB.sh \
 #     --start-date 2026-02-12 --end-date 2026-05-20 \
 #     --train-markets 20000 \
 #     --profile configs/bonereaper_v2_leader.toml \

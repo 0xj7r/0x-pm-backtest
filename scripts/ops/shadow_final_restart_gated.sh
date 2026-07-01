@@ -5,7 +5,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=scripts/shadow_final_gated_flags.sh
+# shellcheck source=scripts/ops/shadow_final_gated_flags.sh
 source "$SCRIPT_DIR/shadow_final_gated_flags.sh"
 
 BIN="${SHADOW_FINAL_BIN:-$HOME/pm-backtest/target/release/pm-app}"

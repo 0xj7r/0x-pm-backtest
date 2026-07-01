@@ -4,9 +4,9 @@
 Designed for hands-off week: celebrate green days at ~08:00 local, silence on red.
 
 Usage (cron, Europe/Dublin 08:00):
-  python3 scripts/shadow_daily_win_summary.py
-  python3 scripts/shadow_daily_win_summary.py --day 2026-06-16 --dry-run
-  python3 scripts/shadow_daily_win_summary.py --json --notify none   # Mac relay input
+  python3 scripts/ops/shadow_daily_win_summary.py
+  python3 scripts/ops/shadow_daily_win_summary.py --day 2026-06-16 --dry-run
+  python3 scripts/ops/shadow_daily_win_summary.py --json --notify none   # Mac relay input
 """
 from __future__ import annotations
 

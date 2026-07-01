@@ -11,7 +11,7 @@ Does NOT touch shadow-final buffers (spot/perp/vol stay warm). LIVE can keep
 following ungated REF; use score_shadow_gate_ab.py to compare arms.
 
 Usage (Dublin):
-  python3 scripts/shadow_gate_sidecar.py \\
+  python3 scripts/research/shadow_gate_sidecar.py \\
     --shadow-dir /home/ubuntu/data/pm-alpha/shadow-final \\
     --out /home/ubuntu/data/pm-alpha/shadow-gate-ab/gate_ab.jsonl
 """

@@ -6,7 +6,7 @@ joins daily spot regime, and reports P&L with bootstrap confidence intervals,
 cross-tabs, and gate counterfactuals.
 
 Usage:
-  python3 scripts/shadow_regime_impact.py \\
+  python3 scripts/research/shadow_regime_impact.py \\
     --shadow-dir ~/data/pm-alpha/shadow-final \\
     --since 2026-06-14 \\
     --out ~/data/runs/shadow_regime_impact/report.md

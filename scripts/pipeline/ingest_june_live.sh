@@ -2,7 +2,7 @@
 # Ingest Jun 8–17 BTC-5m books (Telonex API), binance spot/perp, and refresh manifest.
 # Unblocks gate_reenable_compare JUN1017 and june_live_backtest parity runs.
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 START="${START:-2026-06-08}"
 END="${END:-2026-06-17}"
@@ -11,13 +11,13 @@ MANIFEST_DIR="${MANIFEST_DIR:-data/manifests/june2026_live}"
 BIN="${BIN:-./target/release/pm-app}"
 
 echo "== Telonex books+trades $START .. $END (API) =="
-python3 scripts/telonex_fetch_range.py "$START" "$END" --up-only --markets-parquet "$MARKETS_PQ"
+python3 scripts/pipeline/telonex_fetch_range.py "$START" "$END" --up-only --markets-parquet "$MARKETS_PQ"
 
 echo "== Binance spot BTCUSDT $START .. $END =="
-python3 scripts/binance_spot_fetch.py BTCUSDT "$START" "$END"
+python3 scripts/pipeline/binance_spot_fetch.py BTCUSDT "$START" "$END"
 
 echo "== Binance perp BTCUSDT $START .. $END =="
-python3 scripts/binance_perp_fetch.py BTCUSDT "$START" "$END"
+python3 scripts/pipeline/binance_perp_fetch.py BTCUSDT "$START" "$END"
 
 echo "== Markets parquet (for labeled manifest) =="
 if [[ ! -f "$MARKETS_PQ" ]]; then
@@ -26,7 +26,7 @@ fi
 
 echo "== Build june2026_live manifest from parquet =="
 mkdir -p "$MANIFEST_DIR"
-python3 scripts/telonex_markets_to_manifests.py "$MARKETS_PQ" "$MANIFEST_DIR"
+python3 scripts/pipeline/telonex_markets_to_manifests.py "$MARKETS_PQ" "$MANIFEST_DIR"
 
 # Slice btc-5m Up rows for the live window and merge into canonical.
 python3 - "$START" "$END" "$MANIFEST_DIR" <<'PY'

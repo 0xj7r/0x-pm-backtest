@@ -2,7 +2,7 @@
 # Quick paper-parity health check (Dublin or local).
 set -euo pipefail
 
-REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 DATA="${DATA:-$HOME/data/pm-alpha}"
 SINCE_HOURS="${SINCE_HOURS:-2}"
 
@@ -13,7 +13,7 @@ pgrep -af "pm-app shadow.*shadow-final" | head -1 || echo "shadow-final: NOT RUN
 echo ""
 
 REPO="$REPO" SINCE_HOURS="$SINCE_HOURS" MAX_ORPHANS=0 MAX_MISSED=2 \
-  "$REPO/scripts/parity_monitor.sh" || true
+  "$REPO/scripts/ops/parity_monitor.sh" || true
 
 echo ""
 echo "Recent parity stats from executor log:"

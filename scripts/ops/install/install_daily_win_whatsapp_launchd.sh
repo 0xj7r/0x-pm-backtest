@@ -2,8 +2,8 @@
 # Mac LaunchAgent: 08:00 Europe/Dublin green-day summary via local WhatsApp bridge.
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-RELAY="${REPO_ROOT}/scripts/shadow_daily_win_whatsapp_relay.py"
+REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+RELAY="${REPO_ROOT}/scripts/ops/shadow_daily_win_whatsapp_relay.py"
 ENV_DIR="$HOME/.config/polymarket-watchdog"
 ENV_FILE="$ENV_DIR/whatsapp.env"
 PLIST="$HOME/Library/LaunchAgents/com.polymarket.daily-win-whatsapp.plist"

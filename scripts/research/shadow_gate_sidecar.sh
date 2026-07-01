@@ -3,7 +3,11 @@
 set -euo pipefail
 
 SSH_KEY="${SHADOW_SSH_KEY:-$HOME/.ssh/whale_pair_dublin_ed25519.pem}"
-SSH_HOST="${SHADOW_SSH_HOST:-ubuntu@34.242.101.97}"
+SSH_HOST="${SHADOW_SSH_HOST:-}"
+if [[ -z "$SSH_HOST" ]]; then
+  echo "SHADOW_SSH_HOST is not set; set SHADOW_SSH_HOST=ubuntu@<current-ip>" >&2
+  exit 1
+fi
 REPO="${SHADOW_REPO:-/home/ubuntu/pm-backtest}"
 DATA="${SHADOW_DATA:-/home/ubuntu/data/pm-alpha}"
 PID_FILE="${DATA}/shadow-gate-ab/sidecar.pid"

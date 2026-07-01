@@ -5,8 +5,8 @@ Joins would_enter telemetry to resolutions, enriches with daily spot regime
 (Binance 1m klines), and reports where fade wins/loses under which conditions.
 
 Usage (Dublin):
-  python3 scripts/shadow_day_regime.py --start 2026-06-14 --end 2026-06-20
-  python3 scripts/shadow_market_conditions.py \\
+  python3 scripts/research/shadow_day_regime.py --start 2026-06-14 --end 2026-06-20
+  python3 scripts/research/shadow_market_conditions.py \\
     --shadow-dir ~/data/pm-alpha/shadow-final \\
     --day-regime ~/data/runs/shadow_features/day_regime.json \\
     --since 2026-06-14 \\

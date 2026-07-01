@@ -3,7 +3,7 @@
 matching the telonex cache schema (see pm-telonex-loader/src/binance_trades.rs:
 price/quantity as strings, transact_time_ms actually microseconds).
 
-Usage: python3 scripts/binance_spot_fetch.py SOLUSDT 2026-05-20 2026-06-08
+Usage: python3 scripts/pipeline/binance_spot_fetch.py SOLUSDT 2026-05-20 2026-06-08
 """
 import io
 import sys

@@ -2,12 +2,12 @@
 """REF + LIVE shadow P&L over a rolling window from Dublin-style paths.
 
 Usage (on server):
-  python3 scripts/shadow_pnl_hour.py
-  python3 scripts/shadow_pnl_hour.py --hours 3
+  python3 scripts/ops/shadow_pnl_hour.py
+  python3 scripts/ops/shadow_pnl_hour.py --hours 3
 
 From laptop (via repo helper):
-  ./scripts/shadow_pnl_hour.sh
-  ./scripts/shadow_pnl_hour.sh --hours 3
+  ./scripts/ops/shadow_pnl_hour.sh
+  ./scripts/ops/shadow_pnl_hour.sh --hours 3
 """
 from __future__ import annotations
 

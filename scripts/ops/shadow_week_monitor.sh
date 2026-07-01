@@ -3,7 +3,7 @@
 set -euo pipefail
 
 REPO="${REPO:-$HOME/pm-backtest}"
-SCRIPT="${SCRIPT:-$REPO/scripts/shadow_week_monitor.py}"
+SCRIPT="${SCRIPT:-$REPO/scripts/ops/shadow_week_monitor.py}"
 DATA="${DATA:-$HOME/data/pm-alpha}"
 
 # Fallback script locations

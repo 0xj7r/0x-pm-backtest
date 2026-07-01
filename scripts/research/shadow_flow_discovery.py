@@ -6,7 +6,7 @@ Works on historical JSONL even before live flow telemetry — uses logged spot_r
 and dir/exo vectors; enriched flow fields scored when present.
 
 Usage:
-  python3 scripts/shadow_flow_discovery.py \\
+  python3 scripts/research/shadow_flow_discovery.py \\
     --shadow-dir ~/data/pm-alpha/shadow-final \\
     --since 2026-06-14 \\
     --focus-period drawdown \\

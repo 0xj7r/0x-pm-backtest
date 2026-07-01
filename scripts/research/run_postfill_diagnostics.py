@@ -98,7 +98,7 @@ def main() -> int:
     run(
         [
             sys.executable,
-            "scripts/postfill_regime_evolution.py",
+            "scripts/archive/2026-07-cleanup/postfill_regime_evolution.py",
             str(local_markets),
             "--strategy",
             args.strategy,
@@ -113,7 +113,7 @@ def main() -> int:
     run(
         [
             sys.executable,
-            "scripts/reversal_tail_diagnostics.py",
+            "scripts/archive/2026-07-cleanup/reversal_tail_diagnostics.py",
             "--markets",
             str(local_markets),
             "--last-markets",
@@ -126,7 +126,7 @@ def main() -> int:
         run_optional(
             [
                 sys.executable,
-                "scripts/postfill_reversal_model.py",
+                "scripts/archive/2026-07-cleanup/postfill_reversal_model.py",
                 str(local_markets),
                 "--strategy",
                 args.strategy,
@@ -145,7 +145,7 @@ def main() -> int:
     run_optional(
         [
             sys.executable,
-            "scripts/postfill_gate_sim.py",
+            "scripts/archive/2026-07-cleanup/postfill_gate_sim.py",
             str(local_markets),
             "--strategy",
             args.strategy,
@@ -168,7 +168,7 @@ def main() -> int:
     run_optional(
         [
             sys.executable,
-            "scripts/late_break_feature_contrast.py",
+            "scripts/archive/2026-07-cleanup/late_break_feature_contrast.py",
             str(local_markets),
             "--strategy",
             args.strategy,
@@ -181,7 +181,7 @@ def main() -> int:
     run_optional(
         [
             sys.executable,
-            "scripts/late_break_gate_search.py",
+            "scripts/archive/2026-07-cleanup/late_break_gate_search.py",
             str(local_markets),
             "--strategy",
             args.strategy,
@@ -194,7 +194,7 @@ def main() -> int:
     run_optional(
         [
             sys.executable,
-            "scripts/late_break_gate_portfolio_sim.py",
+            "scripts/archive/2026-07-cleanup/late_break_gate_portfolio_sim.py",
             str(local_markets),
             "--strategy",
             args.strategy,

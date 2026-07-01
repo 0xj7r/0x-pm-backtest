@@ -3,7 +3,7 @@
 resolutions via result_id, both asset ids) into MarketHandle manifests for
 the updown families. Replaces availability-API crawling and label inference.
 
-Usage: python3 scripts/telonex_markets_to_manifests.py /tmp/telonex_markets.parquet data/manifests/canonical
+Usage: python3 scripts/pipeline/telonex_markets_to_manifests.py /tmp/telonex_markets.parquet data/manifests/canonical
 Outputs per family: {fam}_up.jsonl (canonical Up asset, outcome = true winner)
 and one down_all.jsonl (Down assets for the real-NO pairing map).
 """

@@ -12,7 +12,7 @@ It replicates (in Python, for ease of S3 + one-off use) the filtering logic of
 plus the small head for meta-calibrator training.
 
 Usage (with AWS creds):
-    python scripts/prepare_asset_markets.py \
+    python scripts/pipeline/prepare_asset_markets.py \
         --master-parquet s3://pm-research-backtest-prod/artifacts/markets-full.parquet \
         --asset eth \
         --start-date 2026-02-18 --end-date 2026-05-20 \

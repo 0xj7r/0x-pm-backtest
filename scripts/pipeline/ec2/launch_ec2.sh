@@ -5,7 +5,7 @@
 # auto-terminates on completion.
 #
 # Usage:
-#   AWS_PROFILE=visumlabs ./scripts/launch_ec2.sh \
+#   AWS_PROFILE=visumlabs ./scripts/pipeline/ec2/launch_ec2.sh \
 #       --markets-key path/in/s3.jsonl \
 #       --strategies "late_big_bet" \
 #       --portfolio

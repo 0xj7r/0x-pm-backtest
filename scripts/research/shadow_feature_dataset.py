@@ -5,12 +5,12 @@ Joins would_enter rows (with exo/dir + binance flow features) to resolution
 outcomes for offline gate screens and calibrator training.
 
 Usage:
-  python3 scripts/shadow_feature_dataset.py \\
+  python3 scripts/research/shadow_feature_dataset.py \\
     --shadow-dir /home/ubuntu/data/pm-alpha/shadow-final \\
     --out data/runs/shadow_features/entries.jsonl
 
-  # With daily regime sidecar (scripts/shadow_day_regime.py):
-  python3 scripts/shadow_feature_dataset.py \\
+  # With daily regime sidecar (scripts/research/shadow_day_regime.py):
+  python3 scripts/research/shadow_feature_dataset.py \\
     --shadow-dir /home/ubuntu/data/pm-alpha/shadow-final \\
     --day-regime data/runs/shadow_features/day_regime.json \\
     --out data/runs/shadow_features/entries.jsonl

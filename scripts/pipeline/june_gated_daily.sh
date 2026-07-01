@@ -6,7 +6,7 @@
 #   depth25 — 25% depth capture (live competition stress)
 #   stress  — depth25 + skip_touch_level (lose the race at touch)
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 BIN="${BIN:-./target/release/pm-app}"
 OUT="${OUT:-data/runs/june_gated_daily}"

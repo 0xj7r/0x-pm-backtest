@@ -3,7 +3,7 @@
 # Decontaminated: NO --perp-symbol, --perp-price-weight 0 (BTC perp would swamp
 # the tiny non-BTC signal). Fade-candidate + lane, mirroring batch0612 base args.
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 BIN=./target/fast/pm-app
 OUT=data/runs/alpha/solxrp
 mkdir -p "$OUT"

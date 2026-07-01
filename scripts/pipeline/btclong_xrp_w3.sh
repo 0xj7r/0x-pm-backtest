@@ -4,7 +4,7 @@
 # BTC uses BTC perp (correct), XRP is SPOT-ONLY (perp-price-weight 0).
 # One cell at a time; W3 tick cache already present so no ingestion. NEVER 05-19..06-30.
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 BIN=./target/fast/pm-app
 OUT=data/runs/alpha/btclong_xrp
 mkdir -p "$OUT"

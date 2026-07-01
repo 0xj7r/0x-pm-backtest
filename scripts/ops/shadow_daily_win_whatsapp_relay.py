@@ -6,8 +6,8 @@ shadow box, runs shadow_daily_win_summary.py --json --notify none, and posts
 the message through the same bridge stock-agent uses.
 
 Usage:
-  python3 scripts/shadow_daily_win_whatsapp_relay.py
-  python3 scripts/shadow_daily_win_whatsapp_relay.py --day 2026-06-16 --dry-run
+  python3 scripts/ops/shadow_daily_win_whatsapp_relay.py
+  python3 scripts/ops/shadow_daily_win_whatsapp_relay.py --day 2026-06-16 --dry-run
 """
 from __future__ import annotations
 
@@ -24,7 +24,9 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from whatsapp_notify import load_whatsapp_env, wa_send  # noqa: E402
 
 SSH_KEY = os.environ.get("SHADOW_SSH_KEY", os.path.expanduser("~/.ssh/whale_pair_dublin_ed25519.pem"))
-SSH_HOST = os.environ.get("SHADOW_SSH_HOST", "ubuntu@34.242.101.97")
+SSH_HOST = os.environ.get("SHADOW_SSH_HOST", "")
+if not SSH_HOST:
+    raise SystemExit("SHADOW_SSH_HOST is not set; set SHADOW_SSH_HOST=ubuntu@<current-ip>")
 REMOTE_SCRIPT = os.environ.get("SHADOW_DAILY_SCRIPT", "~/scripts/shadow_daily_win_summary.py")
 
 

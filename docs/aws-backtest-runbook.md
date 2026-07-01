@@ -66,7 +66,7 @@ target/fast/pm-app walk-forward \
 AWS_PROFILE=visumlabs \
 INSTANCE_TYPE=c7i.4xlarge \
 ROOT_VOLUME_GB=250 \
-./scripts/launch_ec2_portfolio_grid.sh \
+./scripts/pipeline/ec2/launch_ec2_portfolio_grid.sh \
   --start-date 2026-02-12 \
   --end-date 2026-05-20 \
   --train-markets 4500 \
@@ -123,7 +123,7 @@ Do not retrain the meta-calibrator for every sizing or execution sweep. After
 one training run has uploaded artifacts, reuse them:
 
 ```bash
-AWS_PROFILE=visumlabs ./scripts/launch_ec2_portfolio_grid.sh \
+AWS_PROFILE=visumlabs ./scripts/pipeline/ec2/launch_ec2_portfolio_grid.sh \
   --start-date 2026-02-12 \
   --end-date 2026-05-20 \
   --reuse-artifacts-run-id 20260528T103440Z-portfolio-grid-4432 \
@@ -172,7 +172,7 @@ AWS_PROFILE=visumlabs \
 INSTANCE_TYPE=r7g.4xlarge \
 ARCH=arm64 \
 USE_SPOT=1 \
-./scripts/launch_ec2_portfolio_grid.sh \
+./scripts/pipeline/ec2/launch_ec2_portfolio_grid.sh \
   --start-date 2026-02-12 \
   --end-date 2026-05-20 \
   --reuse-artifacts-run-id 20260528T225810Z-portfolio-grid-52322 \

@@ -11,8 +11,8 @@ Scale-up when ALL true:
   - clip still at BASE_CLIP_USD (not already scaled)
 
 Usage:
-  python3 scripts/shadow_night_monitor.py
-  python3 scripts/shadow_night_monitor.py --dry-run
+  python3 scripts/ops/shadow_night_monitor.py
+  python3 scripts/ops/shadow_night_monitor.py --dry-run
 """
 
 from __future__ import annotations

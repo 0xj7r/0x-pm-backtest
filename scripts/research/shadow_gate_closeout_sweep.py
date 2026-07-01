@@ -5,7 +5,7 @@ Replays shadow-final `would_enter` rows against `resolution` ladder PnL.
 Uses logged `regime` (decision-time classifier) — same field `decide_entry` gates on.
 
 Usage:
-  python3 scripts/shadow_gate_closeout_sweep.py \\
+  python3 scripts/research/shadow_gate_closeout_sweep.py \\
     --shadow-dir ~/data/pm-alpha/shadow-final \\
     --since 2026-06-14
 """

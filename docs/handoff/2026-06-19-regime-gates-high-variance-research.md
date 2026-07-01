@@ -63,8 +63,8 @@ pm-app shadow \
   --skip-expanded-mixed
 ```
 
-SSOT for gated flags array: `scripts/shadow_final_gated_flags.sh`  
-Restart script: `scripts/shadow_final_restart_gated.sh`
+SSOT for gated flags array: `scripts/ops/shadow_final_gated_flags.sh`  
+Restart script: `scripts/ops/shadow_final_restart_gated.sh`
 
 ### Deploy procedure (Dublin)
 
@@ -76,7 +76,7 @@ rsync -avz -e "$RSYNC_SSH" crates/pm-alpha/src/decide.rs ubuntu@34.242.101.97:~/
 
 # On Dublin
 ssh ubuntu@34.242.101.97 'cd ~/pm-backtest && source ~/.cargo/env && cargo build --release -p pm-app'
-bash scripts/shadow_final_restart_gated.sh   # or remote equivalent
+bash scripts/ops/shadow_final_restart_gated.sh   # or remote equivalent
 ```
 
 **Warmup:** After restart, vol3600 buffer needs ~1h before entries resume.
@@ -84,7 +84,7 @@ bash scripts/shadow_final_restart_gated.sh   # or remote equivalent
 ### Monitoring commands
 
 ```bash
-ssh ubuntu@34.242.101.97 '~/pm-backtest/scripts/paper_parity_status.sh'
+ssh ubuntu@34.242.101.97 '~/pm-backtest/scripts/ops/paper_parity_status.sh'
 ssh ubuntu@34.242.101.97 'grep parity_stats ~/data/pm-alpha/shadow_exec_tail.log | tail -5'
 ssh ubuntu@34.242.101.97 'python3 /tmp/score_regime_gate_sweep.py --shadow-dir ~/data/pm-alpha/shadow-final --since 2026-06-14'
 ```
@@ -175,10 +175,10 @@ Wired in:
  crates/pm-app/src/bin/exo_fade_equivalence.rs |  +3
  crates/pm-shadow/src/lib.rs                   |  +21
  crates/pm-strategy/src/exo_fade.rs            |  +13 (regime classify + config fields)
- scripts/shadow_final_gated_flags.sh          |  +2
- scripts/shadow_final_restart_gated.sh         |  echo update
+ scripts/ops/shadow_final_gated_flags.sh          |  +2
+ scripts/ops/shadow_final_restart_gated.sh         |  echo update
 ?? configs/exo_fade_chop_router.toml           (new profile — see §7)
-?? scripts/score_regime_gate_sweep.py         (new analysis script)
+?? scripts/research/score_regime_gate_sweep.py         (new analysis script)
 ```
 
 **Tests:** All pass at handoff:
@@ -194,7 +194,7 @@ cargo test -p pm-alpha -p pm-shadow -p pm-strategy -p pm-app
 
 ### Regime gate sweep (Jun 14–19, Dublin shadow-final baseline tape)
 
-Script: `scripts/score_regime_gate_sweep.py`
+Script: `scripts/research/score_regime_gate_sweep.py`
 
 | Combo | Total PnL | Jun 18 | Notes |
 |-------|-----------|--------|-------|
@@ -231,7 +231,7 @@ User explicitly deferred 0.65–0.75 fav sleeve. Touch band showed ~74% hit in a
 
 1. **`pm-alpha::regime`** (4 labels) — used for fade gates
 2. **`pm-strategy::regime::MarketRegimeCluster`** (8 fill-time clusters) — used by BTE/BR2
-3. **Daily spot labels** (`scripts/june_regime_compare.py`) — `directional_trend`, `chop_whipsaw`, `high_vol`
+3. **Daily spot labels** (`scripts/research/june_regime_compare.py`) — `directional_trend`, `chop_whipsaw`, `high_vol`
 
 v1 alpha regime puts ~80% in `expanded_mixed` (`docs/alpha-roadmap.md`) — too coarse for routing.
 
@@ -279,7 +279,7 @@ Artifacts referenced in docs (may be missing locally):
 
 ### 6.5 June daily router (Python only, not in Rust SSOT)
 
-**File:** `scripts/june_regime_compare.py`
+**File:** `scripts/research/june_regime_compare.py`
 
 ```
 IF trend_eff >= 0.30 AND abs(spot_ret_1d) >= 35bps:
@@ -327,7 +327,7 @@ Experimental walk-forward profile:
 - [ ] **Commit** all local changes + `score_regime_gate_sweep.py`
 - [ ] **Git-init or clone** on Dublin (currently rsync-only — fragile)
 - [ ] Confirm shadow-final post-warmup entries show `regime` on `would_enter` and fewer calm/mixed entries
-- [ ] Run 48h parity soak; document in `scripts/paper_parity_status.sh` output
+- [ ] Run 48h parity soak; document in `scripts/ops/paper_parity_status.sh` output
 
 ### Phase 1 — Shadow BR2 satellite (highest ROI)
 
@@ -347,7 +347,7 @@ Tasks:
 
 ### Phase 2 — Regime + thesis telemetry dashboard
 
-Extend `scripts/score_regime_gate_sweep.py`:
+Extend `scripts/research/score_regime_gate_sweep.py`:
 - Break PnL by `regime × ask_band × fade_vs_book` (underdog vs favourite)
 - Per-day regime attribution
 - Compare baseline vs gated vs hypothetical BR2 routing
@@ -371,8 +371,8 @@ Emit at market open (or first decision tick):
 
 **Files:**
 - `crates/pm-strategy/src/regime.rs` — `MarketRegimeCluster`, `WhipsawRiskSnapshot`
-- `scripts/router_decision_log_dataset.py`
-- `scripts/router_policy_search.py`
+- `scripts/research/router_decision_log_dataset.py`
+- `scripts/research/router_policy_search.py`
 
 **Do NOT** use fill-time-only features for pre-route decisions.
 
@@ -380,23 +380,23 @@ Emit at market open (or first decision tick):
 
 ```bash
 # Regime gate backtest sweep (SSOT gates, not Python replay)
-./scripts/whipsaw_backtest.sh
-VARIANT=combo WINDOWS="VERIFY HOLDOUT" ./scripts/whipsaw_backtest.sh
+./scripts/archive/2026-07-cleanup/whipsaw_backtest.sh
+VARIANT=combo WINDOWS="VERIFY HOLDOUT" ./scripts/archive/2026-07-cleanup/whipsaw_backtest.sh
 
 # F6 expanded-only
-WINDOWS=VERIFY STRATEGIES=F1 ./scripts/strategy_hunt_matrix.sh  # with --skip-calm
+WINDOWS=VERIFY STRATEGIES=F1 ./scripts/research/strategy_hunt_matrix.sh  # with --skip-calm
 
 # BR2 cluster PnL refresh
-python3 scripts/strategy_regime_clusters.py  # needs markets.jsonl artifacts
+python3 scripts/research/strategy_regime_clusters.py  # needs markets.jsonl artifacts
 
 # June regime report
-python3 scripts/june_regime_compare.py
+python3 scripts/research/june_regime_compare.py
 ```
 
 ### Phase 5 — Tail sleeve (Class C)
 
 - Enable `tail_regime_boost_*` in BR2 for `expanded_reversal_pressure` only
-- EC2 configs: `bonereaper_v2_convex_reversal.toml` (see `scripts/launch_ec2_convex_validation.sh`)
+- EC2 configs: `bonereaper_v2_convex_reversal.toml` (see `scripts/pipeline/ec2/launch_ec2_convex_validation.sh`)
 - Target: `B_tail` bucket economics (+$68/trade shadow baseline, thin volume)
 
 ### Phase 6 — Live re-arm (only after parity + shadow BR2 soak)
@@ -423,11 +423,11 @@ python3 scripts/june_regime_compare.py
 | Alpha harness CLI | `crates/pm-app/src/alpha.rs` |
 | Walk-forward | `crates/pm-app/src/walkforward.rs` |
 | Parity equiv tests | `crates/pm-app/src/bin/exo_fade_equivalence.rs` |
-| Prod gated flags | `scripts/shadow_final_gated_flags.sh` |
-| Prod restart | `scripts/shadow_final_restart_gated.sh` |
-| Gate sweep analysis | `scripts/score_regime_gate_sweep.py` |
-| Whipsaw backtest | `scripts/whipsaw_backtest.sh` |
-| June router research | `scripts/june_regime_compare.py` |
+| Prod gated flags | `scripts/ops/shadow_final_gated_flags.sh` |
+| Prod restart | `scripts/ops/shadow_final_restart_gated.sh` |
+| Gate sweep analysis | `scripts/research/score_regime_gate_sweep.py` |
+| Whipsaw backtest | `scripts/archive/2026-07-cleanup/whipsaw_backtest.sh` |
+| June router research | `scripts/research/june_regime_compare.py` |
 | Router design | `docs/global_regime_classifier_router.md` |
 | Strategy forward plan | `docs/research/strategy-hunt/07-strategy-forward-plan.md` |
 | Thesis buckets | `docs/research/strategy-hunt/06-thesis-decomposition.md` |

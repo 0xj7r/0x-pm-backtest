@@ -8,12 +8,12 @@
 #   4. optional 1-day alpha smoke (if BIN exists) — reports n_skipped_load_error
 #
 # Usage:
-#   ./scripts/harness_data_audit.sh
-#   DATE_START=2026-06-10 DATE_END=2026-06-16 ./scripts/harness_data_audit.sh
-#   SKIP_EQUIVALENCE=1 ./scripts/harness_data_audit.sh   # data gate + tests only
-#   SKIP_SMOKE=1 ./scripts/harness_data_audit.sh
+#   ./scripts/pipeline/harness_data_audit.sh
+#   DATE_START=2026-06-10 DATE_END=2026-06-16 ./scripts/pipeline/harness_data_audit.sh
+#   SKIP_EQUIVALENCE=1 ./scripts/pipeline/harness_data_audit.sh   # data gate + tests only
+#   SKIP_SMOKE=1 ./scripts/pipeline/harness_data_audit.sh
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 DATE_START="${DATE_START:-2026-06-10}"
 DATE_END="${DATE_END:-2026-06-16}"
@@ -40,7 +40,7 @@ echo "window: $DATE_START .. $DATE_END"
 echo ""
 
 echo "=== 1. data gate (June cache) ==="
-if ./scripts/data_gate_june.sh "$DATE_START" "$DATE_END"; then
+if ./scripts/pipeline/data_gate_june.sh "$DATE_START" "$DATE_END"; then
   record "data_gate" "PASS"
 else
   record "data_gate" "FAIL"

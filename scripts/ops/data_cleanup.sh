@@ -14,16 +14,16 @@
 #   - data/cache/telonex_markets.parquet
 #
 # Restore deleted raw from S3:
-#   ./scripts/prep_cache.sh 2026-05-29 2026-05-30 2026-05-31
-#   ./scripts/prep_cache.sh 2026-06-01 2026-06-07
+#   ./scripts/pipeline/prep_cache.sh 2026-05-29 2026-05-30 2026-05-31
+#   ./scripts/pipeline/prep_cache.sh 2026-06-01 2026-06-07
 #   ./target/release/pm-app prep-cache --cache-dir data/cache --markets <manifest> ...
 #
 # Usage:
-#   DRY_RUN=1 ./scripts/data_cleanup.sh
-#   ./scripts/data_cleanup.sh
-#   ./scripts/data_cleanup.sh --log-only
+#   DRY_RUN=1 ./scripts/ops/data_cleanup.sh
+#   ./scripts/ops/data_cleanup.sh
+#   ./scripts/ops/data_cleanup.sh --log-only
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 CACHE="${CACHE:-data/cache}"
 LOG="${LOG:-data/runs/data_cleanup.log}"

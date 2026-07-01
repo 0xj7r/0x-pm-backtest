@@ -2,7 +2,7 @@
 # Start shadow_exec_tail in PAPER mode (P4 parity gate). Safe with fade.kill active.
 set -euo pipefail
 
-BIN="${SHADOW_EXEC_BIN:-$HOME/go/polymarket-agent/target/release/shadow_exec_tail}"
+BIN="${SHADOW_EXEC_BIN:-$HOME/deploy-main/polymarket-agent/target/release/shadow_exec_tail}"
 SHADOW_ENV="${SHADOW_ENV:-$HOME/.config/polymarket-exec/shadow_exec_tail.env}"
 LOG="${SHADOW_EXEC_LOG:-$HOME/data/pm-alpha/shadow_exec_tail.log}"
 PID_FILE="${SHADOW_EXEC_PID:-$HOME/data/pm-alpha/shadow_exec_tail.pid}"

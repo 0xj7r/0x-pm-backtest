@@ -1080,8 +1080,6 @@ pub fn run_market_grid(
         }
     }
     let real_no_coverage = real_no_ticks as f64 / series.ticks.len().max(1) as f64;
-    let calm = regime == Some(crate::regime::Regime::CalmLowVol);
-    let calm_blocked = (cfg.skip_calm && calm) || (cfg.only_calm && !calm);
     let mut first = true;
     for &latency_ms in latencies_ms {
         for &threshold in edge_thresholds {
@@ -1098,11 +1096,8 @@ pub fn run_market_grid(
                 Vec::new()
             };
             first = false;
-            let (trades, maker_placed) = if calm_blocked {
-                (Vec::new(), 0)
-            } else {
-                execute(series, &pass, latency_ms, threshold, cfg, session)
-            };
+            let (trades, maker_placed) =
+                execute(series, &pass, latency_ms, threshold, cfg, session);
             outputs.push(MarketRunOutput {
                 trades,
                 samples: pass.samples.clone(),

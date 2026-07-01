@@ -158,6 +158,15 @@ enum Cmd {
         /// Skip when 60/300/600/900s spot all disagree with entry side.
         #[arg(long)]
         skip_spot_against_all: bool,
+        /// Skip when decision-time regime is calm_low_vol.
+        #[arg(long)]
+        skip_calm: bool,
+        /// Take entries only in calm_low_vol windows.
+        #[arg(long)]
+        only_calm: bool,
+        /// Skip when decision-time regime is expanded_mixed.
+        #[arg(long)]
+        skip_expanded_mixed: bool,
         /// Skip when decision-time regime is expanded_high_flip.
         #[arg(long)]
         skip_expanded_high_flip: bool,
@@ -353,6 +362,9 @@ enum Cmd {
         /// Tail hedge notional as a fraction of the clip.
         #[arg(long, default_value = "0.25")]
         tail_frac: f64,
+        /// Skip when decision-time regime is expanded_mixed.
+        #[arg(long)]
+        skip_expanded_mixed: bool,
         /// Skip entries when decision-time regime is expanded_high_flip.
         #[arg(long)]
         skip_expanded_high_flip: bool,
@@ -736,6 +748,10 @@ enum Cmd {
         /// Cache root for perp parquets (default: --local-cache-dir or data/cache).
         #[arg(long)]
         perp_cache_dir: Option<PathBuf>,
+        /// Experimental clean-directional tilt strength for exo_fade
+        /// (0 = off = validated baseline; UNVALIDATED research above 0).
+        #[arg(long, default_value_t = 0.0)]
+        directional_tilt_strength: f64,
         /// Comma-separated active strategy IDs.
         ///
         /// Active set by default: `exo_fade` (canonical quant implementation).
@@ -1428,6 +1444,9 @@ async fn main() -> Result<()> {
             max_entry_ask,
             skip_spot_misalign_s,
             skip_spot_against_all,
+            skip_calm,
+            only_calm,
+            skip_expanded_mixed,
             skip_expanded_high_flip,
             pause_after_consec_losses,
             skip_open_fav_gap,
@@ -1460,6 +1479,9 @@ async fn main() -> Result<()> {
                 max_entry_ask,
                 skip_spot_misalign_s,
                 skip_spot_against_all,
+                skip_calm,
+                only_calm,
+                skip_expanded_mixed,
                 skip_expanded_high_flip,
                 pause_after_consec_losses,
                 skip_open_fav_gap,
@@ -1522,6 +1544,7 @@ async fn main() -> Result<()> {
             align_min_mid,
             tail_max_price,
             tail_frac,
+            skip_expanded_mixed,
             skip_expanded_high_flip,
             skip_open_fav_gap,
             open_fav_p_min,
@@ -1619,6 +1642,7 @@ async fn main() -> Result<()> {
                     align_min_mid,
                     tail_max_price,
                     tail_frac,
+                    skip_expanded_mixed,
                     skip_expanded_high_flip,
                     skip_open_fav_gap,
                     open_fav_p_min,
@@ -1931,6 +1955,7 @@ async fn main() -> Result<()> {
             spot_symbol,
             perp_symbol,
             perp_cache_dir,
+            directional_tilt_strength,
             strategies,
             allow_legacy_strategies,
             max_concurrent_fetches,
@@ -2110,6 +2135,7 @@ async fn main() -> Result<()> {
             spot_symbol,
             perp_symbol,
             perp_cache_dir,
+            directional_tilt_strength,
             strategies,
             allow_legacy_strategies,
             max_concurrent_fetches,
@@ -2856,6 +2882,7 @@ async fn walk_forward(
     spot_symbol: String,
     perp_symbol: Option<String>,
     perp_cache_dir: Option<PathBuf>,
+    directional_tilt_strength: f64,
     strategies_csv: String,
     allow_legacy_strategies: bool,
     max_concurrent_fetches: usize,
@@ -3147,6 +3174,7 @@ async fn walk_forward(
         spot_symbol,
         perp_symbol,
         perp_cache_dir: perp_cache_dir.or(local_cache_dir.clone()),
+        directional_tilt_strength,
         strategies,
         max_concurrent_fetches,
         replay_sample_ms,

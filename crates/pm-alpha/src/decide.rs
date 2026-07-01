@@ -57,6 +57,9 @@ pub fn frozen_fade_decide_config(notional_usdc: f64) -> DecideConfig {
         basis_mom_disagree: 1.0,
         entry_mode: EntryMode::Fade,
         align_min_mid: 0.55,
+        skip_calm: false,
+        only_calm: false,
+        skip_expanded_mixed: false,
         skip_expanded_high_flip: false,
         skip_open_fav_gap: false,
         open_fav_p_min: 0.90,
@@ -200,6 +203,12 @@ pub struct DecideConfig {
     pub basis_mom_disagree: f64,
     pub entry_mode: EntryMode,
     pub align_min_mid: f64,
+    /// Skip when decision-time regime is `calm_low_vol`.
+    pub skip_calm: bool,
+    /// Take entries only in `calm_low_vol` (mutually exclusive with skip_calm in spirit).
+    pub only_calm: bool,
+    /// Skip when decision-time regime is `expanded_mixed`.
+    pub skip_expanded_mixed: bool,
     /// Skip when decision-time regime is `expanded_high_flip`.
     pub skip_expanded_high_flip: bool,
     /// Skip favourites where model >> book (see open_fav_*). `open_fav_secs`
@@ -247,6 +256,9 @@ impl DecideConfig {
             basis_mom_disagree: cfg.basis_mom_disagree,
             entry_mode: cfg.entry_mode,
             align_min_mid: cfg.align_min_mid,
+            skip_calm: cfg.skip_calm,
+            only_calm: cfg.only_calm,
+            skip_expanded_mixed: cfg.skip_expanded_mixed,
             skip_expanded_high_flip: cfg.skip_expanded_high_flip,
             skip_open_fav_gap: cfg.skip_open_fav_gap,
             open_fav_p_min: cfg.open_fav_p_min,
@@ -307,6 +319,26 @@ fn spot_momentum_gates_pass(inp: &DecisionInputs, side: Side, cfg: &DecideConfig
     true
 }
 
+/// Regime stand-down gates (per decision instant, rolling 30m spot path).
+fn regime_gates_pass(inp: &DecisionInputs, cfg: &DecideConfig) -> bool {
+    let Some(regime) = inp.regime_at_decision else {
+        return true;
+    };
+    if cfg.skip_calm && regime == Regime::CalmLowVol {
+        return false;
+    }
+    if cfg.only_calm && regime != Regime::CalmLowVol {
+        return false;
+    }
+    if cfg.skip_expanded_mixed && regime == Regime::ExpandedMixed {
+        return false;
+    }
+    if cfg.skip_expanded_high_flip && regime == Regime::ExpandedHighFlip {
+        return false;
+    }
+    true
+}
+
 fn whipsaw_gates_pass(
     inp: &DecisionInputs,
     now_ns: i64,
@@ -317,11 +349,6 @@ fn whipsaw_gates_pass(
     session: Option<&SessionGateState>,
     cfg: &DecideConfig,
 ) -> bool {
-    if cfg.skip_expanded_high_flip
-        && inp.regime_at_decision == Some(Regime::ExpandedHighFlip)
-    {
-        return false;
-    }
     if let Some(s) = session
         && cfg.pause_after_consec_losses > 0
         && s.consec_losses >= cfg.pause_after_consec_losses
@@ -390,6 +417,9 @@ pub fn decide_entry(
     }
     // Regime / vol ceiling (replay L361-363).
     if cfg.max_entry_sigma_bps > 0.0 && inp.sigma_bar_bps > cfg.max_entry_sigma_bps {
+        return skip(Side::Yes, cfg);
+    }
+    if !regime_gates_pass(inp, cfg) {
         return skip(Side::Yes, cfg);
     }
     // Belief selection (replay L366-370).
@@ -903,6 +933,44 @@ mod tests {
         cfg.skip_expanded_high_flip = true;
         let mut inp = up_inputs();
         inp.regime_at_decision = Some(Regime::ExpandedHighFlip);
+        let now = FRI();
+        let (dec, _) = decide_entry(
+            &inp,
+            now,
+            open_of(now),
+            close_of(now),
+            &fresh_state(),
+            session_none().as_ref(),
+            &cfg,
+        );
+        assert_eq!(dec.action, EntryAction::Skip);
+    }
+
+    #[test]
+    fn skips_calm_low_vol_regime() {
+        let mut cfg = live_cfg();
+        cfg.skip_calm = true;
+        let mut inp = up_inputs();
+        inp.regime_at_decision = Some(Regime::CalmLowVol);
+        let now = FRI();
+        let (dec, _) = decide_entry(
+            &inp,
+            now,
+            open_of(now),
+            close_of(now),
+            &fresh_state(),
+            session_none().as_ref(),
+            &cfg,
+        );
+        assert_eq!(dec.action, EntryAction::Skip);
+    }
+
+    #[test]
+    fn skips_expanded_mixed_regime() {
+        let mut cfg = live_cfg();
+        cfg.skip_expanded_mixed = true;
+        let mut inp = up_inputs();
+        inp.regime_at_decision = Some(Regime::ExpandedMixed);
         let now = FRI();
         let (dec, _) = decide_entry(
             &inp,

@@ -845,6 +845,8 @@ pub struct WalkForwardConfig {
     pub perp_symbol: Option<String>,
     /// Cache root for perp parquets (defaults to `data/cache`).
     pub perp_cache_dir: Option<PathBuf>,
+    /// Experimental clean-directional tilt for exo_fade (0 = off = validated baseline).
+    pub directional_tilt_strength: f64,
     pub strategies: Vec<StratId>,
     pub max_concurrent_fetches: usize,
     /// Optional research-speed replay thinning. `0` keeps every raw event.
@@ -1133,6 +1135,7 @@ impl Default for WalkForwardConfig {
             spot_symbol: "auto".to_string(),
             perp_symbol: None,
             perp_cache_dir: None,
+            directional_tilt_strength: 0.0,
             strategies: StratId::ACTIVE.to_vec(),
             max_concurrent_fetches: 64,
             replay_sample_ms: 0,
@@ -4593,10 +4596,11 @@ fn run_one_strategy(
                 "btc"
             };
             let window_secs = market_duration_secs_from_slug(market_slug).max(300) as u32;
-            let base = match strat {
+            let mut base = match strat {
                 StratId::MayJuneFade => ExoFadeConfig::mayjune_btc5m(),
                 _ => ExoFadeConfig::champion_1k(),
             };
+            base.directional_tilt_strength = cfg.directional_tilt_strength;
             let mut s = ExoFadeStrategy::new(ExoFadeConfig {
                 bankroll_usdc: bankroll,
                 clip_usdc: clip,

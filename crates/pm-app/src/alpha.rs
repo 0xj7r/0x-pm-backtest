@@ -142,6 +142,7 @@ pub struct AlphaArgs {
     /// (0 disables; requires --perp-symbol).
     pub perp_price_weight: f64,
     /// Whipsaw/chop decision gates (SSOT in pm_alpha::decide).
+    pub skip_expanded_mixed: bool,
     pub skip_expanded_high_flip: bool,
     pub skip_open_fav_gap: bool,
     pub open_fav_p_min: f64,
@@ -880,6 +881,7 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
         tail_frac: args.tail_frac,
         collect_training: false,
         train_sample_dt_s: 15,
+        skip_expanded_mixed: args.skip_expanded_mixed,
         skip_expanded_high_flip: args.skip_expanded_high_flip,
         skip_open_fav_gap: args.skip_open_fav_gap,
         open_fav_p_min: args.open_fav_p_min,

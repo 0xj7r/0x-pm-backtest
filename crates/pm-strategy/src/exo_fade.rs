@@ -11,7 +11,7 @@ use crate::{Ctx, OrderRequest, Side as StratSide, Strategy, StrategyOutput};
 use pm_alpha::{
     AlphaModel, AlphaModelConfig, DecideConfig, DecisionInputs, EntryAction, EntryState,
     EntryStateDelta, ExoState, MarketMeta, PerpState, Token, VolEstimator, decide_entry,
-    harness::EntryMode, harness::Side as AlphaSide, model::belief,
+    harness::EntryMode, harness::Side as AlphaSide, model::belief, regime,
 };
 use std::sync::Arc;
 use pm_risk::fractional_kelly_stake;
@@ -56,7 +56,14 @@ pub struct ExoFadeConfig {
     pub skip_spot_against_all: bool,
     pub pause_after_consec_losses: u32,
     pub max_rearm_entry_ask: f64,
+    pub skip_calm: bool,
+    pub only_calm: bool,
+    pub skip_expanded_mixed: bool,
     pub skip_expanded_high_flip: bool,
+    // Strength of fresh clean directional pressure tilt in good regimes (0.0 = off).
+    // Set >0 only if we validate positive edge in clean_directional on VERIFY.
+    // Applied to BSM p_up when regime good.
+    pub directional_tilt_strength: f64,
 }
 
 impl Default for ExoFadeConfig {
@@ -93,7 +100,11 @@ impl Default for ExoFadeConfig {
             skip_spot_against_all: false,
             pause_after_consec_losses: 0,
             max_rearm_entry_ask: 0.0,
+            skip_calm: false,
+            only_calm: false,
+            skip_expanded_mixed: false,
             skip_expanded_high_flip: false,
+            directional_tilt_strength: 0.0,
         }
     }
 }
@@ -165,6 +176,9 @@ impl ExoFadeConfig {
             basis_mom_disagree: 1.0,
             entry_mode: self.entry_mode(),
             align_min_mid: self.align_min_mid,
+            skip_calm: self.skip_calm,
+            only_calm: self.only_calm,
+            skip_expanded_mixed: self.skip_expanded_mixed,
             skip_expanded_high_flip: self.skip_expanded_high_flip,
             skip_open_fav_gap: self.skip_open_fav_gap,
             open_fav_p_min: self.open_fav_p_min,
@@ -265,6 +279,50 @@ impl ExoFadeStrategy {
                 Some((bn - bp) * 1e4)
             })
             .unwrap_or(0.0)
+    }
+
+    /// Experimental regime-conditional directional tilt (UNVALIDATED research;
+    /// candidate 3 in docs/directional_satellite_candidates.md). Only called
+    /// when directional_tilt_strength > 0. Requires clean_directional agreement
+    /// across both regime classifiers plus BSM-side agreement before nudging p.
+    fn tilted_p(
+        &self,
+        exo: &ExoState,
+        ctx: &Ctx,
+        event: &ReplayEvent,
+        b: &pm_alpha::model::Belief,
+    ) -> f64 {
+        let dir_pressure = pm_alpha::clean_directional_pressure(exo, b.sigma_bar_bps);
+        let eff = ctx.regime_path_efficiency;
+        let r = regime::classify(exo.spot, event.ts_ns);
+        let cluster = crate::regime::classify_market_regime_cluster(
+            ctx.market_yes_range_so_far,
+            eff,
+            ctx.regime_reversal_pressure,
+            ctx.regime_sign_flip_rate,
+            ctx.regime_realized_vol_180s_bps,
+            None,
+        );
+        let tilt_regime = matches!(r, Some(pm_alpha::regime::Regime::CleanDirectional))
+            && matches!(
+                cluster,
+                crate::regime::MarketRegimeCluster::CleanDirectionalPath
+                    | crate::regime::MarketRegimeCluster::ExpandedReversalPressure
+            )
+            && eff >= 0.30;
+        if !tilt_regime {
+            return b.p_up;
+        }
+        let open_ns = ctx.market_close_ns - self.cfg.window_secs as i64 * NS_PER_S;
+        let seconds_from_open = ((event.ts_ns - open_ns) / NS_PER_S) as f64;
+        if seconds_from_open <= 180.0 || dir_pressure.abs() <= 0.05 {
+            return b.p_up;
+        }
+        let agrees = (dir_pressure > 0.0 && b.p_up > 0.5) || (dir_pressure < 0.0 && b.p_up < 0.5);
+        if !agrees {
+            return b.p_up;
+        }
+        (b.p_up + dir_pressure * self.cfg.directional_tilt_strength * 0.15).clamp(0.05, 0.95)
     }
 
     fn market_meta(&self, ctx: &Ctx) -> Option<MarketMeta> {
@@ -401,8 +459,17 @@ impl ExoFadeStrategy {
         let no_buy = self.no_buy_price(event, ctx);
         let mid = event.yes_mid as f64;
 
+        // Experimental directional tilt (UNVALIDATED; off unless
+        // directional_tilt_strength > 0). At 0 the strategy is byte-identical
+        // to the validated fade: no regime classification, no belief change.
+        let effective_p = if self.cfg.directional_tilt_strength > 0.0 {
+            self.tilted_p(&exo, ctx, event, &b)
+        } else {
+            b.p_up
+        };
+
         let inputs = DecisionInputs {
-            p_exo: b.p_up,
+            p_exo: effective_p,
             dir_p_up: None,
             dir_model_active: false,
             yes_ask,
@@ -410,7 +477,7 @@ impl ExoFadeStrategy {
             mid,
             sigma_bar_bps: b.sigma_bar_bps,
             basis_mom_60s_bps: self.basis_mom_60s_bps(spot, event.ts_ns),
-            regime_at_decision: None,
+            regime_at_decision: regime::classify(spot, event.ts_ns),
             clip_index: self.n_clips,
             spot_ret_10s_bps: None,
             spot_ret_30s_bps: None,

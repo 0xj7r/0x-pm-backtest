@@ -35,6 +35,14 @@ const SHADOW_NOTIONAL_USDC: f64 = 50.0;
 const PASSIVE_EXIT_TIMEOUT_S: i64 = 60;
 /// Rolling cap on receipt-minus-exchange latency samples.
 const LATENCY_SAMPLE_CAP: usize = 4_096;
+/// OI poll cadence (Binance metrics are 5-minute).
+const OI_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+/// Funding events are 8h; poll often enough to catch the next print.
+const FUNDING_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1800);
+/// ~50h of 5-minute OI rows (enough for oi_delta_30m + warmup).
+const OI_SERIES_CAP: usize = 600;
+/// ~40 days of 8h funding events.
+const FUNDING_SERIES_CAP: usize = 120;
 
 #[derive(Debug, Clone)]
 pub struct ShadowArgs {
@@ -83,6 +91,12 @@ pub struct ShadowArgs {
     pub skip_spot_misalign_s: u32,
     /// Skip when 60/300/600/900s spot all disagree with entry side.
     pub skip_spot_against_all: bool,
+    /// Skip when decision-time regime is `calm_low_vol`.
+    pub skip_calm: bool,
+    /// Take entries only in `calm_low_vol`.
+    pub only_calm: bool,
+    /// Skip when decision-time regime is `expanded_mixed`.
+    pub skip_expanded_mixed: bool,
     /// Skip when decision-time regime is `expanded_high_flip`.
     pub skip_expanded_high_flip: bool,
     /// Pause entries after this many consecutive resolved losses (0 = off).
@@ -127,6 +141,9 @@ pub fn frozen_shadow_final_args(out_dir: PathBuf) -> ShadowArgs {
         max_entry_ask: 1.0,
         skip_spot_misalign_s: 0,
         skip_spot_against_all: false,
+        skip_calm: false,
+        only_calm: false,
+        skip_expanded_mixed: false,
         skip_expanded_high_flip: false,
         pause_after_consec_losses: 0,
         skip_open_fav_gap: false,
@@ -137,6 +154,9 @@ pub fn frozen_shadow_final_args(out_dir: PathBuf) -> ShadowArgs {
 }
 
 /// Validated live gate package: mom30 + lottery-band floor + prod_gap_full.
+/// Regime stand-down gates (skip_calm / skip_expanded_mixed) are deliberately
+/// NOT part of this package: fit on Jun 14-19 live tape, they blocked 99% of
+/// entries out-of-sample Jun 20-30 (see docs/postmortem-2026-06-16 follow-up).
 pub fn gated_shadow_final_args(out_dir: PathBuf) -> ShadowArgs {
     let mut args = frozen_shadow_final_args(out_dir);
     args.skip_spot_misalign_s = 30;
@@ -216,6 +236,15 @@ pub enum LogEvent {
         /// CEX path-shape regime from `pm_alpha::regime` (not used in belief).
         #[serde(skip_serializing_if = "Option::is_none")]
         regime: Option<&'static str>,
+        /// Side-oriented Binance spot flow (matches reversal discovery script).
+        binance_flow_imbal_5s: f64,
+        binance_flow_imbal_15s: f64,
+        binance_flow_imbal_30s: f64,
+        binance_adverse_vol_5s: f64,
+        binance_adverse_vol_15s: f64,
+        binance_adverse_vol_30s: f64,
+        /// Perp-minus-spot basis change over 60s, bps (decision-layer only).
+        basis_d60_bps: f64,
         touch_price: f64,
         touch_size: f64,
         edge: f64,
@@ -670,6 +699,10 @@ pub struct ShadowCore {
     vbuf_coinbase: VenueBuf,
     /// Binance futures prints (perp-led state input; empty when disabled).
     perp_buf: VecDeque<SpotTick>,
+    /// 5-minute open interest (ts_ns, contracts); populated from Binance REST.
+    oi_series: Vec<(i64, f64)>,
+    /// Funding events (ts_ns, rate); populated from Binance REST.
+    funding_series: Vec<(i64, f64)>,
     /// Cross-market loss streak for `pause_after_consec_losses`.
     session: SessionGateState,
 }
@@ -701,6 +734,9 @@ pub struct ShadowConfig {
     pub max_entry_ask: f64,
     pub skip_spot_misalign_s: u32,
     pub skip_spot_against_all: bool,
+    pub skip_calm: bool,
+    pub only_calm: bool,
+    pub skip_expanded_mixed: bool,
     pub skip_expanded_high_flip: bool,
     pub pause_after_consec_losses: u32,
     pub skip_open_fav_gap: bool,
@@ -740,6 +776,9 @@ pub fn shadow_config_from_args(args: &ShadowArgs) -> ShadowConfig {
         max_entry_ask: args.max_entry_ask,
         skip_spot_misalign_s: args.skip_spot_misalign_s,
         skip_spot_against_all: args.skip_spot_against_all,
+        skip_calm: args.skip_calm,
+        only_calm: args.only_calm,
+        skip_expanded_mixed: args.skip_expanded_mixed,
         skip_expanded_high_flip: args.skip_expanded_high_flip,
         pause_after_consec_losses: args.pause_after_consec_losses,
         skip_open_fav_gap: args.skip_open_fav_gap,
@@ -782,6 +821,8 @@ impl ShadowCore {
             vbuf_kraken: VenueBuf::default(),
             vbuf_coinbase: VenueBuf::default(),
             perp_buf: VecDeque::new(),
+            oi_series: Vec::new(),
+            funding_series: Vec::new(),
             session: SessionGateState::default(),
             stats: SummaryStats::default(),
         }
@@ -820,8 +861,15 @@ impl ShadowCore {
     }
 
     /// Record a Binance futures print (perp-led state; measure parity with
-    /// the harness PerpState, trades only - no OI/funding live).
-    pub fn push_perp(&mut self, exchange_ms: i64, receipt_ms: i64, price: f64, quantity: f64) {
+    /// the harness PerpState including live OI/funding from REST polls).
+    pub fn push_perp(
+        &mut self,
+        exchange_ms: i64,
+        receipt_ms: i64,
+        price: f64,
+        quantity: f64,
+        is_buyer_maker: bool,
+    ) {
         if !(price.is_finite() && price > 0.0) {
             return;
         }
@@ -830,7 +878,7 @@ impl ShadowCore {
             ts_ns: exchange_ms * 1_000_000,
             price,
             quantity: quantity as f32,
-            is_buyer_maker: false,
+            is_buyer_maker,
         });
         while let Some(front) = self.perp_buf.front() {
             if exchange_ms * 1_000_000 - front.ts_ns <= SPOT_KEEP_SECS * 1_000_000_000 {
@@ -840,14 +888,47 @@ impl ShadowCore {
         }
     }
 
+    fn push_series_point(buf: &mut Vec<(i64, f64)>, ts_ns: i64, value: f64, cap: usize) {
+        if !value.is_finite() {
+            return;
+        }
+        if let Some((last_ts, last_v)) = buf.last_mut() {
+            if *last_ts == ts_ns {
+                *last_v = value;
+                return;
+            }
+            if *last_ts > ts_ns {
+                return;
+            }
+        }
+        buf.push((ts_ns, value));
+        if buf.len() > cap {
+            let drop = buf.len() - cap;
+            buf.drain(0..drop);
+        }
+    }
+
+    pub fn push_oi(&mut self, exchange_ms: i64, oi: f64) {
+        Self::push_series_point(&mut self.oi_series, exchange_ms * 1_000_000, oi, OI_SERIES_CAP);
+    }
+
+    pub fn push_funding(&mut self, exchange_ms: i64, rate: f64) {
+        Self::push_series_point(
+            &mut self.funding_series,
+            exchange_ms * 1_000_000,
+            rate,
+            FUNDING_SERIES_CAP,
+        );
+    }
+
     fn perp_state(&self) -> Option<pm_alpha::PerpState> {
         if self.cfg.perp_price_weight == 0.0 || self.perp_buf.is_empty() {
             return None;
         }
         Some(pm_alpha::PerpState {
             trades: SpotHistory::new(self.perp_buf.iter().copied().collect()),
-            oi: Vec::new(),
-            funding: Vec::new(),
+            oi: self.oi_series.clone(),
+            funding: self.funding_series.clone(),
         })
     }
 
@@ -1009,6 +1090,36 @@ fn push_capped(buf: &mut VecDeque<i64>, value: i64) {
     }
 }
 
+/// Side-oriented Binance spot flow features for discovery (logging only).
+#[derive(Debug, Clone, Copy)]
+struct BinanceFlowTelemetry {
+    flow_imbal_5s: f64,
+    flow_imbal_15s: f64,
+    flow_imbal_30s: f64,
+    adverse_vol_5s: f64,
+    adverse_vol_15s: f64,
+    adverse_vol_30s: f64,
+    basis_d60_bps: f64,
+}
+
+impl BinanceFlowTelemetry {
+    fn compute(spot: &SpotHistory, now_ns: i64, side: Side, basis_d60_bps: f64) -> Self {
+        let is_buy_yes = matches!(side, Side::Up);
+        let f5 = spot.signed_flow_and_adverse(now_ns, 5_000_000_000, is_buy_yes);
+        let f15 = spot.signed_flow_and_adverse(now_ns, 15_000_000_000, is_buy_yes);
+        let f30 = spot.signed_flow_and_adverse(now_ns, 30_000_000_000, is_buy_yes);
+        Self {
+            flow_imbal_5s: f5.imbalance,
+            flow_imbal_15s: f15.imbalance,
+            flow_imbal_30s: f30.imbalance,
+            adverse_vol_5s: f5.adverse_volume,
+            adverse_vol_15s: f15.adverse_volume,
+            adverse_vol_30s: f30.adverse_volume,
+            basis_d60_bps,
+        }
+    }
+}
+
 /// Decision-layer context for cluster/trend monitoring (does not affect belief).
 fn entry_decision_telemetry(
     state: &ExoState<'_>,
@@ -1110,6 +1221,9 @@ impl ShadowCore {
         self.cfg.decide_cfg.max_entry_ask = self.cfg.max_entry_ask;
         self.cfg.decide_cfg.skip_spot_misalign_s = self.cfg.skip_spot_misalign_s;
         self.cfg.decide_cfg.skip_spot_against_all = self.cfg.skip_spot_against_all;
+        self.cfg.decide_cfg.skip_calm = self.cfg.skip_calm;
+        self.cfg.decide_cfg.only_calm = self.cfg.only_calm;
+        self.cfg.decide_cfg.skip_expanded_mixed = self.cfg.skip_expanded_mixed;
         self.cfg.decide_cfg.skip_expanded_high_flip = self.cfg.skip_expanded_high_flip;
         self.cfg.decide_cfg.pause_after_consec_losses = self.cfg.pause_after_consec_losses;
         self.cfg.decide_cfg.skip_open_fav_gap = self.cfg.skip_open_fav_gap;
@@ -1358,6 +1472,8 @@ impl ShadowCore {
                 Side::Up => m.up_token.clone(),
                 Side::Down => m.down_token.clone(),
             };
+            let basis_d60 = Self::basis_mom_60s_bps(perp.as_ref(), &spot, now_ns);
+            let flow = BinanceFlowTelemetry::compute(&spot, now_ns, side, basis_d60);
             out.push(LogEvent::WouldEnter {
                 ts_utc: ts_utc(now_ns),
                 slug: m.slug.clone(),
@@ -1380,6 +1496,13 @@ impl ShadowCore {
                 exo_features,
                 dir_features,
                 regime,
+                binance_flow_imbal_5s: flow.flow_imbal_5s,
+                binance_flow_imbal_15s: flow.flow_imbal_15s,
+                binance_flow_imbal_30s: flow.flow_imbal_30s,
+                binance_adverse_vol_5s: flow.adverse_vol_5s,
+                binance_adverse_vol_15s: flow.adverse_vol_15s,
+                binance_adverse_vol_30s: flow.adverse_vol_30s,
+                basis_d60_bps: flow.basis_d60_bps,
                 touch_price: touch.price,
                 touch_size: touch.size,
                 edge,
@@ -1827,6 +1950,11 @@ pub async fn run_shadow_with_sink(
     } else {
         tokio::spawn(async {})
     };
+    let perp_metrics_task = if args.perp_price_weight != 0.0 {
+        tokio::spawn(feeds::perp_metrics_poll(core.clone(), shutdown_rx.clone()))
+    } else {
+        tokio::spawn(async {})
+    };
 
     // 10ms poll keeps the latency probe honest (~±10ms of the target);
     // decisions run on the harness's 1s cadence; summaries every 60s.
@@ -1943,6 +2071,7 @@ pub async fn run_shadow_with_sink(
             kraken_task,
             coinbase_task,
             perp_task,
+            perp_metrics_task,
         ]),
     )
     .await;
@@ -1979,8 +2108,60 @@ mod bootstrap {
                 Ok(n) => tracing::info!(klines = n, "perp buffer pre-warmed from Binance futures klines"),
                 Err(e) => tracing::warn!(error = %e, "perp klines pre-warm failed; live warm-up fallback"),
             }
+            match warm_perp_metrics(&core).await {
+                Ok((oi, funding)) => {
+                    tracing::info!(oi_rows = oi, funding_rows = funding, "perp OI/funding pre-warmed");
+                }
+                Err(e) => tracing::warn!(error = %e, "perp OI/funding pre-warm failed; poll will backfill"),
+            }
         }
         Ok(())
+    }
+
+    async fn warm_perp_metrics(core: &Core) -> anyhow::Result<(usize, usize)> {
+        let client = reqwest::Client::new();
+        let oi_url = "https://fapi.binance.com/futures/data/openInterestHist?symbol=BTCUSDT&period=5m&limit=500";
+        let funding_url = "https://fapi.binance.com/fapi/v1/fundingRate?symbol=BTCUSDT&limit=100";
+        let oi_body: serde_json::Value = client.get(oi_url).send().await?.json().await?;
+        let funding_body: serde_json::Value = client.get(funding_url).send().await?.json().await?;
+        let mut core = core.lock().expect("shadow core poisoned");
+        let mut oi_n = 0usize;
+        if let Some(rows) = oi_body.as_array() {
+            for row in rows {
+                let ts_ms = row.get("timestamp").and_then(|v| v.as_i64());
+                let oi = row
+                    .get("sumOpenInterest")
+                    .and_then(parse_json_f64);
+                if let (Some(ts), Some(oi)) = (ts_ms, oi) {
+                    core.push_oi(ts, oi);
+                    oi_n += 1;
+                }
+            }
+        }
+        let mut funding_n = 0usize;
+        if let Some(rows) = funding_body.as_array() {
+            for row in rows {
+                let ts_ms = row
+                    .get("fundingTime")
+                    .and_then(|v| v.as_i64());
+                let rate = row
+                    .get("fundingRate")
+                    .and_then(parse_json_f64);
+                if let (Some(ts), Some(rate)) = (ts_ms, rate) {
+                    core.push_funding(ts, rate);
+                    funding_n += 1;
+                }
+            }
+        }
+        Ok((oi_n, funding_n))
+    }
+
+    fn parse_json_f64(v: &serde_json::Value) -> Option<f64> {
+        match v {
+            serde_json::Value::Number(n) => n.as_f64(),
+            serde_json::Value::String(s) => s.trim().parse().ok(),
+            _ => None,
+        }
     }
 
     async fn warm_klines(core: &Core, url: &str, perp: bool) -> anyhow::Result<usize> {
@@ -1998,7 +2179,7 @@ mod bootstrap {
                 .and_then(|s| s.parse::<f64>().ok());
             if let (Some(ms), Some(px)) = (close_ms, close_px) {
                 if perp {
-                    core.push_perp(ms, ms, px, 0.0);
+                    core.push_perp(ms, ms, px, 0.0, false);
                 } else {
                     core.push_spot(ms, ms, px, 0.0, false);
                 }
@@ -2263,10 +2444,75 @@ mod feeds {
         let exchange_ms = value_i64(payload.get("T"))
             .or_else(|| value_i64(payload.get("E")))
             .context("futures aggTrade missing T/E timestamp")?;
+        let is_buyer_maker = payload.get("m").and_then(Value::as_bool).unwrap_or(false);
         core.lock()
             .expect("shadow core poisoned")
-            .push_perp(exchange_ms, now_unix_ms(), price, qty);
+            .push_perp(exchange_ms, now_unix_ms(), price, qty, is_buyer_maker);
         Ok(())
+    }
+
+    pub async fn perp_metrics_poll(core: Core, mut shutdown: watch::Receiver<bool>) {
+        let client = reqwest::Client::new();
+        let mut oi_tick = tokio::time::interval(super::OI_POLL_INTERVAL);
+        oi_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut funding_tick = tokio::time::interval(super::FUNDING_POLL_INTERVAL);
+        funding_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // First poll immediately so gaps after bootstrap are small.
+        oi_tick.tick().await;
+        funding_tick.tick().await;
+        loop {
+            tokio::select! {
+                _ = shutdown.changed() => break,
+                _ = oi_tick.tick() => {
+                    if let Err(error) = poll_oi(&client, &core).await {
+                        tracing::warn!(?error, "perp OI poll failed");
+                    }
+                }
+                _ = funding_tick.tick() => {
+                    if let Err(error) = poll_funding(&client, &core).await {
+                        tracing::warn!(?error, "perp funding poll failed");
+                    }
+                }
+            }
+        }
+    }
+
+    async fn poll_oi(client: &reqwest::Client, core: &Core) -> Result<()> {
+        let url = "https://fapi.binance.com/futures/data/openInterestHist?symbol=BTCUSDT&period=5m&limit=2";
+        let body: Value = client.get(url).send().await?.json().await?;
+        let rows = body.as_array().context("OI hist response not array")?;
+        let mut core = core.lock().expect("shadow core poisoned");
+        for row in rows {
+            let ts_ms = value_i64(row.get("timestamp"));
+            let oi = row.get("sumOpenInterest").and_then(parse_value_f64);
+            if let (Some(ts), Some(oi)) = (ts_ms, oi) {
+                core.push_oi(ts, oi);
+            }
+        }
+        Ok(())
+    }
+
+    async fn poll_funding(client: &reqwest::Client, core: &Core) -> Result<()> {
+        let url = "https://fapi.binance.com/fapi/v1/fundingRate?symbol=BTCUSDT&limit=5";
+        let body: Value = client.get(url).send().await?.json().await?;
+        let rows = body.as_array().context("funding response not array")?;
+        let mut core = core.lock().expect("shadow core poisoned");
+        for row in rows {
+            let ts_ms = value_i64(row.get("fundingTime"));
+            let rate = row.get("fundingRate").and_then(parse_value_f64);
+            if let (Some(ts), Some(rate)) = (ts_ms, rate) {
+                core.push_funding(ts, rate);
+            }
+        }
+        Ok(())
+    }
+
+    fn parse_value_f64(v: &Value) -> Option<f64> {
+        match v {
+            Value::Number(n) => n.as_f64(),
+            Value::String(s) => s.trim().parse().ok(),
+            _ => None,
+        }
     }
 
     // Cross-venue measure-only feeds (Kraken, Coinbase)
@@ -2877,7 +3123,7 @@ mod tests {
     }
 
     #[test]
-    fn gated_shadow_final_args_enables_mom30_and_lottery_floor() {
+    fn gated_shadow_final_args_enables_mom30_and_lottery_floor_without_regime_gates() {
         let args = gated_shadow_final_args(PathBuf::from("shadow-final"));
         assert_eq!(args.skip_spot_misalign_s, 30);
         assert!((args.min_entry_ask - 0.45).abs() < f64::EPSILON);
@@ -2885,11 +3131,17 @@ mod tests {
         assert!((args.open_fav_p_min - 0.88).abs() < f64::EPSILON);
         assert!((args.open_fav_ask_max - 0.62).abs() < f64::EPSILON);
         assert_eq!(args.open_fav_secs, 300);
+        assert!(!args.skip_calm);
+        assert!(!args.skip_expanded_mixed);
+        assert!(!args.skip_expanded_high_flip);
         let cfg = shadow_config_from_args(&args);
         assert_eq!(cfg.skip_spot_misalign_s, 30);
         assert!((cfg.min_entry_ask - 0.45).abs() < f64::EPSILON);
         assert!(cfg.skip_open_fav_gap);
         assert_eq!(cfg.open_fav_secs, 300);
+        assert!(!cfg.skip_calm);
+        assert!(!cfg.skip_expanded_mixed);
+        assert!(!cfg.skip_expanded_high_flip);
     }
 
     fn cfg() -> ShadowConfig {
@@ -2920,6 +3172,9 @@ mod tests {
             max_entry_ask: 1.0,
             skip_spot_misalign_s: 0,
             skip_spot_against_all: false,
+            skip_calm: false,
+            only_calm: false,
+            skip_expanded_mixed: false,
             skip_expanded_high_flip: false,
             pause_after_consec_losses: 0,
             skip_open_fav_gap: false,

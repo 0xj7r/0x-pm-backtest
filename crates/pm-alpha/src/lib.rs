@@ -26,7 +26,7 @@ pub use decide::{
     SessionGateState, decide_entry, frozen_fade_decide_config, session_gates_active,
     session_observe_trades,
 };
-pub use directional::{DIR_FEATURE_NAMES, DIR_FEATURES, DirFeatures, DirModel, dir_features};
+pub use directional::{DIR_FEATURE_NAMES, DIR_FEATURES, DirFeatures, DirModel, clean_directional_pressure, dir_features};
 pub use fair_value::{FairValueEstimate, FairValueModel, NoSignalReason};
 pub use model::{AlphaModel, AlphaModelConfig, Belief, Evaluation};
 pub use regime::Regime;

@@ -129,6 +129,32 @@ pub fn dir_features(state: &ExoState, sigma_bar_bps: f64) -> DirFeatures {
     }
 }
 
+/// UNVALIDATED research: exogenous continuation pressure for clean directional
+/// regimes (perp basis lead + aggressive flow + OI build + funding tilt).
+/// The component weights are hand-picked, not fit; do not use in any deployed
+/// config until it prints positive on VERIFY (docs/directional_satellite_candidates.md).
+/// Returns signed pressure in [-0.35, 0.35]; 0 when no move is in progress.
+pub fn clean_directional_pressure(state: &ExoState, sigma_bar_bps: f64) -> f64 {
+    let now = state.now_ns;
+    let move_dir = trend_sigma(state, sigma_bar_bps, 300);
+    if move_dir.abs() < 0.08 {
+        return 0.0;
+    }
+    let sgn = if move_dir > 0.0 { 1.0 } else { -1.0 };
+
+    let pressure = match state.perp {
+        Some(p) => {
+            let basis = p.basis_frac(state.spot, now).unwrap_or(0.0);
+            let flow = p.trades.signed_flow_and_adverse(now, 60_000_000_000, true).imbalance;
+            let oi = p.oi_delta_frac(now, 300_000_000_000).unwrap_or(0.0);
+            let funding = p.funding_at(now).unwrap_or(0.0) * 100.0;
+            (basis * 6.0 + flow * 1.8 + oi * 28.0 + funding * 0.5) * sgn
+        }
+        None => 0.0,
+    };
+    pressure.clamp(-0.35, 0.35)
+}
+
 /// Trained P(continuation) logistic head over [`DirFeatures`], fit offline
 /// (scripts/dir_train.py) and loaded from JSON. Features are oriented
 /// move-relative before scoring: signed features flip with the move's

@@ -238,6 +238,9 @@ pub struct HarnessConfig {
     pub collect_training: bool,
     /// Cadence of training-sample collection (seconds into the window).
     pub train_sample_dt_s: u32,
+    /// Skip when decision-time regime is `expanded_mixed`.
+    #[serde(default)]
+    pub skip_expanded_mixed: bool,
     /// Skip when decision-time regime is `expanded_high_flip`.
     #[serde(default)]
     pub skip_expanded_high_flip: bool,
@@ -337,6 +340,7 @@ impl Default for HarnessConfig {
             maker_entry_offset: -1.0,
             collect_training: false,
             train_sample_dt_s: 15,
+            skip_expanded_mixed: false,
             skip_expanded_high_flip: false,
             skip_open_fav_gap: false,
             open_fav_p_min: 0.90,

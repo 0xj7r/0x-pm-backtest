@@ -153,6 +153,9 @@ pub struct BonereaperV2Profile {
 }
 
 impl BonereaperV2Profile {
+    /// Test-only convenience; prod loads profiles via `StrategyProfileFile::load`
+    /// + `selected_strategy_profile`.
+    #[cfg(test)]
     pub fn load(path: &Path) -> Result<Self> {
         StrategyProfileFile::load(path)?.into_bonereaper_v2()
     }
@@ -701,6 +704,7 @@ impl StrategyProfileFile {
         }
     }
 
+    #[cfg(test)]
     pub fn into_bonereaper_v2(self) -> Result<BonereaperV2Profile> {
         match self.bonereaper_v2 {
             Some(profile) => Ok(profile),
@@ -773,17 +777,16 @@ impl VolatilityBand {
 }
 
 impl StratId {
-    pub const ACTIVE: [Self; 5] = [
+    pub const ACTIVE: [Self; 3] = [
         Self::ExoFade,
         Self::MayJuneFade,
-        Self::BackToExplore,
-        Self::PairedMm,
         Self::BonereaperV2,
     ];
 
-    // Intentionally empty: all previously archived strategies have been removed.
-    // The --allow-legacy-strategies flag is kept to avoid breaking existing scripts.
-    pub const ARCHIVED: [Self; 0] = [];
+    // Rejected by the strategy hunt (VERIFY: back_to_explore -$85, paired_mm
+    // -$277; docs/research/strategy-hunt/07-strategy-forward-plan.md).
+    // Runnable only with --allow-legacy-strategies.
+    pub const ARCHIVED: [Self; 2] = [Self::BackToExplore, Self::PairedMm];
 
     pub const ALL: [Self; 5] = [
         Self::ExoFade,

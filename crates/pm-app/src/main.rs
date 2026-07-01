@@ -3935,7 +3935,8 @@ mod tests {
 
     #[test]
     fn parse_strategies_defaults_to_active_set_only() {
-        let parsed = parse_strategies("back_to_explore,paired_mm", false).unwrap();
+        assert!(parse_strategies("back_to_explore,paired_mm", false).is_err());
+        let parsed = parse_strategies("back_to_explore,paired_mm", true).unwrap();
         assert_eq!(parsed, vec![StratId::BackToExplore, StratId::PairedMm]);
     }
 

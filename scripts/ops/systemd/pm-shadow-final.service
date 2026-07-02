@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/home/ubuntu/pm-backtest
-ExecStart=/bin/bash -c 'source /home/ubuntu/pm-backtest/scripts/ops/shadow_final_gated_flags.sh; exec /home/ubuntu/pm-backtest/target/release/pm-app shadow --edge-threshold 0.12 --perp-price-weight 0.75 --exit-after-s 0 --rearm-edge 0.08 --max-clips 2 --min-entry-sigma-bps 3.0 --vol-estimator realized --vol-lookback-s 3600 --skip-saturday --out-dir /home/ubuntu/data/pm-alpha/shadow-final "${SHADOW_FINAL_GATED_FLAGS[@]}"'
+ExecStart=/bin/bash /home/ubuntu/pm-backtest/scripts/ops/shadow_final_foreground.sh
 Restart=always
 RestartSec=10
 StandardOutput=append:/home/ubuntu/data/pm-alpha/shadow-final.log

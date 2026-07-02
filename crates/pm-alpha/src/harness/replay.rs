@@ -1206,3 +1206,307 @@ fn fill(
 fn valid(l: &BookLevel) -> bool {
     l.price > 0.0 && l.price < 1.0 && l.size > 0.0
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::AlphaModel;
+    use crate::state::{MarketMeta, Token};
+    use pm_types::{SpotHistory, SpotTick};
+    use pm_types::tape::{BookLevel, TAPE_DEPTH};
+
+    fn tick_spot(ts_s: i64, price: f64) -> SpotTick {
+        SpotTick {
+            ts_ns: ts_s * 1_000_000_000,
+            price,
+            quantity: 1.0,
+            is_buyer_maker: false,
+        }
+    }
+
+    /// Wavy spot history (nonzero vol) for `secs` seconds, then a +1% jump at
+    /// `jump_at_s` sustained to the end.
+    fn spot_with_jump(secs: i64, jump_at_s: i64) -> SpotHistory {
+        let mut ticks = Vec::new();
+        let base = 100_000.0;
+        for s in 0..secs {
+            let wave = if s % 2 == 0 { 1.00005 } else { 0.99995 };
+            let level = if s >= jump_at_s { base * 1.01 } else { base };
+            ticks.push(tick_spot(s, level * wave));
+        }
+        SpotHistory::new(ticks)
+    }
+
+    fn book_levels(price: f32) -> [BookLevel; TAPE_DEPTH] {
+        let mut levels = [BookLevel::default(); TAPE_DEPTH];
+        levels[0] = BookLevel { price, size: 10_000.0 };
+        levels
+    }
+
+    fn book_tick(ts_s: i64, bid: f32, ask: f32) -> BookTick {
+        BookTick {
+            ts_ns: ts_s * 1_000_000_000,
+            yes_bid: bid,
+            yes_ask: ask,
+            bids: book_levels(bid),
+            asks: book_levels(ask),
+            no_bid: 0.0,
+            no_ask: 0.0,
+            no_bids: [BookLevel::default(); TAPE_DEPTH],
+            no_asks: [BookLevel::default(); TAPE_DEPTH],
+        }
+    }
+
+    /// Market open 2000s, close 2300s, strike 100k (so the pre-open +1% jump
+    /// used below drives the belief ~certain YES from the first decision).
+    fn meta() -> MarketMeta {
+        MarketMeta {
+            token: Token::Btc,
+            window_secs: 300,
+            open_ts_ns: 2_000 * 1_000_000_000,
+            close_ts_ns: 2_300 * 1_000_000_000,
+            strike: 100_000.0,
+        }
+    }
+
+    fn series(resolved_yes: bool, ticks: Vec<BookTick>) -> MarketSeries {
+        MarketSeries {
+            meta: meta(),
+            resolved_yes,
+            ticks,
+            date: "2026-05-01".into(),
+        }
+    }
+
+    /// Constant 0.48/0.50 book across the window; the pre-open jump makes the
+    /// first decision a YES entry at exactly the 0.50 ask.
+    fn flat_book_series(resolved_yes: bool) -> (MarketSeries, SpotHistory) {
+        let ticks = (2_000..2_300).map(|s| book_tick(s, 0.48, 0.50)).collect();
+        (series(resolved_yes, ticks), spot_with_jump(2_400, 1_900))
+    }
+
+    // Entry/settle accounting. Hand-computed: notional 50 at ask 0.50 fills
+    // 100 shares exactly; curve fee 0.07 * 0.50 * 0.50 * 100 = 1.75.
+
+    #[test]
+    fn hold_win_settles_at_one_per_share_net_of_curve_fee() {
+        let (series, spot) = flat_book_series(true);
+        let cfg = HarnessConfig {
+            latency_ms: 0,
+            edge_threshold: 0.3,
+            fee_curve_rate: 0.07,
+            ..HarnessConfig::default()
+        };
+        let out = run_market(&series, &spot, &AlphaModel::default(), &cfg);
+        assert_eq!(out.trades.len(), 1);
+        let t = &out.trades[0];
+        assert_eq!(t.side, Side::Yes);
+        assert!((t.avg_price - 0.50).abs() < 1e-9, "ask fill: {}", t.avg_price);
+        assert!((t.shares - 100.0).abs() < 1e-9, "50 / 0.50: {}", t.shares);
+        assert!((t.fee - 1.75).abs() < 1e-9, "curve fee: {}", t.fee);
+        // 100 * (1.0 - 0.50) - 1.75 = 48.25
+        assert!((t.pnl - 48.25).abs() < 1e-9, "win pnl: {}", t.pnl);
+        assert!(t.won);
+        assert!(t.exit_price.is_none(), "held to redemption");
+    }
+
+    #[test]
+    fn hold_loss_settles_at_zero_net_of_curve_fee() {
+        let (series, spot) = flat_book_series(false);
+        let cfg = HarnessConfig {
+            latency_ms: 0,
+            edge_threshold: 0.3,
+            fee_curve_rate: 0.07,
+            ..HarnessConfig::default()
+        };
+        let out = run_market(&series, &spot, &AlphaModel::default(), &cfg);
+        assert_eq!(out.trades.len(), 1);
+        let t = &out.trades[0];
+        assert!((t.fee - 1.75).abs() < 1e-9, "entry fee still owed: {}", t.fee);
+        // 100 * (0.0 - 0.50) - 1.75 = -51.75
+        assert!((t.pnl + 51.75).abs() < 1e-9, "loss pnl: {}", t.pnl);
+        assert!(!t.won);
+        assert!(t.exit_price.is_none());
+    }
+
+    #[test]
+    fn taker_fee_bps_charges_on_entry_notional() {
+        let (series, spot) = flat_book_series(true);
+        let cfg = HarnessConfig {
+            latency_ms: 0,
+            edge_threshold: 0.3,
+            taker_fee_bps: 100.0,
+            fee_curve_rate: 0.0,
+            ..HarnessConfig::default()
+        };
+        let out = run_market(&series, &spot, &AlphaModel::default(), &cfg);
+        assert_eq!(out.trades.len(), 1);
+        let t = &out.trades[0];
+        // 0.50 * 100 shares * 100bps / 10_000 = 0.50
+        assert!((t.fee - 0.50).abs() < 1e-9, "bps fee: {}", t.fee);
+        // 100 * (1.0 - 0.50) - 0.50 = 49.50
+        assert!((t.pnl - 49.50).abs() < 1e-9, "win pnl: {}", t.pnl);
+    }
+
+    #[test]
+    fn latency_fills_against_the_later_book_state() {
+        // Ask is 0.50 only at the decision tick (t=2000); from t=2001 the
+        // book trades 0.58/0.60. A 2s latency must pay the later 0.60.
+        let spot = spot_with_jump(2_400, 1_900);
+        let ticks = (2_000..2_300)
+            .map(|s| if s == 2_000 { book_tick(s, 0.48, 0.50) } else { book_tick(s, 0.58, 0.60) })
+            .collect();
+        let series = series(true, ticks);
+        let cfg = HarnessConfig {
+            latency_ms: 2_000,
+            edge_threshold: 0.3,
+            ..HarnessConfig::default()
+        };
+        let out = run_market(&series, &spot, &AlphaModel::default(), &cfg);
+        assert_eq!(out.trades.len(), 1);
+        let t = &out.trades[0];
+        assert_eq!(t.decision_ts_ns, 2_000 * 1_000_000_000);
+        assert_eq!(t.fill_ts_ns, 2_002 * 1_000_000_000, "first tick >= T + latency");
+        assert!((t.avg_price - 0.60).abs() < 1e-6, "fills the later ask: {}", t.avg_price);
+
+        // Zero latency fills the decision tick's own 0.50 ask.
+        let out0 = run_market(
+            &series,
+            &spot,
+            &AlphaModel::default(),
+            &HarnessConfig { latency_ms: 0, ..cfg },
+        );
+        let t0 = &out0.trades[0];
+        assert_eq!(t0.fill_ts_ns, t0.decision_ts_ns);
+        assert!((t0.avg_price - 0.50).abs() < 1e-6, "decision-tick ask: {}", t0.avg_price);
+    }
+
+    #[test]
+    fn rearm_ladder_stops_at_max_clips() {
+        // Dislocation open 0.50/0.52 in [2000,2100) and [2150,2200) and
+        // [2250,close); closed 0.97/0.99 in between (both edges collapse
+        // below the re-arm level). Expected: enter at 2000, re-arm during the
+        // first closure, enter again at 2150, then STOP: the third window is
+        // never entered because max_clips = 2 is spent.
+        let spot = spot_with_jump(2_400, 1_900);
+        let ticks = (2_000..2_300)
+            .map(|s| {
+                if (2_100..2_150).contains(&s) || (2_200..2_250).contains(&s) {
+                    book_tick(s, 0.97, 0.99)
+                } else {
+                    book_tick(s, 0.50, 0.52)
+                }
+            })
+            .collect();
+        let series = series(true, ticks);
+        let cfg = HarnessConfig {
+            latency_ms: 0,
+            edge_threshold: 0.16,
+            max_clips: 2,
+            clip_cooldown_ms: 1_000,
+            rearm_edge: 0.04,
+            ..HarnessConfig::default()
+        };
+        let out = run_market(&series, &spot, &AlphaModel::default(), &cfg);
+        assert_eq!(out.trades.len(), 2, "exactly max_clips entries");
+        assert_eq!(out.trades[0].decision_ts_ns, 2_000 * 1_000_000_000);
+        assert_eq!(
+            out.trades[1].decision_ts_ns,
+            2_150 * 1_000_000_000,
+            "re-entry only once the dislocation closed and reopened"
+        );
+        assert!(
+            out.trades.iter().all(|t| t.decision_ts_ns < 2_250 * 1_000_000_000),
+            "no third clip into the last window"
+        );
+    }
+
+    #[test]
+    fn belief_pass_emits_no_decisions_inside_the_stop_window() {
+        let (series, spot) = flat_book_series(true);
+        let cfg = HarnessConfig {
+            stop_before_close_s: 60,
+            ..HarnessConfig::default()
+        };
+        let pass = belief_pass(&series, &spot, None, None, &AlphaModel::default(), &cfg);
+        assert!(!pass.decisions.is_empty());
+        let deadline_ns = series.meta.close_ts_ns - 60 * 1_000_000_000;
+        assert!(pass.decisions.iter().all(|d| d.ts_ns < deadline_ns));
+        // Ticks are 1s apart with a 1s decision cadence: the last decision
+        // sits exactly one tick before the cutoff, so the bound is tight.
+        assert_eq!(
+            pass.decisions.last().unwrap().ts_ns,
+            deadline_ns - 1_000_000_000
+        );
+    }
+
+    /// All-zero logistic head: p_continuation is exactly sigmoid(0) = 0.5.
+    fn unit_dir_model() -> crate::directional::DirModel {
+        crate::directional::DirModel {
+            w: [0.0; crate::directional::DIR_FEATURES],
+            b: 0.0,
+            mu: [0.0; crate::directional::DIR_FEATURES],
+            sd: [1.0; crate::directional::DIR_FEATURES],
+        }
+    }
+
+    #[test]
+    fn fade_mode_never_emits_dir_belief_even_with_a_dir_model() {
+        let (series, spot) = flat_book_series(true);
+        let model = AlphaModel {
+            dir_model: Some(unit_dir_model()),
+            ..AlphaModel::default()
+        };
+        let cfg = HarnessConfig {
+            entry_mode: EntryMode::Fade,
+            ..HarnessConfig::default()
+        };
+        let pass = belief_pass(&series, &spot, None, None, &model, &cfg);
+        assert!(!pass.dir_model_active, "dir model must not gate Fade runs");
+        assert!(!pass.decisions.is_empty());
+        assert!(pass.decisions.iter().all(|d| d.dir_p_up.is_none()));
+        assert!(
+            pass.decisions.iter().all(|d| d.regime_at_decision.is_some()),
+            "regime must classify on a warm spot tape"
+        );
+    }
+
+    #[test]
+    fn aligned_mode_emits_dir_belief_while_a_move_is_in_progress() {
+        // Spot jumps +1% at t=2050 (in-window): decisions in the following
+        // ~60s see |trend_60s| >= 0.5 sigma, so the dir head fires; the
+        // pre-jump wavy tape has no move and must stay None.
+        let spot = spot_with_jump(2_400, 2_050);
+        let ticks = (2_000..2_300).map(|s| book_tick(s, 0.48, 0.50)).collect();
+        let series = series(true, ticks);
+        let model = AlphaModel {
+            dir_model: Some(unit_dir_model()),
+            ..AlphaModel::default()
+        };
+        let cfg = HarnessConfig {
+            entry_mode: EntryMode::Aligned,
+            ..HarnessConfig::default()
+        };
+        let pass = belief_pass(&series, &spot, None, None, &model, &cfg);
+        assert!(pass.dir_model_active);
+        assert!(
+            pass.decisions
+                .iter()
+                .filter(|d| d.ts_ns < 2_050 * 1_000_000_000)
+                .all(|d| d.dir_p_up.is_none()),
+            "no move in progress before the jump"
+        );
+        let during_move: Vec<_> = pass
+            .decisions
+            .iter()
+            .filter(|d| {
+                (2_051 * 1_000_000_000..2_100 * 1_000_000_000).contains(&d.ts_ns)
+            })
+            .collect();
+        assert!(!during_move.is_empty());
+        for d in during_move {
+            let p = d.dir_p_up.expect("move in progress must carry a dir belief");
+            assert!((p - 0.5).abs() < 1e-12, "all-zero head is exactly 0.5: {p}");
+        }
+    }
+}

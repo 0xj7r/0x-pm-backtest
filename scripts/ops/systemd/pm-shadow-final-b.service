@@ -1,0 +1,17 @@
+[Unit]
+Description=pm-alpha shadow-final-b (decision twin: identical config, independent feeds; measures decision stability)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/pm-backtest
+Environment=SHADOW_FINAL_OUT=/home/ubuntu/data/pm-alpha/shadow-final-b
+ExecStart=/bin/bash /home/ubuntu/pm-backtest/scripts/ops/shadow_final_foreground.sh
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/ubuntu/data/pm-alpha/shadow-final-b.log
+StandardError=append:/home/ubuntu/data/pm-alpha/shadow-final-b.log
+
+[Install]
+WantedBy=default.target

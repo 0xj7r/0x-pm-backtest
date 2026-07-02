@@ -227,6 +227,10 @@ pub enum LogEvent {
         model_book_gap: f64,
         /// Seconds since window open at entry.
         secs_from_open: u32,
+        /// Seconds the belief has held its current side (since last
+        /// sign(p_exo - 0.5) flip, or first belief). Dwell-gate telemetry.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        belief_dwell_s: Option<f64>,
         /// Spot vs strike in bps: `(S - K) / K * 10_000`.
         delta_bps: f64,
         /// `pm_alpha::calibrator::exo_features` vector (16); see `EXO_FEATURE_NAMES`.
@@ -486,6 +490,11 @@ pub struct MarketWindow {
     pub entry: EntryState,
     /// Deferred `decide_entry` delta when live execution commits after submit.
     pub pending_commit: Option<EntryStateDelta>,
+    /// Belief-dwell telemetry: last tick when sign(p_exo - 0.5) flipped (or
+    /// first belief). Logged on would_enter; NOT a decision input.
+    pub belief_flip_ns: Option<i64>,
+    /// Sign of the last observed belief (p_exo > 0.5).
+    pub belief_up: Option<bool>,
 }
 
 /// Rolling per-venue price prints on the local receipt clock, plus
@@ -1314,6 +1323,12 @@ impl ShadowCore {
             let Some(ev) = self.model.evaluate(&state, false) else {
                 continue;
             };
+            // Belief-dwell telemetry (logged only; never a decision input).
+            let up_now = ev.p > 0.5;
+            if m.belief_up != Some(up_now) {
+                m.belief_up = Some(up_now);
+                m.belief_flip_ns = Some(now_ns);
+            }
             let (Some(up_ask), Some(down_ask)) = (
                 self.books.get(&m.up_token).and_then(Ladder::best_ask),
                 self.books.get(&m.down_token).and_then(Ladder::best_ask),
@@ -1492,6 +1507,9 @@ impl ShadowCore {
                 spot_ret_900s_bps,
                 model_book_gap,
                 secs_from_open,
+                belief_dwell_s: m
+                    .belief_flip_ns
+                    .map(|f| (now_ns.saturating_sub(f)) as f64 / 1e9),
                 delta_bps,
                 exo_features,
                 dir_features,
@@ -2831,6 +2849,8 @@ mod feeds {
                 next_entry_ns: i64::MIN,
             },
             pending_commit: None,
+            belief_flip_ns: None,
+            belief_up: None,
         })
     }
 
@@ -3241,6 +3261,8 @@ mod tests {
                 next_entry_ns: i64::MIN,
             },
             pending_commit: None,
+            belief_flip_ns: None,
+            belief_up: None,
         }
     }
 

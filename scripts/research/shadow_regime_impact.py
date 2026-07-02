@@ -134,7 +134,7 @@ def main() -> int:
         draw_log = [r for r in logged_rows if r["period"] == "drawdown"]
         if draw_log:
             dm, _, _ = bootstrap_ci([r["pnl_usd"] for r in draw_log])
-            w(f"#### Logged regime — drawdown only (n={len(draw_log)})")
+            w(f"#### Logged regime: drawdown only (n={len(draw_log)})")
             w("")
             write_bucket_table(lines, "drawdown logged", group_by(draw_log, "regime_logged"), dm, min_n=3)
 

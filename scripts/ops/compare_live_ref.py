@@ -2,8 +2,8 @@
 """LIVE executor ↔ shadow-final would_enter parity (UP and DOWN).
 
 Checks:
-  1. ORPHAN LIVE — LIVE ENTER with no matching REF would_enter
-  2. MISSED REF→LIVE — REF would_enter with no matching LIVE ENTER (catches
+  1. ORPHAN LIVE: LIVE ENTER with no matching REF would_enter
+  2. MISSED REF→LIVE: REF would_enter with no matching LIVE ENTER (catches
      accidental side cutoff, submit failures, tail lag)
 
 Usage:

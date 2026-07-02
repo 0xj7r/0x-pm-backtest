@@ -9,7 +9,7 @@ LOG="${SHADOW_EXEC_LOG:-$HOME/data/pm-alpha/shadow_exec_tail.log}"
 PID_FILE="${SHADOW_EXEC_PID:-$HOME/data/pm-alpha/shadow_exec_tail.pid}"
 
 if [[ -f "$HOME/fade.kill" ]]; then
-  echo "kill switch active — not restarting executor" >&2
+  echo "kill switch active: not restarting executor" >&2
   exit 1
 fi
 

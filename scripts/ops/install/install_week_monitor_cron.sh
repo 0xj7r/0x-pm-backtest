@@ -2,7 +2,7 @@
 # Install hands-off week monitor cron on Dublin. Disables night clip scaler.
 set -euo pipefail
 
-MONITOR="${MONITOR:-$HOME/scripts/shadow_week_monitor.sh}"
+MONITOR="${MONITOR:-$HOME/pm-backtest/scripts/ops/shadow_week_monitor.sh}"
 NIGHT_MARKER="shadow-night-monitor DISABLED"
 WEEK_MARKER="shadow-week-monitor"
 
@@ -16,7 +16,7 @@ crontab -l 2>/dev/null \
   > "$TMP" || true
 
 cat >> "$TMP" <<EOF
-# $NIGHT_MARKER for hands-off week — re-enable manually
+# $NIGHT_MARKER for hands-off week: re-enable manually
 0 */4 * * * $MONITOR >> $HOME/data/pm-alpha/week_monitor/cron.log 2>&1  # $WEEK_MARKER
 EOF
 

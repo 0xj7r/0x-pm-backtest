@@ -162,7 +162,7 @@ def main() -> int:
             qty_g = sm.group("qty")
             avg_fill = float(fill_g) if fill_g else None
             filled_qty = float(qty_g) if qty_g else None
-            # Pair with most recent LIVE ENTER for this slug (any clip — rearm)
+            # Pair with most recent LIVE ENTER for this slug (any clip: rearm)
             cand = None
             for (s, _clip), ent in pending_enter.items():
                 if s != slug:

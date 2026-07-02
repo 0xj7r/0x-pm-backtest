@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Gated mom30_ask045 daily P&L for June — base + execution stress rows per day.
+# Gated mom30_ask045 daily P&L for June: base + execution stress rows per day.
 #
 # Variants per day:
-#   base    — optimistic book (depth_capture=1.0)
-#   depth25 — 25% depth capture (live competition stress)
-#   stress  — depth25 + skip_touch_level (lose the race at touch)
+#   base   : optimistic book (depth_capture=1.0)
+#   depth25: 25% depth capture (live competition stress)
+#   stress : depth25 + skip_touch_level (lose the race at touch)
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 

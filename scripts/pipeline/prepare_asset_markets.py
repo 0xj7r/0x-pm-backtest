@@ -46,7 +46,7 @@ import pyarrow.parquet as pq
 try:
     import s3fs  # type: ignore
 except Exception:
-    s3fs = None  # lazy — only needed for direct s3 parquet reads
+    s3fs = None  # lazy: only needed for direct s3 parquet reads
 
 
 def parse_close_ts(slug: str) -> int | None:
@@ -201,7 +201,7 @@ def main() -> int:
         markets = discover_from_parquet(args.master_parquet, slug_prefix, args.start_date, args.end_date)
 
     if not markets:
-        print("ERROR: zero markets discovered — check dates, prefix, and input data", file=sys.stderr)
+        print("ERROR: zero markets discovered: check dates, prefix, and input data", file=sys.stderr)
         return 2
 
     out_dir = Path(args.out_dir)

@@ -44,12 +44,17 @@ def day_events(shadow_dir: Path, day: str) -> dict:
 
 
 def day_parity(exec_log: Path, day: str) -> dict:
-    """Last parity_stats of the day plus mismatch/orphan event counts."""
-    last_stats: dict = {}
+    """Per-day parity: event counts plus DELTAS of the cumulative
+    parity_stats counters (first-to-last within the day, summed across
+    counter resets from process restarts). The raw cumulative counters are
+    process-lifetime totals and must never be compared to thresholds
+    directly, or one old orphan fails every subsequent soak day."""
     orphans = 0
     mismatches = 0
+    stats_seq: list[dict] = []
     if not exec_log.exists():
-        return {"orphan_events": -1, "mismatch_events": -1, "last_stats": {}}
+        return {"orphan_events": -1, "mismatch_events": -1, "matched_delta": 0,
+                "orphan_delta": -1, "missed_delta": -1}
     for line in open(exec_log, errors="replace"):
         if day not in line:
             continue
@@ -57,14 +62,35 @@ def day_parity(exec_log: Path, day: str) -> dict:
             m = PARITY_RE.search(line)
             if m:
                 try:
-                    last_stats = json.loads(m.group(0))
+                    stats_seq.append(json.loads(m.group(0)))
                 except json.JSONDecodeError:
                     pass
         elif '"kind":"orphan"' in line:
             orphans += 1
         elif '"kind":"mismatch"' in line or "side mismatch" in line:
             mismatches += 1
-    return {"orphan_events": orphans, "mismatch_events": mismatches, "last_stats": last_stats}
+
+    def delta(key: str) -> int:
+        total = 0
+        prev = None
+        for s in stats_seq:
+            cur = int(s.get(key, 0))
+            if prev is None or cur < prev:
+                # First sample of the day, or a counter reset (restart):
+                # count the full value of the new segment.
+                total += cur
+            else:
+                total += cur - prev
+            prev = cur
+        return total
+
+    return {
+        "orphan_events": orphans,
+        "mismatch_events": mismatches,
+        "matched_delta": delta("matched"),
+        "orphan_delta": delta("orphan"),
+        "missed_delta": delta("missed_ref"),
+    }
 
 
 def main() -> int:
@@ -80,13 +106,12 @@ def main() -> int:
 
     ev = day_events(Path(args.shadow_dir), day)
     pa = day_parity(Path(args.exec_log), day)
-    stats = pa["last_stats"]
 
     checks = {
         "heartbeats": ev["heartbeats"] >= MIN_HEARTBEATS,
         "entries": is_saturday or ev["entries"] > 0,
-        "orphan": pa["orphan_events"] == 0 and stats.get("orphan", 0) == 0,
-        "missed_ref": stats.get("missed_ref", 0) <= MAX_MISSED,
+        "orphan": pa["orphan_events"] == 0 and pa["orphan_delta"] == 0,
+        "missed_ref": pa["missed_delta"] <= MAX_MISSED,
         "mismatch": pa["mismatch_events"] == 0,
     }
     verdict = "PASS" if all(checks.values()) else "FAIL"
@@ -94,9 +119,9 @@ def main() -> int:
 
     line = (
         f"{day} {verdict} hb={ev['heartbeats']} entries={ev['entries']}"
-        f" resol={ev['resolutions']} matched={stats.get('matched', 0)}"
-        f" orphan={pa['orphan_events']}/{stats.get('orphan', 0)}"
-        f" missed={stats.get('missed_ref', 0)} mismatch={pa['mismatch_events']}"
+        f" resol={ev['resolutions']} matched={pa['matched_delta']}"
+        f" orphan={pa['orphan_events']}/{pa['orphan_delta']}"
+        f" missed={pa['missed_delta']} mismatch={pa['mismatch_events']}"
         f" failed={failed}{' (saturday)' if is_saturday else ''}"
     )
     print(line)

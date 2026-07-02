@@ -8,6 +8,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/ops/shadow_final_gated_flags.sh
 source "$SCRIPT_DIR/shadow_final_gated_flags.sh"
 
+# When the systemd unit owns the engine, delegate: a nohup copy alongside the
+# unit means two engines writing interleaved JSONLs (Restart=always respawns
+# whatever this script pkills).
+if systemctl --user is-enabled pm-shadow-final.service >/dev/null 2>&1; then
+  echo "pm-shadow-final.service is installed; delegating to systemctl --user restart"
+  exec systemctl --user restart pm-shadow-final.service
+fi
+
 BIN="${SHADOW_FINAL_BIN:-$HOME/pm-backtest/target/release/pm-app}"
 OUT_DIR="${SHADOW_FINAL_OUT:-$HOME/data/pm-alpha/shadow-final}"
 LOG="${SHADOW_FINAL_LOG:-$HOME/data/pm-alpha/shadow-final.log}"

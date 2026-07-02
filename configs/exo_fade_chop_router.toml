@@ -1,17 +1,13 @@
-# Exo fade with chop/day decision router active.
-# Goal: protect the mean-reversion fade from bleeding on high-flip chop
-# and certain expanded regimes, while leaving room for directional sleeve later.
+# Exo fade with chop/day decision router: EXPERIMENT NOTES ONLY.
 #
-# Usage (walk-forward):
-#   pm-app walk-forward \
-#     --markets data/manifests/canonical/btc-updown-5m_up.jsonl \
-#     --profile configs/exo_fade_chop_router.toml \
-#     --strategies exo_fade \
-#     --portfolio-mode --starting-cash 1000 \
-#     --local-cache-dir data/cache --spot-symbol BTCUSDT --perp-symbol BTCUSDT
-#
-# To layer directional complement, also pass bonereaper_v2 or aligned flags
-# and a router policy (see docs/global_regime_classifier_router.md + router_policy_search.py).
+# WARNING (2026-07-02 review): pm-app walk-forward --profile does NOT parse
+# [strategy.exo_fade] sections (StrategyProfileFile supports bonereaper_v2 /
+# back_to_explore only). Passing this file to walk-forward runs the ungated
+# champion config while printing a warning, which invalidates any gate
+# experiment. To actually run these gates, use the alpha harness CLI flags:
+#   pm-app alpha ... --skip-calm --skip-expanded-mixed
+# or the shadow CLI equivalents. This file is retained as a parameter record
+# until exo_fade profile parsing exists.
 
 [profile]
 name = "exo_fade_chop_router"

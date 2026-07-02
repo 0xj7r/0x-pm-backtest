@@ -160,7 +160,7 @@ def main() -> int:
     res_idx = index_resolutions(entries, resolutions)
 
     labeled = sum(1 for e in entries if e.get("regime"))
-    print(f"# Regime gate sweep — {args.shadow_dir}")
+    print(f"# Regime gate sweep: {args.shadow_dir}")
     if cutoff:
         print(f"since {args.since}")
     print(f"would_enter: {len(entries)}  labeled: {labeled}  resolved: {len(res_idx)}")

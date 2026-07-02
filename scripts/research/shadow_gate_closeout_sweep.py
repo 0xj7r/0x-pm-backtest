@@ -2,7 +2,7 @@
 """Full prod gate closeout sweep: regime + spot-misalign horizon + min_entry_ask.
 
 Replays shadow-final `would_enter` rows against `resolution` ladder PnL.
-Uses logged `regime` (decision-time classifier) — same field `decide_entry` gates on.
+Uses logged `regime` (decision-time classifier): same field `decide_entry` gates on.
 
 Usage:
   python3 scripts/research/shadow_gate_closeout_sweep.py \\
@@ -170,7 +170,7 @@ def main() -> int:
     labeled = sum(1 for r in rows if r.get("regime_logged"))
     logged_rows = [r for r in rows if r.get("regime_logged")]
 
-    print(f"# Gate closeout sweep — {shadow_dir}")
+    print(f"# Gate closeout sweep: {shadow_dir}")
     print(f"since {args.since}")
     print(f"paired: {len(rows)}  regime-labeled: {labeled}")
     print()

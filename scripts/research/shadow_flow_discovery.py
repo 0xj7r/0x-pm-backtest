@@ -2,7 +2,7 @@
 """Discovery screen on shadow-final labeled entries (05-quant-signals protocol).
 
 Ranks exo/dir/flow/spot features by loser separation (SMD, AUC for P(loss)).
-Works on historical JSONL even before live flow telemetry — uses logged spot_ret
+Works on historical JSONL even before live flow telemetry: uses logged spot_ret
 and dir/exo vectors; enriched flow fields scored when present.
 
 Usage:

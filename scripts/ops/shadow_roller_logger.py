@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Shadow BTC 5m complete-set roller — log-only soak for split/dump/redeem timing.
+"""Shadow BTC 5m complete-set roller: log-only soak for split/dump/redeem timing.
 
 Mirrors wallet 0x4d64518a… roller cadence without submitting CTF or CLOB orders.
 Writes JSONL to --out-dir for parity checks against live wallet activity.
 
 Events:
-  roller_would_split   — T+split_offset_s after window open
-  roller_would_dump    — T-dump_before_close_s when loser best_bid <= penny_max
-  roller_would_redeem  — T+redeem_after_close_s after window close
+  roller_would_split  : T+split_offset_s after window open
+  roller_would_dump   : T-dump_before_close_s when loser best_bid <= penny_max
+  roller_would_redeem : T+redeem_after_close_s after window close
 
 Usage:
   python3 scripts/ops/shadow_roller_logger.py \\

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Safe local data cleanup — frees disk without breaking validation/backtest.
+# Safe local data cleanup: frees disk without breaking validation/backtest.
 #
 # What this removes (default):
 #   1. raw/telonex partitions for dates that already have merged tick caches
@@ -54,9 +54,9 @@ rm_path() {
   local kb
   kb=$(du -sk "$p" 2>/dev/null | awk '{print $1}')
   if [[ "$DRY_RUN" == "1" ]]; then
-    echo "DRY  would rm -rf $p  (${kb}K) — $reason"
+    echo "DRY  would rm -rf $p  (${kb}K): $reason"
   else
-    echo "DEL  rm -rf $p  (${kb}K) — $reason"
+    echo "DEL  rm -rf $p  (${kb}K): $reason"
     rm -rf "$p"
   fi
   freed_kb=$((freed_kb + kb))
@@ -91,7 +91,7 @@ for day in ticks:
             continue
         kb = int(subprocess.check_output(["du", "-sk", p]).split()[0].decode())
         tag = "DRY " if dry == "1" else "DEL "
-        print(f"{tag} rm -rf {p}  ({kb}K) — tick cache exists for {day}", file=sys.stderr, flush=True)
+        print(f"{tag} rm -rf {p}  ({kb}K): tick cache exists for {day}", file=sys.stderr, flush=True)
         if dry != "1":
             shutil.rmtree(p)
         freed_kb += kb
@@ -138,7 +138,7 @@ fi
 echo ""
 echo "=== summary ==="
 if [[ "$DRY_RUN" == "1" ]]; then
-  echo "DRY RUN — no files deleted"
+  echo "DRY RUN: no files deleted"
 else
   freed_gb=$(awk "BEGIN {printf \"%.2f\", $freed_kb/1024/1024}")
   echo "freed: ${freed_gb} GB (${freed_kb} KB)"

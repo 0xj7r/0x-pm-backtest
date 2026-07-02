@@ -68,4 +68,4 @@ echo "  Runs daily at ${HOUR}:00 (system local TZ; set TZ=${TZ_NAME} in ProgramA
 echo "  Logs: ${LOG_DIR}/daily_win_whatsapp_relay.log"
 echo ""
 echo "Disable Dublin Telegram duplicate:"
-echo "  ssh Dublin 'crontab -l | sed \"s|python3 .*shadow_daily_win_summary.py|python3 ~/scripts/shadow_daily_win_summary.py --notify none|\" | crontab -'"
+echo "  ssh Dublin 'crontab -l | sed \"s|python3 .*shadow_daily_win_summary.py|python3 ~/pm-backtest/scripts/ops/shadow_daily_win_summary.py --notify none|\" | crontab -'"

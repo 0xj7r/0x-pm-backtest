@@ -13,6 +13,9 @@ EnvironmentFile=/home/ubuntu/.config/polymarket-exec/shadow_exec_tail.env
 Environment=PAPER_MODE=1
 Environment=PM_SHADOW_PAPER_MODE=true
 Environment=PM_SHADOW_LIVE_TRADE=false
+# Give a just-(re)started engine time to create its new JSONL before the
+# tailer picks the latest file in the directory.
+ExecStartPre=/bin/sleep 5
 ExecStart=/home/ubuntu/deploy-main/polymarket-agent/target/release/shadow_exec_tail --paper
 Restart=always
 RestartSec=10

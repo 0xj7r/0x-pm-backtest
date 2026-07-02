@@ -32,7 +32,7 @@ if [[ -f ${PID_FILE} ]] && kill -0 "\$(cat ${PID_FILE})" 2>/dev/null; then
   echo "sidecar already running pid=\$(cat ${PID_FILE})"
   exit 0
 fi
-nohup python3 ${REPO}/scripts/shadow_gate_sidecar.py \\
+nohup python3 ${REPO}/scripts/research/shadow_gate_sidecar.py \\
   --shadow-dir ${DATA}/shadow-final \\
   --out ${DATA}/shadow-gate-ab/gate_ab.jsonl \\
   --state ${DATA}/shadow-gate-ab/tail_state.json \\
@@ -50,7 +50,7 @@ EOF
     ;;
   score)
     SINCE="${2:-}"
-    run_remote "python3 ${REPO}/scripts/score_shadow_gate_ab.py --gate-ab ${DATA}/shadow-gate-ab/gate_ab.jsonl --shadow-dir ${DATA}/shadow-final ${SINCE:+--since $SINCE}"
+    run_remote "python3 ${REPO}/scripts/research/score_shadow_gate_ab.py --gate-ab ${DATA}/shadow-gate-ab/gate_ab.jsonl --shadow-dir ${DATA}/shadow-final ${SINCE:+--since $SINCE}"
     ;;
   *)
     echo "Usage: $0 {start|stop|status|score [ISO_UTC]}"

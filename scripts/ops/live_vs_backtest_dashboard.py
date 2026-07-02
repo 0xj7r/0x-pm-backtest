@@ -702,7 +702,7 @@ def main() -> int:
             f"${bt_base['usd_per_day']:+,.0f}/day"
         )
     else:
-        lines.append("June ungated: (no TSV — pass --backtest-baseline-tsv)")
+        lines.append("June ungated: (no TSV: pass --backtest-baseline-tsv)")
     if bt_gated:
         lines.append(
             f"June gated base ({bt_gated.get('days', 0)}d): "
@@ -711,7 +711,7 @@ def main() -> int:
             f"${bt_gated['usd_per_day']:+,.0f}/day  [optimistic fills]"
         )
     else:
-        lines.append("June gated base: (no TSV — pass --backtest-gated-tsv)")
+        lines.append("June gated base: (no TSV: pass --backtest-gated-tsv)")
     if bt_gated_depth25:
         lines.append(
             f"June gated depth25: "
@@ -758,11 +758,11 @@ def main() -> int:
     lines.append("--- Significance (heuristic, 95%) ---")
     lines.append(
         f"LIVE hit CI vs VERIFY {args.verify_hit:.1f}%: "
-        f"[{e0.hit_ci_lo:.1f}%, {e0.hit_ci_hi:.1f}%] — "
+        f"[{e0.hit_ci_lo:.1f}%, {e0.hit_ci_hi:.1f}%]: "
         f"need ~{sig_hit or 0} more resolved legs to ±4pp"
     )
     lines.append(
-        f"LIVE ${e0.usd_per_trade:+.2f}/tr vs VERIFY ${args.verify_upt:.2f}/tr — "
+        f"LIVE ${e0.usd_per_trade:+.2f}/tr vs VERIFY ${args.verify_upt:.2f}/tr: "
         f"need ~{sig_upt or 0} more legs to detect ${e0.usd_per_trade:+.0f} vs target"
     )
     if legs_per_day > 0:
@@ -778,7 +778,7 @@ def main() -> int:
         f"matched={parity['matched']}  orphans={parity['orphans']}  missed_ref={parity['missed_ref']}"
     )
     lines.append("")
-    lines.append("Note: backtest hit% often > live REF — compare $/tr & slug parity before verdict.")
+    lines.append("Note: backtest hit% often > live REF: compare $/tr & slug parity before verdict.")
 
     text = "\n".join(lines)
     print(text)

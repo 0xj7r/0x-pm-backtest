@@ -436,7 +436,7 @@ def main() -> int:
     w("")
 
     if feat_rank_bad:
-        w("## Loser separation — Jun 17–19 drawdown only")
+        w("## Loser separation: Jun 17–19 drawdown only")
         w("")
         w("| Feature | SMD | mean(win) | mean(loss) |")
         w("|---------|-----|-----------|------------|")

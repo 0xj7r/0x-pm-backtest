@@ -268,9 +268,14 @@ def leg_pnl(leg: dict, res: dict, clip_usd: float) -> tuple[float, bool, bool]:
     won = bool(res.get("won"))
     price = leg.get("fill_price")
     qty = leg.get("fill_qty")
-    if price and qty and price > 0:
-        sps = (1.0 - price) if won else (-price)
-        return sps * qty, won, True
+    if price is not None and qty is not None:
+        # Fill fields were logged: trust them, including qty == 0 (an
+        # accepted-but-unfilled order has NO position; booking the intended
+        # notional here is exactly the +$278-vs--$419 ledger bug).
+        if price > 0 and qty > 0:
+            sps = (1.0 - price) if won else (-price)
+            return sps * qty, won, True
+        return 0.0, won, True
     touch = leg["touch"]
     if touch <= 0:
         return 0.0, won, False

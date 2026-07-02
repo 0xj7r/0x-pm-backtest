@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shadow A/B gate sidecar — tails shadow-final JSONL without restarting the engine.
+"""Shadow A/B gate sidecar: tails shadow-final JSONL without restarting the engine.
 
 Evaluates counterfactual gates on each baseline `would_enter` and logs `gate_eval`
 lines to a separate JSONL. Session state (loss streaks, last win/side) advances on

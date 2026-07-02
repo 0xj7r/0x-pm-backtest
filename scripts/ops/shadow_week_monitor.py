@@ -171,7 +171,7 @@ def parity_submitted(
             if m and m.group("acc") == "true":
                 subs.append({"slug": m.group("slug"), "epoch": epoch})
                 continue
-            # Fallback: LIVE ENTER after deploy only pairs with prior context — skip
+            # Fallback: LIVE ENTER after deploy only pairs with prior context: skip
 
     orphans = 0
     matched_ref: set[int] = set()
@@ -262,7 +262,7 @@ def main() -> int:
     ap.add_argument("--kill-switch", default=os.path.expanduser("~/fade.kill"))
     ap.add_argument(
         "--compare-script",
-        default=os.path.expanduser("~/scripts/compare_live_ref.py"),
+        default=os.path.expanduser("~/pm-backtest/scripts/ops/compare_live_ref.py"),
     )
     ap.add_argument("--wallet-env", default=os.path.expanduser("~/.config/polymarket-exec/wallet.env"))
     ap.add_argument(

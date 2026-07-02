@@ -8,11 +8,11 @@ DATA="${DATA:-$HOME/data/pm-alpha}"
 
 # Fallback script locations
 if [[ ! -f "$SCRIPT" ]]; then
-  SCRIPT="$HOME/scripts/shadow_week_monitor.py"
+  SCRIPT="$HOME/pm-backtest/scripts/ops/shadow_week_monitor.py"
 fi
 
 export PYTHONUNBUFFERED=1
 exec python3 "$SCRIPT" \
   --data-dir "$DATA" \
-  --compare-script "${COMPARE_SCRIPT:-$HOME/scripts/compare_live_ref.py}" \
+  --compare-script "${COMPARE_SCRIPT:-$HOME/pm-backtest/scripts/ops/compare_live_ref.py}" \
   "$@"

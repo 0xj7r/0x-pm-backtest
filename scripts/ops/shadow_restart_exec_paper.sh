@@ -33,7 +33,7 @@ set +a
 export PAPER_MODE=1
 export PM_SHADOW_PAPER_MODE=true
 export PM_SHADOW_LIVE_TRADE=false
-# fade.kill may stay in place — paper mode bypasses kill-switch (live money still blocked).
+# fade.kill may stay in place: paper mode bypasses kill-switch (live money still blocked).
 
 nohup "$BIN" --paper >> "$LOG" 2>&1 &
 echo $! > "$PID_FILE"

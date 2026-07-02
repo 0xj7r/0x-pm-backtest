@@ -201,7 +201,7 @@ def main() -> int:
 
     print("=" * 62)
     print(
-        f"REF shadow-final — last {args.hours:g}h "
+        f"REF shadow-final: last {args.hours:g}h "
         f"(since {cutoff.strftime('%H:%M')} UTC)"
     )
     print(f"Now: {now.strftime('%Y-%m-%d %H:%M:%S')} UTC")
@@ -228,7 +228,7 @@ def main() -> int:
         )
         print()
         print("=" * 62)
-        print(f"LIVE shadow_exec_tail — last {args.hours:g}h (@ ${args.live_clip_usd:.0f}/clip)")
+        print(f"LIVE shadow_exec_tail: last {args.hours:g}h (@ ${args.live_clip_usd:.0f}/clip)")
         print("=" * 62)
         print(f"  LIVE ENTER:      {len(live_entries)}")
         print(f"  redeemed slugs:  {len(redeemed)}")

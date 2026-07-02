@@ -322,7 +322,10 @@ impl ExoFadeStrategy {
         if !agrees {
             return b.p_up;
         }
-        (b.p_up + dir_pressure * self.cfg.directional_tilt_strength * 0.15).clamp(0.05, 0.95)
+        // Never let the clamp pull an already-extreme belief back toward 0.5:
+        // the tilt may only move p further in the agreed direction.
+        let tilted = b.p_up + dir_pressure * self.cfg.directional_tilt_strength * 0.15;
+        tilted.clamp(0.05f64.min(b.p_up), 0.95f64.max(b.p_up))
     }
 
     fn market_meta(&self, ctx: &Ctx) -> Option<MarketMeta> {
@@ -523,9 +526,11 @@ impl ExoFadeStrategy {
             AlphaSide::Yes => yes_ask,
             AlphaSide::No => no_buy,
         };
+        // Size from the same belief the entry decision used (effective_p ==
+        // b.p_up whenever the tilt is off).
         let p_side = match decision.side {
-            AlphaSide::Yes => b.p_up,
-            AlphaSide::No => 1.0 - b.p_up,
+            AlphaSide::Yes => effective_p,
+            AlphaSide::No => 1.0 - effective_p,
         };
         let notional = self
             .size_notional(ctx, p_side, side_ask)

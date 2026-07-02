@@ -59,11 +59,11 @@ LIVE_LOG="$LIVE_LOG"
 DAY_UTC="$DAY_UTC"
 SINCE_HOURS="$SINCE_HOURS"
 
-echo "=== Shadow P&L — last 1h ==="
+echo "=== Shadow P&L: last 1h ==="
 python3 /tmp/shadow_pnl_hour.py --hours 1
 
 echo
-echo "=== Shadow P&L — last 3h ==="
+echo "=== Shadow P&L: last 3h ==="
 python3 /tmp/shadow_pnl_hour.py --hours 3
 
 echo
@@ -99,11 +99,11 @@ missed=\$(printf '%s\n' "\$parity_out" | grep -Eo 'missed_ref=[0-9]+' | tail -1 
 
 if [[ "\$parity_rc" -eq 0 && "\$orphans" == "0" && "\$missed" == "0" ]]; then
   echo
-  echo "PASS — orphans=0 missed_ref=0"
+  echo "PASS: orphans=0 missed_ref=0"
   exit 0
 fi
 
 echo
-echo "FAIL — orphans=\${orphans:-unknown} missed_ref=\${missed:-unknown}"
+echo "FAIL: orphans=\${orphans:-unknown} missed_ref=\${missed:-unknown}"
 exit 1
 REMOTE

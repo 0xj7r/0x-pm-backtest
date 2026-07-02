@@ -46,6 +46,11 @@ skip_expanded_mixed = false
 skip_calm = false
 directional_tilt_strength = 0.0
 
+# NOTE (2026-07-02 review): the four keys above are NOT parsed by any loader;
+# the mayjune_fade strategy config is hardcoded in
+# crates/pm-strategy/src/exo_fade.rs::mayjune_btc5m(). They are kept as a
+# parameter record; to run gates use the alpha/shadow CLI flags.
+
 # Regime gates OFF (2026-07-01): the Jun 14-19 live sweep that selected
 # skip-calm + skip-expanded-mixed was overfit; out-of-sample Jun 20-30 those
 # gates blocked 99% of entries (10 in 10 days). All-window May research also

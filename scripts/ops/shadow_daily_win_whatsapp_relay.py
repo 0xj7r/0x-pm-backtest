@@ -27,7 +27,7 @@ SSH_KEY = os.environ.get("SHADOW_SSH_KEY", os.path.expanduser("~/.ssh/whale_pair
 SSH_HOST = os.environ.get("SHADOW_SSH_HOST", "")
 if not SSH_HOST:
     raise SystemExit("SHADOW_SSH_HOST is not set; set SHADOW_SSH_HOST=ubuntu@<current-ip>")
-REMOTE_SCRIPT = os.environ.get("SHADOW_DAILY_SCRIPT", "~/scripts/shadow_daily_win_summary.py")
+REMOTE_SCRIPT = os.environ.get("SHADOW_DAILY_SCRIPT", "~/pm-backtest/scripts/ops/shadow_daily_win_summary.py")
 
 
 def fetch_summary(day: str | None, tz: str) -> dict:
@@ -75,7 +75,7 @@ def main() -> int:
     msg = payload["message"]
     print(msg)
     if args.dry_run:
-        print("(dry-run — not sent)")
+        print("(dry-run: not sent)")
         return 0
 
     if wa_send(msg):

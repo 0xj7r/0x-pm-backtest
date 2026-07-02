@@ -7,7 +7,7 @@ GET https://www.deribit.com/api/v2/public/get_volatility_index_data
 Paginates backwards via the `continuation` field (the API caps each page)
 and writes one parquet per UTC day:
 
-  data/cache/raw/deribit/channel=dvol/date=YYYY-MM-DD/data.parquet
+  data/cache/raw/deribit/channel=dvol/currency=CCY/date=YYYY-MM-DD/data.parquet
 
 Columns: currency (string), timestamp_ms (int64), open/high/low/close
 (float64), one row per candle at the requested resolution (default 60s).
@@ -105,7 +105,7 @@ def main() -> None:
     d = start
     while d <= end:
         day = d.isoformat()
-        out_dir = CACHE / f"date={day}"
+        out_dir = CACHE / f"currency={args.currency}" / f"date={day}"
         if out_dir.is_dir() and any(out_dir.glob("*.parquet")):
             print(f"{args.currency} {day}: exists")
         else:

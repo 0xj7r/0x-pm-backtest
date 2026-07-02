@@ -41,7 +41,7 @@ class DaySpot:
     rv_bps: float
     range_bps: float
     sign_flips: int
-    trend_eff: float  # |ret| / sum(|1m ret|) — 1 = clean trend, 0 = chop
+    trend_eff: float  # |ret| / sum(|1m ret|): 1 = clean trend, 0 = chop
 
 
 def load_fade_daily(path: Path) -> dict[str, float]:
@@ -73,7 +73,7 @@ def load_spot_day(day: str) -> DaySpot | None:
     us = tbl.column("transact_time_ms").to_numpy()
     order = np.argsort(us)
     us, px = us[order], px[order]
-    bucket_ms = 300_000  # 5m bars — avoids tick-noise inflation of sign flips
+    bucket_ms = 300_000  # 5m bars: avoids tick-noise inflation of sign flips
     buckets: list[float] = []
     t0 = int(us[0])
     for t in range(t0, int(us[-1]), bucket_ms):
@@ -167,7 +167,7 @@ def router_recommendation(sp: DaySpot, fade_pnl: float) -> str:
         return "br2_late_favourite + skip fade mid-band"
     if reg == "low_vol" and fade_pnl > 200:
         return "fade OK (stale-book windows)"
-    return "mixed — use per-window gates (gap + mom30)"
+    return "mixed: use per-window gates (gap + mom30)"
 
 
 def main() -> None:
@@ -193,7 +193,7 @@ def main() -> None:
 
     lines: list[str] = []
     w = lines.append
-    w("# June Regime Analysis — Fade vs Directional Router")
+    w("# June Regime Analysis: Fade vs Directional Router")
     w("")
     w(f"Fade source: `{args.fade_tsv}`")
     w(f"Generated: {datetime.now(timezone.utc):%Y-%m-%d %H:%M UTC}")
@@ -204,7 +204,7 @@ def main() -> None:
     w(f"- **Gated fade June total:** ${total:+,.0f} ({len(fade)} days)")
     w(f"- **Win days (>$100):** {len(win_days)} | **Loss days (<-$50):** {len(loss_days)} | **Flat:** {len(zero_days)}")
     w("")
-    w("June is **not one regime** — it's a mix of:")
+    w("June is **not one regime**: it's a mix of:")
     w("1. **Directional trend days** (high trend efficiency, spot moves >40bps) → fade underdog loses; **BR2 late-favourite** aligns")
     w("2. **Chop/whipsaw days** (many 1m sign flips, low trend efficiency) → model-book gap failures cluster")
     w("3. **Low-vol stale-book days** → fade still works (Jun 1–5, 10, 14–15)")
@@ -215,7 +215,7 @@ def main() -> None:
     w("|------|----------|----------|--------|-----------|----------|-----------|--------|--------|")
     for d, pnl, sp in rows:
         if not sp:
-            w(f"| {d} | ${pnl:+,.0f} | — | — | — | — | — | no_spot | — |")
+            w(f"| {d} | ${pnl:+,.0f} |: |: |: |: |: | no_spot |: |")
             continue
         reg = classify_regime(sp)
         route = router_recommendation(sp, pnl)
@@ -260,7 +260,7 @@ def main() -> None:
     w("| prod_gap_full (model-book gap) | +$12,308 | −3.2% |")
     w("| prod_loss2 (pause after 2 losses) | +$842 | −93% volume |")
     w("")
-    w("**prod_against** = only fade when spot agrees on ≥1 horizon — partial step toward BR2 directional.")
+    w("**prod_against** = only fade when spot agrees on ≥1 horizon: partial step toward BR2 directional.")
     w("")
     if args.trades:
         w("## Entry-level trade decomposition")

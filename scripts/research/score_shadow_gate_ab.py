@@ -110,7 +110,7 @@ def main() -> int:
     b_gross, b_w, b_l = pnl_for(baseline_keys, res_idx)
     g_gross, g_w, g_l = pnl_for(gated_keys, res_idx)
 
-    print(f"# Shadow gate A/B — {args.gate_ab}")
+    print(f"# Shadow gate A/B: {args.gate_ab}")
     if cutoff:
         print(f"since {args.since}")
     print()

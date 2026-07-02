@@ -5,7 +5,7 @@
 #   1. data_gate_june.sh (cache coverage)
 #   2. pm-alpha decide:: unit tests
 #   3. exo_fade_equivalence (Gate B construction parity)
-#   4. optional 1-day alpha smoke (if BIN exists) — reports n_skipped_load_error
+#   4. optional 1-day alpha smoke (if BIN exists): reports n_skipped_load_error
 #
 # Usage:
 #   ./scripts/pipeline/harness_data_audit.sh
@@ -57,7 +57,7 @@ echo ""
 
 if [[ "$SKIP_EQUIVALENCE" == "1" ]]; then
   record "exo_fade_equivalence" "SKIP"
-  echo "=== 3. exo_fade_equivalence — SKIPPED (SKIP_EQUIVALENCE=1) ==="
+  echo "=== 3. exo_fade_equivalence: SKIPPED (SKIP_EQUIVALENCE=1) ==="
 else
   echo "=== 3. exo_fade_equivalence (Gate B) ==="
   if cargo run -p pm-app --bin exo_fade_equivalence --quiet; then
@@ -70,10 +70,10 @@ echo ""
 
 if [[ "$SKIP_SMOKE" == "1" ]]; then
   record "alpha_smoke" "SKIP"
-  echo "=== 4. alpha smoke — SKIPPED (SKIP_SMOKE=1) ==="
+  echo "=== 4. alpha smoke: SKIPPED (SKIP_SMOKE=1) ==="
 elif [[ ! -x "$BIN" ]]; then
   record "alpha_smoke" "SKIP"
-  echo "=== 4. alpha smoke — SKIPPED (BIN not executable: $BIN) ==="
+  echo "=== 4. alpha smoke: SKIPPED (BIN not executable: $BIN) ==="
 else
   echo "=== 4. alpha smoke (1 day: $SMOKE_DAY) ==="
   rm -f "$SMOKE_OUT"

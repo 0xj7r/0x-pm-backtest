@@ -465,9 +465,9 @@ def cmd_daily_report(args: argparse.Namespace) -> int:
     db = sqlite3.connect(args.db)
     rollups = rollup_by_submit_date(db)
     if not rollups:
-        print("(no legs — run ingest first)")
+        print("(no legs: run ingest first)")
         return 0
-    print("LIVE trade ledger — daily rollup (by submit UTC date)")
+    print("LIVE trade ledger: daily rollup (by submit UTC date)")
     print("-" * 72)
     for r in rollups:
         print(fmt_day(r))

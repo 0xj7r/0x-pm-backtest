@@ -16,7 +16,7 @@ Usage:
     --out data/runs/shadow_features/entries.jsonl
 
 Feature name lists match pm-alpha:
-  EXO_FEATURE_NAMES (16), DIR_FEATURE_NAMES (14) — see crates/pm-alpha/src/calibrator.rs
+  EXO_FEATURE_NAMES (16), DIR_FEATURE_NAMES (14): see crates/pm-alpha/src/calibrator.rs
   and crates/pm-alpha/src/directional.rs.
 """
 from __future__ import annotations

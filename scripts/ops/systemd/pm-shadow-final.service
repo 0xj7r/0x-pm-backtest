@@ -7,6 +7,10 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/home/ubuntu/pm-backtest
 ExecStart=/bin/bash /home/ubuntu/pm-backtest/scripts/ops/shadow_final_foreground.sh
+# Every engine start writes a NEW JSONL; the executor tailer does not follow
+# rotations, so bounce it on any start (covers crash auto-restarts, which
+# PartOf on the executor side does not propagate).
+ExecStartPost=-/usr/bin/systemctl --user --no-block restart pm-shadow-exec-paper.service
 Restart=always
 RestartSec=10
 StandardOutput=append:/home/ubuntu/data/pm-alpha/shadow-final.log

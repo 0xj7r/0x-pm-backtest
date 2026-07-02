@@ -320,9 +320,15 @@ fn spot_momentum_gates_pass(inp: &DecisionInputs, side: Side, cfg: &DecideConfig
 }
 
 /// Regime stand-down gates (per decision instant, rolling 30m spot path).
+/// Evaluated inside `whipsaw_gates_pass`, AFTER the rearm branch, so a gated
+/// regime blocks entries but never blocks re-arming (parity with the original
+/// skip_expanded_high_flip placement).
 fn regime_gates_pass(inp: &DecisionInputs, cfg: &DecideConfig) -> bool {
     let Some(regime) = inp.regime_at_decision else {
-        return true;
+        // Skip-gates are permissive when the window is unclassifiable;
+        // only_calm is strict (parity with the removed market-level calm
+        // gate, which required Some(CalmLowVol)).
+        return !cfg.only_calm;
     };
     if cfg.skip_calm && regime == Regime::CalmLowVol {
         return false;
@@ -349,6 +355,9 @@ fn whipsaw_gates_pass(
     session: Option<&SessionGateState>,
     cfg: &DecideConfig,
 ) -> bool {
+    if !regime_gates_pass(inp, cfg) {
+        return false;
+    }
     if let Some(s) = session
         && cfg.pause_after_consec_losses > 0
         && s.consec_losses >= cfg.pause_after_consec_losses
@@ -417,9 +426,6 @@ pub fn decide_entry(
     }
     // Regime / vol ceiling (replay L361-363).
     if cfg.max_entry_sigma_bps > 0.0 && inp.sigma_bar_bps > cfg.max_entry_sigma_bps {
-        return skip(Side::Yes, cfg);
-    }
-    if !regime_gates_pass(inp, cfg) {
         return skip(Side::Yes, cfg);
     }
     // Belief selection (replay L366-370).
@@ -952,6 +958,56 @@ mod tests {
         cfg.skip_calm = true;
         let mut inp = up_inputs();
         inp.regime_at_decision = Some(Regime::CalmLowVol);
+        let now = FRI();
+        let (dec, _) = decide_entry(
+            &inp,
+            now,
+            open_of(now),
+            close_of(now),
+            &fresh_state(),
+            session_none().as_ref(),
+            &cfg,
+        );
+        assert_eq!(dec.action, EntryAction::Skip);
+    }
+
+    #[test]
+    fn regime_gate_never_blocks_rearm() {
+        // Original skip_expanded_high_flip semantics: a gated regime blocks
+        // entries, not re-arming. A disarmed engine in a skipped regime must
+        // still return Rearm (and set_armed when edges are low).
+        let mut cfg = live_cfg();
+        cfg.skip_calm = true;
+        cfg.rearm_edge = 0.08;
+        let mut inp = up_inputs();
+        inp.regime_at_decision = Some(Regime::CalmLowVol);
+        // Low edges on both sides so the rearm branch would set armed.
+        inp.p_exo = 0.50;
+        inp.yes_ask = 0.50;
+        inp.no_buy = 0.50;
+        let now = FRI();
+        let disarmed = EntryState { armed: false, next_entry_ns: i64::MIN };
+        let (dec, delta) = decide_entry(
+            &inp,
+            now,
+            open_of(now),
+            close_of(now),
+            &disarmed,
+            session_none().as_ref(),
+            &cfg,
+        );
+        assert_eq!(dec.action, EntryAction::Rearm);
+        assert_eq!(delta.set_armed, Some(true));
+    }
+
+    #[test]
+    fn only_calm_blocks_unclassified_regime() {
+        // Parity with the removed market-level calm gate: only_calm requires
+        // Some(CalmLowVol); a None regime must not trade.
+        let mut cfg = live_cfg();
+        cfg.only_calm = true;
+        let mut inp = up_inputs();
+        inp.regime_at_decision = None;
         let now = FRI();
         let (dec, _) = decide_entry(
             &inp,

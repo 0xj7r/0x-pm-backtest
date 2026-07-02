@@ -2,6 +2,9 @@
 Description=shadow_exec_tail PAPER executor (parity soak; no live orders)
 After=network-online.target pm-shadow-final.service
 Wants=network-online.target
+# The tailer does not roll to a new JSONL file on its own; restart it whenever
+# shadow-final restarts (new file per engine start).
+PartOf=pm-shadow-final.service
 
 [Service]
 Type=simple

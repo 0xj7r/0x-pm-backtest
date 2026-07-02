@@ -85,11 +85,12 @@ latency, numbers not comparable to harness or live P&L.
 
 | Rule | Detail |
 |---|---|
-| Sizing | Clip = 1% of current bankroll via `PM_SHADOW_CLIP_FRAC`; env clip is a hard ceiling |
+| Sizing | Clip = 1% of current bankroll via `PM_SHADOW_CLIP_FRAC`; ceiling = 1.2% of bankroll ($10 at $850). Flat clips above ~1.2% of bankroll are ruin-grade: $50 flat at $850 goes to ZERO in the May+June replay (docs/drawdown-sizing-2026-07.md) |
 | Automation | May only reduce size, never increase; the night_scale streak-scaler pattern is banned |
 | Kill criteria | Parity breach or feed breach only, NEVER P&L drawdown (circuit breakers research-rejected; drawdown protection = sizing) |
 | Discretion | No discretionary/manual trades on the strategy wallet |
 | Deployment gate | No prod config change without all-window backtest evidence + committed code + 48h paper parity soak |
+| Re-arm gates | (a) 7 PASS days on the soak scorecard (paper_soak_report.py), then (b) 14 micro-live days at 1% clips with realization ratio >= 0.85 vs same-day harness replay before any size increase. Break-even is at 0.82 realization; below that the edge nets negative at any sizing |
 
 ## 6. Validation windows
 

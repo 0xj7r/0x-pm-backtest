@@ -37,8 +37,17 @@ def load_trades(run_dirs: list[str]) -> list[dict]:
     return rows
 
 
-def simulate(trades: list[dict], equity0: float, frac: float | None, flat_clip: float | None):
-    """frac: clip = frac x equity at entry; flat_clip: fixed dollar clip."""
+def simulate(
+    trades: list[dict],
+    equity0: float,
+    frac: float | None,
+    flat_clip: float | None,
+    ceiling: float = 50.0,
+):
+    """frac: clip = min(frac x equity, ceiling), the executor policy;
+    flat_clip: fixed dollar clip. Ceiling reflects touch depth (~$50, see
+    docs/fill-model-calibration-2026-07.md); larger clips do not fill at
+    modeled prices."""
     equity = equity0
     peak = equity0
     max_dd = 0.0
@@ -74,7 +83,7 @@ def simulate(trades: list[dict], equity0: float, frac: float | None, flat_clip: 
     for t in trades:
         t["_day"] = str(t["fill_ts_ns"] // 1_000_000_000 // 86400)
         settle_due(t["fill_ts_ns"])
-        clip = flat_clip if flat_clip is not None else frac * equity
+        clip = flat_clip if flat_clip is not None else min(frac * equity, ceiling)
         cash = equity - deployed
         clip = min(clip, cash)
         if clip < 1.0:
@@ -110,6 +119,7 @@ def main() -> int:
     ap.add_argument("--equity", type=float, default=850.0)
     ap.add_argument("--fracs", default="0.005,0.01,0.02")
     ap.add_argument("--flat-clips", default="10")
+    ap.add_argument("--ceiling", type=float, default=50.0)
     args = ap.parse_args()
 
     trades = load_trades(args.runs)
@@ -119,14 +129,14 @@ def main() -> int:
         f"{'worst day':>11}{'taken':>7}{'no-cash':>8}"
     )
     for frac in [float(x) for x in args.fracs.split(",") if x]:
-        r = simulate(trades, args.equity, frac, None)
+        r = simulate(trades, args.equity, frac, None, args.ceiling)
         print(
             f"{'frac ' + format(frac, '.3f'):<14}{r['final']:>10.0f}{r['return_pct']:>8.1f}"
             f"{r['max_dd_usd']:>9.0f}{r['max_dd_pct']:>9.1f}{r['worst_day_usd']:>11.0f}"
             f"{r['taken']:>7}{r['skipped_no_cash']:>8}"
         )
     for clip in [float(x) for x in args.flat_clips.split(",") if x]:
-        r = simulate(trades, args.equity, None, clip)
+        r = simulate(trades, args.equity, None, clip, args.ceiling)
         print(
             f"{'flat $' + format(clip, 'g'):<14}{r['final']:>10.0f}{r['return_pct']:>8.1f}"
             f"{r['max_dd_usd']:>9.0f}{r['max_dd_pct']:>9.1f}{r['worst_day_usd']:>11.0f}"

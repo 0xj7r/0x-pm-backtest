@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
-"""Morning summary for yesterday — notify ONLY if LIVE resolved P&L > 0.
+"""Morning summary for yesterday; notify ONLY if LIVE resolved P&L > 0.
 
 Designed for hands-off week: celebrate green days at ~08:00 local, silence on red.
+
+The LIVE figure is LEDGER-ESTIMATED (rebuilt from executor logs + shadow
+telemetry). It uses actual venue fills (avg_fill_price/filled_qty) when the
+executor logged them, else falls back to intended clip notional at the
+reference touch. On-chain cash flow is ground truth; pass --reconcile to
+compare against scripts/ops/onchain_reconcile.py for the same day.
 
 Usage (cron, Europe/Dublin 08:00):
   python3 scripts/ops/shadow_daily_win_summary.py
@@ -26,6 +32,8 @@ ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 TS_RE = re.compile(r"(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})")
 SUBMITTED_RE = re.compile(
     r"shadow SUBMITTED.*slug=(?P<slug>\S+).*accepted=(?P<acc>true|false)"
+    r"(?:.*avg_fill_price=(?P<fill>[\d.]+))?"
+    r"(?:.*filled_qty=(?P<qty>[\d.]+))?"
 )
 REDEEM_RE = re.compile(r"redeem OK slug=(?P<slug>\S+)")
 
@@ -69,6 +77,29 @@ def tg_send(msg: str) -> bool:
         timeout=30,
     )
     return r.returncode == 0
+
+
+def run_reconcile(day: str, ledger_pnl: float) -> None:
+    """Compare the ledger-estimated day P&L against on-chain ground truth."""
+    script = Path(__file__).resolve().parent / "onchain_reconcile.py"
+    print(f"\n[reconcile] on-chain vs ledger-estimated for {day} (UTC day basis)")
+    r = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--day",
+            day,
+            "--ledger-pnl",
+            f"{ledger_pnl:.2f}",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    sys.stdout.write(r.stdout)
+    if r.returncode != 0:
+        sys.stderr.write(r.stderr)
+        print(f"[reconcile] failed (rc={r.returncode})", file=sys.stderr)
 
 
 def current_clip(env_path: Path, default: float = 50.0) -> float:
@@ -149,13 +180,21 @@ def index_resolutions(
 def load_submitted_day(
     live_log: Path, utc_start: datetime, utc_end: datetime
 ) -> tuple[list[dict], set[str]]:
-    """SUBMITTED accepted=true fills in [utc_start, utc_end)."""
+    """SUBMITTED accepted=true fills in [utc_start, utc_end).
+
+    Redeems are collected over the ENTIRE log, not just the day window:
+    a leg entered before midnight often redeems after it, and restricting
+    redeems to the window left such legs permanently "open" (P&L 0).
+    """
     fills: list[dict] = []
     redeemed: set[str] = set()
     if not live_log.is_file():
         return fills, redeemed
     for raw in live_log.read_text(encoding="utf-8", errors="replace").splitlines():
         line = strip_ansi(raw)
+        rm = REDEEM_RE.search(line)
+        if rm:
+            redeemed.add(rm.group("slug"))
         ts_m = TS_RE.search(line)
         if not ts_m:
             continue
@@ -164,10 +203,14 @@ def load_submitted_day(
             continue
         sm = SUBMITTED_RE.search(line)
         if sm and sm.group("acc") == "true":
-            fills.append({"ts": ts_m.group("ts"), "slug": sm.group("slug")})
-        rm = REDEEM_RE.search(line)
-        if rm:
-            redeemed.add(rm.group("slug"))
+            fills.append(
+                {
+                    "ts": ts_m.group("ts"),
+                    "slug": sm.group("slug"),
+                    "fill_price": float(sm.group("fill")) if sm.group("fill") else None,
+                    "fill_qty": float(sm.group("qty")) if sm.group("qty") else None,
+                }
+            )
     return fills, redeemed
 
 
@@ -207,18 +250,32 @@ def match_fills_to_entries(
                 "side": best["side"],
                 "clip": clip,
                 "touch": float(best.get("touch_price") or 0),
+                "fill_price": fill.get("fill_price"),
+                "fill_qty": fill.get("fill_qty"),
             }
         )
     return sorted(legs, key=lambda x: x["ts"])
 
 
-def leg_pnl(leg: dict, res: dict, clip_usd: float) -> tuple[float, bool]:
+def leg_pnl(leg: dict, res: dict, clip_usd: float) -> tuple[float, bool, bool]:
+    """Settle P&L for one leg. Returns (pnl, won, actual_fill_used).
+
+    Prefers the actual venue fill (avg_fill_price * filled_qty) when the
+    executor logged it; falls back to the intended-notional estimate
+    (clip_usd at the would_enter reference touch), which overstates
+    notional on partial fills and ignores slippage.
+    """
+    won = bool(res.get("won"))
+    price = leg.get("fill_price")
+    qty = leg.get("fill_qty")
+    if price and qty and price > 0:
+        sps = (1.0 - price) if won else (-price)
+        return sps * qty, won, True
     touch = leg["touch"]
     if touch <= 0:
-        return 0.0, bool(res.get("won"))
-    won = bool(res.get("won"))
+        return 0.0, won, False
     sps = (1.0 - touch) if won else (-touch)
-    return sps * (clip_usd / touch), won
+    return sps * (clip_usd / touch), won, False
 
 
 def main() -> int:
@@ -247,6 +304,12 @@ def main() -> int:
     )
     ap.add_argument("--ref-clip-usd", type=float, default=50.0)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument(
+        "--reconcile",
+        action="store_true",
+        help="compare the ledger-estimated day P&L against on-chain cash flow "
+        "(runs onchain_reconcile.py for the same day, UTC basis)",
+    )
     ap.add_argument(
         "--notify",
         choices=("telegram", "none"),
@@ -299,18 +362,20 @@ def main() -> int:
     live_resolved: list[dict] = []
     live_open: list[dict] = []
     live_pnl = 0.0
-    wins = losses = 0
+    wins = losses = actual_fills = 0
     for leg in legs:
         key = (leg["slug"], leg["side"], leg["clip"])
         res = res_by_clip.get(key)
         if leg["slug"] in redeemed and res:
-            pnl, won = leg_pnl(leg, res, clip)
+            pnl, won, actual = leg_pnl(leg, res, clip)
             live_pnl += pnl
+            if actual:
+                actual_fills += 1
             if won:
                 wins += 1
             else:
                 losses += 1
-            live_resolved.append({**leg, "pnl": pnl, "won": won})
+            live_resolved.append({**leg, "pnl": pnl, "won": won, "actual_fill": actual})
         else:
             live_open.append(leg)
 
@@ -321,13 +386,20 @@ def main() -> int:
     log_dir.mkdir(parents=True, exist_ok=True)
     log_line = (
         f"{now_local.strftime('%Y-%m-%d %H:%M:%S')} {day} "
-        f"live_pnl=${live_pnl:+.2f} resolved={wins+losses} "
+        f"live_pnl_est=${live_pnl:+.2f} resolved={wins+losses} "
+        f"actual_fills={actual_fills} "
         f"open={len(live_open)} sent={'Y' if live_pnl > 0 else 'N'}\n"
     )
     (log_dir / "daily_win_summary.log").open("a").write(log_line)
 
+    if args.reconcile:
+        run_reconcile(day, live_pnl)
+
     if live_pnl <= 0:
-        reason = f"{day}: LIVE P&L ${live_pnl:+.2f} — not positive, no message"
+        reason = (
+            f"{day}: LIVE P&L (ledger-estimated) ${live_pnl:+.2f} "
+            f"not positive, no message"
+        )
         if args.json:
             print(
                 json.dumps(
@@ -335,6 +407,7 @@ def main() -> int:
                         "send": False,
                         "day": day,
                         "live_pnl": live_pnl,
+                        "basis": "ledger-estimated",
                         "reason": reason,
                     }
                 )
@@ -345,12 +418,13 @@ def main() -> int:
 
     cash_line = f"Venue cash: ${cash:,.2f}" if cash is not None else "Venue cash: ?"
     msg = (
-        f"✅ Shadow fade — green day {day}\n"
+        f"✅ Shadow fade: green day {day}\n"
         f"\n"
-        f"LIVE (${clip:.0f}/clip)\n"
-        f"  NET: ${live_pnl:+,.2f}\n"
+        f"LIVE ledger-estimated (${clip:.0f}/clip)\n"
+        f"  NET: ${live_pnl:+,.2f} (est; on-chain is ground truth)\n"
         f"  {wins}W / {losses}L ({hit:.0f}% hit)\n"
-        f"  fills: {len(legs)} resolved: {len(live_resolved)} open: {len(live_open)}\n"
+        f"  fills: {len(legs)} resolved: {len(live_resolved)} "
+        f"open: {len(live_open)} actual-fill priced: {actual_fills}\n"
         f"\n"
         f"REF (shadow-final @ ${args.ref_clip_usd:.0f} telemetry)\n"
         f"  NET: ${ref_pnl:+,.2f}  ({ref_w}W/{ref_l}L)\n"
@@ -365,6 +439,7 @@ def main() -> int:
                     "send": True,
                     "day": day,
                     "live_pnl": live_pnl,
+                    "basis": "ledger-estimated",
                     "message": msg,
                 }
             )
@@ -373,11 +448,11 @@ def main() -> int:
 
     print(msg)
     if args.dry_run:
-        print("(dry-run — not sent)")
+        print("(dry-run, not sent)")
         return 0
 
     if args.notify == "none":
-        print("(notify none — not sent)")
+        print("(notify none, not sent)")
         return 0
 
     if tg_send(msg):

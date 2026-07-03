@@ -1,7 +1,18 @@
 # PROD: BTC-5m Exogenous Fade (canonical reference)
 
-Last updated: 2026-07-01. This is the single source of truth for what runs in
+Last updated: 2026-07-03. This is the single source of truth for what runs in
 production. If another doc disagrees with this one, this one wins.
+
+Why live results can diverge from backtests, and every counter-measure:
+docs/WHY-LIVE-DIVERGED.md. Rollout state and plan:
+docs/IMPLEMENTATION-AND-ROLLOUT-2026-07.md. Pending gate (judged ~Jul 9-10):
+docs/stability-gate-preregistration-2026-07.md.
+
+**Standing policy (from the decision-stability finding):** backtest P&L is an
+upper bound realized only by decisions that are stable across observers. Any
+config or strategy whose profits concentrate in observer-sensitive decisions
+(early-window, extreme-conviction, near-threshold) must be treated as
+unvalidated regardless of backtest quality.
 
 ## 1. The strategy
 

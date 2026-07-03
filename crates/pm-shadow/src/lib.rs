@@ -91,6 +91,10 @@ pub struct ShadowArgs {
     pub skip_spot_misalign_s: u32,
     /// Skip when 60/300/600/900s spot all disagree with entry side.
     pub skip_spot_against_all: bool,
+    /// No entries until this many seconds after window open (0 = off).
+    pub min_secs_from_open: u32,
+    /// Skip when the entered side's belief exceeds this (1.0 = off).
+    pub max_p_side: f64,
     /// Skip when decision-time regime is `calm_low_vol`.
     pub skip_calm: bool,
     /// Take entries only in `calm_low_vol`.
@@ -141,6 +145,8 @@ pub fn frozen_shadow_final_args(out_dir: PathBuf) -> ShadowArgs {
         max_entry_ask: 1.0,
         skip_spot_misalign_s: 0,
         skip_spot_against_all: false,
+        min_secs_from_open: 0,
+        max_p_side: 1.0,
         skip_calm: false,
         only_calm: false,
         skip_expanded_mixed: false,
@@ -743,6 +749,8 @@ pub struct ShadowConfig {
     pub max_entry_ask: f64,
     pub skip_spot_misalign_s: u32,
     pub skip_spot_against_all: bool,
+    pub min_secs_from_open: u32,
+    pub max_p_side: f64,
     pub skip_calm: bool,
     pub only_calm: bool,
     pub skip_expanded_mixed: bool,
@@ -785,6 +793,8 @@ pub fn shadow_config_from_args(args: &ShadowArgs) -> ShadowConfig {
         max_entry_ask: args.max_entry_ask,
         skip_spot_misalign_s: args.skip_spot_misalign_s,
         skip_spot_against_all: args.skip_spot_against_all,
+        min_secs_from_open: args.min_secs_from_open,
+        max_p_side: args.max_p_side,
         skip_calm: args.skip_calm,
         only_calm: args.only_calm,
         skip_expanded_mixed: args.skip_expanded_mixed,
@@ -1230,6 +1240,8 @@ impl ShadowCore {
         self.cfg.decide_cfg.max_entry_ask = self.cfg.max_entry_ask;
         self.cfg.decide_cfg.skip_spot_misalign_s = self.cfg.skip_spot_misalign_s;
         self.cfg.decide_cfg.skip_spot_against_all = self.cfg.skip_spot_against_all;
+        self.cfg.decide_cfg.min_secs_from_open = self.cfg.min_secs_from_open;
+        self.cfg.decide_cfg.max_p_side = self.cfg.max_p_side;
         self.cfg.decide_cfg.skip_calm = self.cfg.skip_calm;
         self.cfg.decide_cfg.only_calm = self.cfg.only_calm;
         self.cfg.decide_cfg.skip_expanded_mixed = self.cfg.skip_expanded_mixed;
@@ -3192,6 +3204,8 @@ mod tests {
             max_entry_ask: 1.0,
             skip_spot_misalign_s: 0,
             skip_spot_against_all: false,
+            min_secs_from_open: 0,
+            max_p_side: 1.0,
             skip_calm: false,
             only_calm: false,
             skip_expanded_mixed: false,

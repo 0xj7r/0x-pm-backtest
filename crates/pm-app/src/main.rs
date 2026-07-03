@@ -158,6 +158,12 @@ enum Cmd {
         /// Skip when 60/300/600/900s spot all disagree with entry side.
         #[arg(long)]
         skip_spot_against_all: bool,
+        /// No entries until this many seconds after window open (0 = off).
+        #[arg(long, default_value = "0")]
+        min_secs_from_open: u32,
+        /// Skip when the entered side's belief exceeds this (1.0 = off).
+        #[arg(long, default_value = "1.0")]
+        max_p_side: f64,
         /// Skip when decision-time regime is calm_low_vol.
         #[arg(long)]
         skip_calm: bool,
@@ -1444,6 +1450,8 @@ async fn main() -> Result<()> {
             max_entry_ask,
             skip_spot_misalign_s,
             skip_spot_against_all,
+            min_secs_from_open,
+            max_p_side,
             skip_calm,
             only_calm,
             skip_expanded_mixed,
@@ -1479,6 +1487,8 @@ async fn main() -> Result<()> {
                 max_entry_ask,
                 skip_spot_misalign_s,
                 skip_spot_against_all,
+                min_secs_from_open,
+                max_p_side,
                 skip_calm,
                 only_calm,
                 skip_expanded_mixed,

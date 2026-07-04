@@ -1,0 +1,23 @@
+[Unit]
+Description=live_collector: raw feed capture to Firehose (root-cause track; log-only, no trading)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu
+Environment=PM_COLLECTOR_FIREHOSE_STREAM=pm-research-events-prod
+Environment=PM_COLLECTOR_REGION=us-east-1
+Environment=PM_COLLECTOR_ENV=dublin
+Environment=PM_COLLECTOR_SCHEMA_VERSION=1
+Environment=PM_USER_WS_DISABLED=1
+Environment=PM_COLLECTOR_HEALTH_PORT=8087
+Environment=RUST_LOG=info
+ExecStart=/home/ubuntu/deploy-main/polymarket-agent/target/release/live_collector
+Restart=always
+RestartSec=15
+StandardOutput=append:/home/ubuntu/data/pm-alpha/live_collector.log
+StandardError=append:/home/ubuntu/data/pm-alpha/live_collector.log
+
+[Install]
+WantedBy=default.target

@@ -33,6 +33,15 @@ PY
 
 BIN="${BIN:-./target/release/pm-app}"
 
+# The manifest builder reads the markets parquet; a stale one silently yields
+# zero manifest rows for recent days. Refresh when older than 20h.
+PQ=data/cache/telonex_markets.parquet
+if [[ ! -f "$PQ" ]] || [[ -n "$(find "$PQ" -mmin +1200 2>/dev/null)" ]]; then
+  echo "refreshing markets parquet"
+  curl -sL -o "$PQ.tmp" "https://api.telonex.io/v1/datasets/polymarket/markets" \
+    && mv "$PQ.tmp" "$PQ" || echo "parquet refresh FAILED; using existing"
+fi
+
 FAILED=0
 for DAY in $(days_to_run); do
 

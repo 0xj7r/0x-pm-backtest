@@ -73,3 +73,39 @@ the ce25 posture: concede the first-second race entirely (the stability gate
 already points this way), trade the slower repricing edge, and let the
 15m book (validated, slower by construction) carry more weight. These are
 not exclusive; (ii) is deployable this month, (i) is engineering.
+
+## Measurement result (2026-07-05, closes program step 1)
+
+From the deciding engine's own per-minute telemetry (4,437 samples, July):
+
+| leg | median | p90 |
+|---|---|---|
+| Binance event -> engine receipt | 100ms | 101ms (p99 103ms: rock-steady) |
+| PM book event -> engine receipt | 9ms | 10ms |
+| decision timer phase (1s cadence) | ~500ms mean | up to 1000ms |
+| executor tail + submit (June calib) | ~200ms | ~250ms |
+| venue match | ~75ms | ~100ms |
+| **total reaction (entry)** | **~0.9s mean** | **~1.4s** |
+
+Versus the replay's modeled 250ms, live runs ~0.65s (mean) to ~1.15s (p90)
+further down the decay curve. Interpolating the dt-sweep (roughly -27% per
+extra second in the 1-2s band), unmodeled delay alone predicts capturing
+~70-85% of the fast component; measured realization (~0.3 on fast days) is
+WORSE, because delay does not merely shrink the same trade: deciding on a
+0.9s-older microstate near the strike flips the SIDE (the 48% live-vs-replay
+agreement). Delay and instability compound; both point the same direction.
+
+Conclusions:
+1. **Network placement is fine.** 100ms Binance receipt (p99 103) and 9ms
+   book receipt leave little to win from region moves, and moving would
+   trade one leg against the other.
+2. **The one real speed lever is the 1s decision timer** (mean 500ms of the
+   chain): event-driven decide would roughly halve mean reaction. Engine
+   change, GATE B required; queue only if we ever choose to chase the fast
+   component.
+3. **The primary posture stands: concede the race** (stability gate + 15m
+   book), per ce25. The measured chain confirms we are structurally ~1s
+   slow, and the profitable operators simply do not play that game.
+4. Collector defect noted: the Binance spot tap degraded to a REST loop and
+   there is no futures tap; fix before any feed-content diffing
+   (polymarket-exec work, low priority while posture 3 holds).

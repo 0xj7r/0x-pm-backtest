@@ -1,0 +1,18 @@
+[Unit]
+Description=pm-alpha shadow 15m (frozen config on the BTC-15m book; log-only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/pm-backtest
+Environment=SHADOW_FINAL_OUT=/home/ubuntu/data/pm-alpha/shadow-15m
+Environment=SHADOW_SLUG_PREFIX=btc-updown-15m-
+ExecStart=/bin/bash /home/ubuntu/pm-backtest/scripts/ops/shadow_final_foreground.sh
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/ubuntu/data/pm-alpha/shadow-15m.log
+StandardError=append:/home/ubuntu/data/pm-alpha/shadow-15m.log
+
+[Install]
+WantedBy=default.target

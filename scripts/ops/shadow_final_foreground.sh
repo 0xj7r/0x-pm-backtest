@@ -25,4 +25,5 @@ exec "$BIN" shadow \
   --vol-lookback-s 3600 \
   --skip-saturday \
   --out-dir "$OUT_DIR" \
+  --decide-interval-ms "${SHADOW_DECIDE_INTERVAL_MS:-1000}" \
   "${SHADOW_FINAL_GATED_FLAGS[@]}"

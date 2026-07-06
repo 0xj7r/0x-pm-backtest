@@ -111,6 +111,9 @@ pub struct ShadowArgs {
     pub open_fav_ask_max: f64,
     /// Gate window from market open (300 = full 5m window for prod_gap_full).
     pub open_fav_secs: u32,
+    /// Decision evaluation cadence in ms (default 1000 = harness-matched;
+    /// 100 = fast mode). Does not change decision logic, only when it runs.
+    pub decide_interval_ms: u64,
 }
 
 /// Frozen leading config validated on backtest + the `shadow-final` live twin.
@@ -156,6 +159,7 @@ pub fn frozen_shadow_final_args(out_dir: PathBuf) -> ShadowArgs {
         open_fav_p_min: 0.90,
         open_fav_ask_max: 0.60,
         open_fav_secs: 5,
+        decide_interval_ms: 1000,
     }
 }
 
@@ -1922,6 +1926,12 @@ pub async fn run_shadow(args: ShadowArgs) -> Result<()> {
     run_shadow_with_sink(args, None, None).await
 }
 
+/// Decision cadence in ns, clamped to >= 20ms so the 10ms poll loop keeps
+/// at least one non-decide tick between decisions.
+fn decide_interval_ns(ms: u64) -> i64 {
+    (ms.max(20) as i64).saturating_mul(1_000_000)
+}
+
 /// Same proven shadow engine + feeds + decide loop as `run_shadow`, but each
 /// `WouldEnter` decision is also emitted as an `ExecIntent` over `intent_tx` for
 /// live execution. The decision path is UNCHANGED — live trading driven off this
@@ -1987,9 +1997,11 @@ pub async fn run_shadow_with_sink(
     };
 
     // 10ms poll keeps the latency probe honest (~±10ms of the target);
-    // decisions run on the harness's 1s cadence; summaries every 60s.
+    // decisions run on the configured cadence (default 1s = harness-matched);
+    // summaries every 60s.
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(10));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let decide_interval_ns = decide_interval_ns(args.decide_interval_ms);
     let mut next_decide_ns = 0i64;
     let mut next_summary_ns = now_unix_ns() + 60_000_000_000;
 
@@ -2017,7 +2029,7 @@ pub async fn run_shadow_with_sink(
                     let mut core = core.lock().expect("shadow core poisoned");
                     events.extend(core.poll_due(now_ns));
                     if now_ns >= next_decide_ns {
-                        next_decide_ns = now_ns + 1_000_000_000;
+                        next_decide_ns = now_ns + decide_interval_ns;
                         core.prune(now_ns);
                         events.extend(core.decide(now_ns, defer_entry_commit));
                     }
@@ -3164,6 +3176,16 @@ mod tests {
         assert!(!args.lane_late_fav);
         assert_eq!(args.skip_spot_misalign_s, 0);
         assert_eq!(args.min_entry_ask, 0.0);
+        assert_eq!(args.decide_interval_ms, 1000);
+    }
+
+    #[test]
+    fn decide_interval_ns_clamps_to_poll_floor() {
+        assert_eq!(decide_interval_ns(0), 20_000_000);
+        assert_eq!(decide_interval_ns(10), 20_000_000);
+        assert_eq!(decide_interval_ns(20), 20_000_000);
+        assert_eq!(decide_interval_ns(100), 100_000_000);
+        assert_eq!(decide_interval_ns(1000), 1_000_000_000);
     }
 
     #[test]

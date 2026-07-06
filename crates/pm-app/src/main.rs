@@ -189,6 +189,10 @@ enum Cmd {
         /// Gate window from market open (300 = full 5m window for prod_gap_full).
         #[arg(long, default_value = "5")]
         open_fav_secs: u32,
+        /// Decision evaluation cadence in ms (default 1000 = harness-matched;
+        /// 100 = fast mode). Does not change decision logic, only when it runs.
+        #[arg(long, default_value = "1000")]
+        decide_interval_ms: u64,
     },
     /// pm-alpha exogenous edge hunt: replay markets through the pm-alpha
     /// validation harness (latency-modeled, cost-aware, leakage-free belief).
@@ -1461,6 +1465,7 @@ async fn main() -> Result<()> {
             open_fav_p_min,
             open_fav_ask_max,
             open_fav_secs,
+            decide_interval_ms,
         } => {
             shadow::run_shadow(shadow::ShadowArgs {
                 slug_prefix,
@@ -1498,6 +1503,7 @@ async fn main() -> Result<()> {
                 open_fav_p_min,
                 open_fav_ask_max,
                 open_fav_secs,
+                decide_interval_ms,
             })
             .await
         }

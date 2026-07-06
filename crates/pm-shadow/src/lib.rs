@@ -2776,8 +2776,9 @@ mod feeds {
                 _ = shutdown.changed() => break,
                 _ = ticker.tick() => {
                     let now_s = now_unix_ms() / 1_000;
-                    let current_open = now_s - now_s.rem_euclid(300);
-                    for open_ts in [current_open, current_open + 300] {
+                    let win = window_secs_from_slug(&slug_prefix);
+                    let current_open = now_s - now_s.rem_euclid(win);
+                    for open_ts in [current_open, current_open + win] {
                         let slug = format!("{slug_prefix}{open_ts}");
                         match fetch_gamma_market(&client, &slug).await {
                             Ok(Some(market)) => {
@@ -2821,6 +2822,17 @@ mod feeds {
         Ok(items.iter().find_map(|item| parse_gamma_market(item, slug)))
     }
 
+    /// Window length from an updown slug ("btc-updown-5m-<open>" -> 300).
+    /// Matches the harness's slug-derived duration semantics.
+    pub(super) fn window_secs_from_slug(slug: &str) -> i64 {
+        for (tag, secs) in [("-5m-", 300), ("-15m-", 900), ("-1h-", 3600), ("-4h-", 14400)] {
+            if slug.contains(tag) {
+                return secs;
+            }
+        }
+        300
+    }
+
     /// Parse one Gamma market row: `clobTokenIds` is a JSON-encoded array of
     /// the two token ids, ordered to match `outcomes` (["Up","Down"]).
     /// `openPrice`/`priceToBeat` is the TRUE strike; it may only appear
@@ -2847,7 +2859,7 @@ mod feeds {
         Some(MarketWindow {
             slug: slug.to_string(),
             open_ts_s,
-            close_ts_s: open_ts_s + 300,
+            close_ts_s: open_ts_s + window_secs_from_slug(slug),
             up_token,
             down_token,
             up_index_set,

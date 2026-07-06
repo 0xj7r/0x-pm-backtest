@@ -82,9 +82,11 @@ echo "== replay $DAY (frozen config, canonical accounting) =="
   continue
 }
 
-python3 - "$OUT/${DAY}.json" "$DAY" <<'PY'
+python3 - "$OUT/${DAY}.json" "$DAY" <<'PY' || { rm -f "$OUT/${DAY}.json" "$OUT/${DAY}_trades.jsonl"; echo "$DAY produced 0 markets (source data not yet published?); will retry on next catch-up"; FAILED=1; continue; }
 import json, sys
 r = json.load(open(sys.argv[1]))
+if int(r.get("n_markets_run") or 0) == 0:
+    raise SystemExit(1)
 agg = (r.get("sweep") or [r])[0].get("report", {}).get("aggregate", {})
 n = int(agg.get("n_trades", 0))
 net = float(agg.get("total_pnl", 0))

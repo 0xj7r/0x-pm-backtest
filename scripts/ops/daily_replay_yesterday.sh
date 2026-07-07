@@ -10,7 +10,7 @@ cd "$(dirname "$0")/../.."
 
 OUT="${OUT:-data/runs/daily_replay}"
 LOG_DIR="$OUT/logs"
-mkdir -p "$OUT" "$LOG_DIR"
+mkdir -p "$OUT" "$OUT/15m" "$LOG_DIR"
 CATCHUP_DAYS="${CATCHUP_DAYS:-7}"
 
 days_to_run() {
@@ -93,6 +93,34 @@ net = float(agg.get("total_pnl", 0))
 wins = int(agg.get("n_wins", 0))
 print(f"{sys.argv[2]} replay: n={n} NET=${net:+,.0f} hit={100*wins/n if n else 0:.1f}%")
 PY
+
+# 15m book replay for the same day (separate output; used by the 15m
+# realization loop). Failure here does not block the 5m result.
+"$BIN" alpha \
+  --markets data/manifests/canonical/btc-updown-15m_up.jsonl \
+  --slug-prefix btc-updown-15m- \
+  --local-cache-dir data/cache \
+  --tick-cache-dir data/cache/ticks \
+  --exit-after-s 0 \
+  --perp-symbol BTCUSDT \
+  --perp-price-weight 0.75 \
+  --vol-estimator realized \
+  --vol-lookback-s 3600 \
+  --edge-thresholds 0.12 \
+  --notional-usdc 50 \
+  --latency-ms 250 \
+  --max-clips 2 \
+  --rearm-edge 0.08 \
+  --clip-cooldown-ms 5000 \
+  --min-entry-sigma-bps 3 \
+  --skip-saturday \
+  --stop-before-close-s 90 \
+  --min-marginal-edge 0.04 \
+  --fee-curve-rate 0.07 \
+  --date-start "$DAY" --date-end "$DAY" \
+  --out-json "$OUT/15m/${DAY}.json" \
+  --trades-out "$OUT/15m/${DAY}_trades.jsonl" > "$LOG_DIR/${DAY}_replay15m.log" 2>&1 \
+  || echo "$DAY 15m replay FAILED (non-blocking)"
 
 done
 exit "$FAILED"

@@ -31,6 +31,13 @@ if [[ -n "$HOST" ]]; then
   scp -i "$SSH_KEY" -o ConnectTimeout=20 -o StrictHostKeyChecking=no -q \
     "$HOST:~/data/pm-alpha/shadow-final/shadow-*.jsonl" "$SYNC_DIR/" \
     && echo "shadow sync ok" || echo "shadow sync FAILED (box down or IP changed)"
+  mkdir -p data/runs/shadow_fast_sync data/runs/shadow_15m_sync
+  scp -i "$SSH_KEY" -o ConnectTimeout=20 -o StrictHostKeyChecking=no -q \
+    "$HOST:~/data/pm-alpha/shadow-fast/shadow-*.jsonl" data/runs/shadow_fast_sync/ 2>/dev/null \
+    && echo "fast sync ok" || echo "fast sync skipped"
+  scp -i "$SSH_KEY" -o ConnectTimeout=20 -o StrictHostKeyChecking=no -q \
+    "$HOST:~/data/pm-alpha/shadow-15m/shadow-*.jsonl" data/runs/shadow_15m_sync/ 2>/dev/null \
+    && echo "15m sync ok" || echo "15m sync skipped"
 else
   echo "no Dublin host resolved; skipping shadow sync + realization"
 fi
@@ -59,4 +66,16 @@ if p.exists():
         print(f"{d}: ratio={r.get('realization_ratio')} agree={r.get('side_agree_pct')}% "
               f"live<15s={r.get('live_pnl_lt15s')} live>=15s={r.get('live_pnl_ge15s')}")
 PY
+# Dwell-split evidence (final + fast streams) and 15m realization, last 3 days.
+for tj in $(ls data/runs/daily_replay/*_trades.jsonl 2>/dev/null | tail -3); do
+  day=$(basename "$tj" _trades.jsonl)
+  python3 scripts/ops/dwell_split_report.py --date "$day" \
+    --out data/runs/daily_replay/dwell_split.jsonl > /dev/null 2>&1 || true
+done
+for tj in $(ls data/runs/daily_replay/15m/*_trades.jsonl 2>/dev/null | tail -3); do
+  day=$(basename "$tj" _trades.jsonl)
+  python3 scripts/ops/soak_realization_report.py --date "$day" \
+    --shadow-dir data/runs/shadow_15m_sync --replay-dir data/runs/daily_replay/15m \
+    --out data/runs/daily_replay/realization_15m.jsonl > /dev/null 2>&1 || true
+done
 echo "== $(date -u +%FT%TZ) daily pipeline done =="

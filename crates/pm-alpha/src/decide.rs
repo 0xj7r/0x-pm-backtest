@@ -92,7 +92,7 @@ impl SessionGateState {
 
 /// Advance session state after a market's trades resolve (chronological clips).
 pub fn session_observe_trades(session: &mut SessionGateState, trades: &[crate::harness::TradeRecord]) {
-    let mut ordered: Vec<_> = trades.iter().filter(|t| !t.is_completion).collect();
+    let mut ordered: Vec<_> = trades.iter().filter(|t| !t.is_completion && !t.is_hedge && !t.is_cut).collect();
     ordered.sort_by_key(|t| t.decision_ts_ns);
     for t in ordered {
         session.observe_trade(t.won);

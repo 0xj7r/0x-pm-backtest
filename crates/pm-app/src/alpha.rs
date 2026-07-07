@@ -1096,6 +1096,8 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
                     "mark_60s": t.mark_60s, "exit_price": t.exit_price,
                     "pnl_exit_mid_optimistic": t.pnl_exit_mid_optimistic,
                     "is_completion": t.is_completion,
+                    "is_hedge": t.is_hedge,
+                    "is_cut": t.is_cut,
                     "exit_filled_at_mid": t.exit_filled_at_mid,
                     "fee": t.fee,
                     "fee_hold": t.fee_hold,

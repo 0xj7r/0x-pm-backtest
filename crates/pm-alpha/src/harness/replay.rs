@@ -559,6 +559,7 @@ fn execute(
                         is_cut: false,
                     });
                     pm_done = true;
+                    leg1 = None;
                     continue;
                 }
                 if cut_loser_active
@@ -630,6 +631,7 @@ fn execute(
                         is_cut: true,
                     });
                     pm_done = true;
+                    leg1 = None;
                     continue;
                 }
             }

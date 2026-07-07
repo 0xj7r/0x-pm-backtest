@@ -48,6 +48,7 @@ pub struct AlphaArgs {
     pub min_entry_ask: f64,
     /// No entries until this many seconds after market open (0 = off).
     pub min_secs_from_open: u32,
+    pub min_belief_dwell_s: f64,
     /// Thesis gate: skip when entry ask exceeds this (1.0 = off).
     pub max_entry_ask: f64,
     pub vol_sizing_ref_bps: f64,
@@ -848,6 +849,7 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
         min_entry_ask: args.min_entry_ask,
         max_entry_ask: args.max_entry_ask,
         min_secs_from_open: args.min_secs_from_open,
+        min_belief_dwell_s: args.min_belief_dwell_s,
         vol_sizing_ref_bps: args.vol_sizing_ref_bps,
         vol_sizing_lo: args.vol_sizing_lo,
         vol_sizing_hi: args.vol_sizing_hi,

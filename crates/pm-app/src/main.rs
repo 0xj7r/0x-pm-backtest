@@ -161,6 +161,9 @@ enum Cmd {
         /// No entries until this many seconds after window open (0 = off).
         #[arg(long, default_value = "0")]
         min_secs_from_open: u32,
+        /// Decision-quality gate: min seconds the belief held its side (0 = off).
+        #[arg(long, default_value = "0.0")]
+        min_belief_dwell_s: f64,
         /// Skip when the entered side's belief exceeds this (1.0 = off).
         #[arg(long, default_value = "1.0")]
         max_p_side: f64,
@@ -263,6 +266,9 @@ enum Cmd {
         /// No entries until this many seconds after market open (0 = off).
         #[arg(long, default_value = "0")]
         min_secs_from_open: u32,
+        /// Decision-quality gate: min seconds the belief held its side (0 = off).
+        #[arg(long, default_value = "0.0")]
+        min_belief_dwell_s: f64,
         /// Vol-responsive sizing reference (bps): clip = notional *
         /// clamp(sigma_bar_bps/ref, lo, hi). 0 = off (flat).
         #[arg(long, default_value = "0.0")]
@@ -1455,6 +1461,7 @@ async fn main() -> Result<()> {
             skip_spot_misalign_s,
             skip_spot_against_all,
             min_secs_from_open,
+            min_belief_dwell_s,
             max_p_side,
             skip_calm,
             only_calm,
@@ -1493,6 +1500,7 @@ async fn main() -> Result<()> {
                 skip_spot_misalign_s,
                 skip_spot_against_all,
                 min_secs_from_open,
+                min_belief_dwell_s,
                 max_p_side,
                 skip_calm,
                 only_calm,
@@ -1529,6 +1537,7 @@ async fn main() -> Result<()> {
             min_entry_ask,
             max_entry_ask,
             min_secs_from_open,
+            min_belief_dwell_s,
             vol_sizing_ref_bps,
             vol_sizing_lo,
             vol_sizing_hi,
@@ -1627,6 +1636,7 @@ async fn main() -> Result<()> {
                     min_entry_ask,
                     max_entry_ask,
                     min_secs_from_open,
+                    min_belief_dwell_s,
                     vol_sizing_ref_bps,
                     vol_sizing_lo,
                     vol_sizing_hi,

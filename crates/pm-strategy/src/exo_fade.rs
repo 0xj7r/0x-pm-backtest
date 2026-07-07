@@ -169,6 +169,7 @@ impl ExoFadeConfig {
             min_entry_ask: self.min_entry_ask,
             max_entry_ask: self.max_entry_ask,
             min_secs_from_open: 0,
+            min_belief_dwell_s: 0.0,
             vol_sizing_ref_bps: 0.0,
             vol_sizing_lo: 0.5,
             vol_sizing_hi: 2.0,
@@ -489,6 +490,7 @@ impl ExoFadeStrategy {
             spot_ret_300s_bps: None,
             spot_ret_600s_bps: None,
             spot_ret_900s_bps: None,
+            belief_dwell_s: None,
         };
 
         self.gate_stats.decision_ticks += 1;

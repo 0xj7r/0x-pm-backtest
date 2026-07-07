@@ -40,6 +40,10 @@ struct Decision {
     spot_ret_300s_bps: Option<f64>,
     spot_ret_600s_bps: Option<f64>,
     spot_ret_900s_bps: Option<f64>,
+    /// Seconds since sign(p_up - 0.5) last flipped within this market's
+    /// decision sequence (first belief starts the clock). Mirrors the live
+    /// engine's belief_flip_ns tracking so dwell gates are backtestable.
+    belief_dwell_s: f64,
 }
 
 pub fn spot_ret_bps(spot: &SpotHistory, ts_ns: i64, lookback_s: i64) -> Option<f64> {
@@ -99,6 +103,8 @@ fn belief_pass(
     };
     let mut next_decision_ns = open_ns;
     let mut next_sample = 0usize;
+    let mut belief_up: Option<bool> = None;
+    let mut belief_flip_ns: i64 = open_ns;
     let mut next_train_ns = open_ns;
     let train_dt_ns = (cfg.train_sample_dt_s.max(1) as i64) * 1_000_000_000;
 
@@ -207,6 +213,12 @@ fn belief_pass(
         let spot_ret_300s_bps = spot_ret_bps(spot, tick.ts_ns, 300);
         let spot_ret_600s_bps = spot_ret_bps(spot, tick.ts_ns, 600);
         let spot_ret_900s_bps = spot_ret_bps(spot, tick.ts_ns, 900);
+        let up_now = ev.p > 0.5;
+        if belief_up != Some(up_now) {
+            belief_up = Some(up_now);
+            belief_flip_ns = tick.ts_ns;
+        }
+        let belief_dwell_s = (tick.ts_ns - belief_flip_ns).max(0) as f64 / 1e9;
         pass.decisions.push(Decision {
             tick_idx: i,
             ts_ns: tick.ts_ns,
@@ -225,6 +237,7 @@ fn belief_pass(
             spot_ret_300s_bps,
             spot_ret_600s_bps,
             spot_ret_900s_bps,
+            belief_dwell_s,
         });
     }
 
@@ -430,6 +443,7 @@ fn execute(
             spot_ret_300s_bps: d.spot_ret_300s_bps,
             spot_ret_600s_bps: d.spot_ret_600s_bps,
             spot_ret_900s_bps: d.spot_ret_900s_bps,
+            belief_dwell_s: Some(d.belief_dwell_s),
         };
         let dcfg = crate::decide::DecideConfig::from_harness(cfg, edge_threshold);
         let (decision, delta) = crate::decide::decide_entry(

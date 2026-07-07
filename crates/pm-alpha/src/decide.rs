@@ -50,6 +50,7 @@ pub fn frozen_fade_decide_config(notional_usdc: f64) -> DecideConfig {
         min_entry_ask: 0.0,
         max_entry_ask: 1.0,
         min_secs_from_open: 0,
+        min_belief_dwell_s: 0.0,
         vol_sizing_ref_bps: 0.0,
         vol_sizing_lo: 0.5,
         vol_sizing_hi: 2.0,
@@ -130,6 +131,10 @@ pub struct DecisionInputs {
     pub spot_ret_300s_bps: Option<f64>,
     pub spot_ret_600s_bps: Option<f64>,
     pub spot_ret_900s_bps: Option<f64>,
+    /// Seconds the belief has held its current side: time since sign(p - 0.5)
+    /// last flipped, or since the first belief of the window. None when the
+    /// caller cannot track it (gates treating None as permissive).
+    pub belief_dwell_s: Option<f64>,
 }
 
 /// Loop-carried state the caller owns and threads in (rearm + cooldown).
@@ -194,6 +199,10 @@ pub struct DecideConfig {
     pub min_entry_ask: f64,
     /// No entries until this many seconds after market open (0 = off).
     pub min_secs_from_open: u32,
+    /// Decision-quality gate: skip entries whose belief has held its side for
+    /// fewer than this many seconds (0 = off; None dwell = permissive).
+    /// Targets the first-seconds instability bucket (docs/decision-stability).
+    pub min_belief_dwell_s: f64,
     /// Skip when entry ask exceeds this (1.0 = off).
     pub max_entry_ask: f64,
     pub vol_sizing_ref_bps: f64,
@@ -249,6 +258,7 @@ impl DecideConfig {
             min_entry_ask: cfg.min_entry_ask,
             max_entry_ask: cfg.max_entry_ask,
             min_secs_from_open: cfg.min_secs_from_open,
+            min_belief_dwell_s: cfg.min_belief_dwell_s,
             vol_sizing_ref_bps: cfg.vol_sizing_ref_bps,
             vol_sizing_lo: cfg.vol_sizing_lo,
             vol_sizing_hi: cfg.vol_sizing_hi,
@@ -356,6 +366,15 @@ fn whipsaw_gates_pass(
     cfg: &DecideConfig,
 ) -> bool {
     if !regime_gates_pass(inp, cfg) {
+        return false;
+    }
+    // Decision-quality: a belief that just flipped sides is the unstable
+    // first-seconds signature (cross-process side agreement 43-58% there).
+    // None = caller cannot track dwell = permissive (harness pre-dwell runs).
+    if cfg.min_belief_dwell_s > 0.0
+        && let Some(dwell) = inp.belief_dwell_s
+        && dwell < cfg.min_belief_dwell_s
+    {
         return false;
     }
     if let Some(s) = session
@@ -598,6 +617,7 @@ mod tests {
             spot_ret_300s_bps: None,
             spot_ret_600s_bps: None,
             spot_ret_900s_bps: None,
+            belief_dwell_s: None,
         }
     }
 
@@ -768,6 +788,7 @@ mod tests {
             spot_ret_300s_bps: None,
             spot_ret_600s_bps: None,
             spot_ret_900s_bps: None,
+            belief_dwell_s: None,
         };
         let now = FRI();
         let (dec, _) = decide_entry(
@@ -852,6 +873,7 @@ mod tests {
             spot_ret_300s_bps: None,
             spot_ret_600s_bps: None,
             spot_ret_900s_bps: None,
+            belief_dwell_s: None,
         };
         let now = FRI();
         let (dec, _) = decide_entry(&inp, now, open_of(now), close_of(now), &fresh_state(), session_none().as_ref(), &thesis_a_cfg());
@@ -896,6 +918,7 @@ mod tests {
             spot_ret_300s_bps: None,
             spot_ret_600s_bps: None,
             spot_ret_900s_bps: None,
+            belief_dwell_s: None,
         };
         let now = FRI();
         let (dec, _) =
@@ -924,6 +947,7 @@ mod tests {
             spot_ret_300s_bps: None,
             spot_ret_600s_bps: None,
             spot_ret_900s_bps: None,
+            belief_dwell_s: None,
         };
         let now = FRI();
         let (dec, _) = decide_entry(&inp, now, open_of(now), close_of(now), &fresh_state(), session_none().as_ref(), &thesis_a_cfg());
@@ -998,6 +1022,35 @@ mod tests {
         );
         assert_eq!(dec.action, EntryAction::Rearm);
         assert_eq!(delta.set_armed, Some(true));
+    }
+
+    #[test]
+    fn dwell_gate_blocks_young_beliefs_only() {
+        let mut cfg = live_cfg();
+        cfg.min_belief_dwell_s = 30.0;
+        let now = FRI();
+        // Young dwell: blocked.
+        let mut inp = up_inputs();
+        inp.belief_dwell_s = Some(4.0);
+        let (dec, _) = decide_entry(&inp, now, open_of(now), close_of(now),
+            &fresh_state(), session_none().as_ref(), &cfg);
+        assert_eq!(dec.action, EntryAction::Skip);
+        // Seasoned dwell: passes through to Enter.
+        inp.belief_dwell_s = Some(80.0);
+        let (dec, _) = decide_entry(&inp, now, open_of(now), close_of(now),
+            &fresh_state(), session_none().as_ref(), &cfg);
+        assert_eq!(dec.action, EntryAction::Enter);
+        // Unknown dwell: permissive.
+        inp.belief_dwell_s = None;
+        let (dec, _) = decide_entry(&inp, now, open_of(now), close_of(now),
+            &fresh_state(), session_none().as_ref(), &cfg);
+        assert_eq!(dec.action, EntryAction::Enter);
+        // Gate off: young dwell trades.
+        cfg.min_belief_dwell_s = 0.0;
+        inp.belief_dwell_s = Some(1.0);
+        let (dec, _) = decide_entry(&inp, now, open_of(now), close_of(now),
+            &fresh_state(), session_none().as_ref(), &cfg);
+        assert_eq!(dec.action, EntryAction::Enter);
     }
 
     #[test]

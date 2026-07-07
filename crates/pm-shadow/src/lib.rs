@@ -93,6 +93,8 @@ pub struct ShadowArgs {
     pub skip_spot_against_all: bool,
     /// No entries until this many seconds after window open (0 = off).
     pub min_secs_from_open: u32,
+    /// Decision-quality gate: min seconds the belief held its side (0 = off).
+    pub min_belief_dwell_s: f64,
     /// Skip when the entered side's belief exceeds this (1.0 = off).
     pub max_p_side: f64,
     /// Skip when decision-time regime is `calm_low_vol`.
@@ -149,6 +151,7 @@ pub fn frozen_shadow_final_args(out_dir: PathBuf) -> ShadowArgs {
         skip_spot_misalign_s: 0,
         skip_spot_against_all: false,
         min_secs_from_open: 0,
+        min_belief_dwell_s: 0.0,
         max_p_side: 1.0,
         skip_calm: false,
         only_calm: false,
@@ -754,6 +757,7 @@ pub struct ShadowConfig {
     pub skip_spot_misalign_s: u32,
     pub skip_spot_against_all: bool,
     pub min_secs_from_open: u32,
+    pub min_belief_dwell_s: f64,
     pub max_p_side: f64,
     pub skip_calm: bool,
     pub only_calm: bool,
@@ -798,6 +802,7 @@ pub fn shadow_config_from_args(args: &ShadowArgs) -> ShadowConfig {
         skip_spot_misalign_s: args.skip_spot_misalign_s,
         skip_spot_against_all: args.skip_spot_against_all,
         min_secs_from_open: args.min_secs_from_open,
+        min_belief_dwell_s: args.min_belief_dwell_s,
         max_p_side: args.max_p_side,
         skip_calm: args.skip_calm,
         only_calm: args.only_calm,
@@ -1245,6 +1250,7 @@ impl ShadowCore {
         self.cfg.decide_cfg.skip_spot_misalign_s = self.cfg.skip_spot_misalign_s;
         self.cfg.decide_cfg.skip_spot_against_all = self.cfg.skip_spot_against_all;
         self.cfg.decide_cfg.min_secs_from_open = self.cfg.min_secs_from_open;
+        self.cfg.decide_cfg.min_belief_dwell_s = self.cfg.min_belief_dwell_s;
         self.cfg.decide_cfg.max_p_side = self.cfg.max_p_side;
         self.cfg.decide_cfg.skip_calm = self.cfg.skip_calm;
         self.cfg.decide_cfg.only_calm = self.cfg.only_calm;
@@ -1393,6 +1399,9 @@ impl ShadowCore {
                     spot_ret_300s_bps: pm_alpha::harness::spot_ret_bps(&spot, now_ns, 300),
                     spot_ret_600s_bps: pm_alpha::harness::spot_ret_bps(&spot, now_ns, 600),
                     spot_ret_900s_bps: pm_alpha::harness::spot_ret_bps(&spot, now_ns, 900),
+                    belief_dwell_s: m
+                        .belief_flip_ns
+                        .map(|f| (now_ns.saturating_sub(f)).max(0) as f64 / 1e9),
                 };
                 let (decision, delta) = decide_entry(
                     &inputs,
@@ -3239,6 +3248,7 @@ mod tests {
             skip_spot_misalign_s: 0,
             skip_spot_against_all: false,
             min_secs_from_open: 0,
+            min_belief_dwell_s: 0.0,
             max_p_side: 1.0,
             skip_calm: false,
             only_calm: false,

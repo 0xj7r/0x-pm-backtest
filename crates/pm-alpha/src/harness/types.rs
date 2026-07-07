@@ -117,6 +117,8 @@ pub struct HarnessConfig {
     /// No entries until this many seconds after market open (0 = off).
     #[serde(default)]
     pub min_secs_from_open: u32,
+    /// Decision-quality gate: min seconds the belief must have held its side.
+    pub min_belief_dwell_s: f64,
     /// Thesis gate: skip when entry ask exceeds this (1.0 = off).
     #[serde(default = "default_max_entry_ask")]
     pub max_entry_ask: f64,
@@ -307,6 +309,7 @@ impl Default for HarnessConfig {
             min_entry_ask: 0.0,
             max_entry_ask: 1.0,
             min_secs_from_open: 0,
+            min_belief_dwell_s: 0.0,
             vol_sizing_ref_bps: 0.0,
             vol_sizing_lo: 0.5,
             vol_sizing_hi: 2.0,

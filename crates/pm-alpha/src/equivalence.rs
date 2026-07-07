@@ -215,6 +215,7 @@ fn backtest_inputs(
         spot_ret_120s_bps: crate::harness::spot_ret_bps(spot, ts_ns, 120),
         spot_ret_300s_bps: crate::harness::spot_ret_bps(spot, ts_ns, 300),
         spot_ret_600s_bps: crate::harness::spot_ret_bps(spot, ts_ns, 600),
+        belief_dwell_s: None,
         spot_ret_900s_bps: crate::harness::spot_ret_bps(spot, ts_ns, 900),
     })
 }
@@ -344,6 +345,7 @@ fn live_inputs(
         spot_ret_120s_bps: crate::harness::spot_ret_bps(&spot, ts_ns, 120),
         spot_ret_300s_bps: crate::harness::spot_ret_bps(&spot, ts_ns, 300),
         spot_ret_600s_bps: crate::harness::spot_ret_bps(&spot, ts_ns, 600),
+        belief_dwell_s: None,
         spot_ret_900s_bps: crate::harness::spot_ret_bps(&spot, ts_ns, 900),
     })
 }

@@ -86,6 +86,10 @@ pub struct AlphaArgs {
     pub exit_at_mid: bool,
     pub passive_exit_timeout_s: u32,
     pub pair_completion_margin: f64,
+    /// Pair-lock loss hedge research knob (0 = off).
+    pub pair_lock_margin: f64,
+    /// Cut-loser stop research knob (0 = off).
+    pub cut_loser_p: f64,
     pub skip_calm: bool,
     pub only_calm: bool,
     pub aligned_mode: bool,
@@ -875,6 +879,8 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
         exit_at_mid: args.exit_at_mid,
         passive_exit_timeout_s: args.passive_exit_timeout_s,
         pair_completion_margin: args.pair_completion_margin,
+        pair_lock_margin: args.pair_lock_margin,
+        cut_loser_p: args.cut_loser_p,
         skip_calm: args.skip_calm,
         only_calm: args.only_calm,
         entry_mode: if args.aligned_mode { EntryMode::Aligned } else { EntryMode::Fade },

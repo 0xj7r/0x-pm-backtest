@@ -267,6 +267,19 @@ pub struct HarnessConfig {
     /// Skip when 60/300/600/900s spot all disagree with entry side.
     #[serde(default)]
     pub skip_spot_against_all: bool,
+    /// Pair-lock loss hedge: while a held position has net exposure on side
+    /// A, buy the opposite side for exactly the net exposed shares once
+    /// avg_cost_A + opposite_ask <= 1 - margin (locks the pair). At most one
+    /// hedge per market; exempt from entry gates (loss management, not
+    /// signal). 0 = off (parity).
+    #[serde(default)]
+    pub pair_lock_margin: f64,
+    /// Cut-loser stop: while a held position has net exposure on side A
+    /// bought at avg cost c, sell the net exposed shares at the bid (taker)
+    /// once the side's bid drops below cut_loser_p * c. Once per market;
+    /// first trigger between this and the pair lock wins. 0 = off (parity).
+    #[serde(default)]
+    pub cut_loser_p: f64,
 }
 
 fn default_open_fav_p_min() -> f64 {
@@ -353,6 +366,8 @@ impl Default for HarnessConfig {
             max_rearm_entry_ask: 0.0,
             skip_spot_misalign_s: 0,
             skip_spot_against_all: false,
+            pair_lock_margin: 0.0,
+            cut_loser_p: 0.0,
         }
     }
 }
@@ -472,6 +487,14 @@ pub struct TradeRecord {
     /// True when this entry filled as a resting maker bid (zero fee).
     #[serde(default)]
     pub maker_entry: bool,
+    /// True for a pair-lock hedge leg (opposite-side buy sized to the net
+    /// exposed shares; loss management, not signal).
+    #[serde(default)]
+    pub is_hedge: bool,
+    /// True for a cut-loser sell leg. Its `pnl` is the DELTA vs the held
+    /// records' settle-at-resolution accounting: sold * (px - payout) - fee.
+    #[serde(default)]
+    pub is_cut: bool,
 }
 
 /// A probability sample at a fixed checkpoint, for log-loss scoring of the

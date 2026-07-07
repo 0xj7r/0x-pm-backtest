@@ -201,6 +201,8 @@ mod tests {
                 stopped: false,
                 stop_hold_pnl: None,
                 maker_entry: false,
+                is_hedge: false,
+                is_cut: false,
             }],
             samples: vec![ProbSample {
                 ts_ns: 60_000_000_000,

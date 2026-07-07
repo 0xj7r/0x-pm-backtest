@@ -51,3 +51,26 @@ clips at-touch. At 1% fractional clips on the current $850 bankroll (~$8.5),
 that scales to roughly $50-70/day on comparable tape BEFORE the live haircut
 that the micro-live phase will measure. The point of the gate is not this
 number; it is that the number should REPRODUCE across runs.
+
+## Candidate v2 (pre-registered 2026-07-07): belief-dwell gate
+
+Spec: `min_belief_dwell_s = 60` on the frozen config, current (timer)
+architecture. Basis: at truthful latency (1250ms) the June replay shows
+dwell>=60 BEATS ungated (+$3,174 vs +$2,506, hit 67.0% vs 62.0%, on 1,841
+trades) because young-dwell burst trades no longer pay by fill time at our
+real reaction speed; the gate additionally removes the live phantom bucket
+(cross-process agreement 43-58% there). Implementation: first-class
+belief_dwell_s input in decide_entry on all paths (commit 607c62ea),
+regression-tested, default off.
+
+Pass criteria on July live evidence (dwell_split.jsonl, final stream, all
+non-Saturday days from Jul 7 to judgment; judged no earlier than Jul 12):
+1. dwell[0,60) bucket cumulative at-touch P&L <= 0 (the bucket the gate
+   removes must not be reliably profitable live).
+2. dwell[60,inf) bucket hit rate >= its June-replay analogue minus 5 points
+   (>= 62%).
+3. dwell[60,inf) cumulative at-touch P&L positive.
+Criteria fixed now; no threshold iteration on the same window. v1 (entry
+delay + extremity cap) continues to be judged on its own criteria; if both
+pass, v2 is preferred at current architecture (replay-superior), v1+v2
+combination requires a fresh window.

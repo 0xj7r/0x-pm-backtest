@@ -47,7 +47,7 @@ def live_day(shadow_dir: Path, day: str) -> dict[str, dict]:
         ents.sort(key=lambda x: x["ts_utc"])
         rs = sorted(resols.get(k, []), key=lambda x: x["ts_utc"])
         for e, r in zip(ents, rs):
-            if int(e.get("clip", 1)) != 1:
+            if int(e.get("clip", 1)) > 1:
                 continue
             touch = e.get("touch_price")
             if not touch:

@@ -40,10 +40,15 @@ def newest(dir_: Path) -> Path | None:
 class Tail:
     """Follow the newest shadow JSONL in a directory, surviving rotations."""
 
-    def __init__(self, dir_: Path):
+    def __init__(self, dir_: Path, tail_from_end: bool = True):
         self.dir = dir_
         self.path: Path | None = None
         self.pos = 0
+        # Skip pre-existing backlog on startup so the two twins are matched
+        # from the same instant forward; without this, mismatched file history
+        # depth (one twin restarted more recently) manufactures phantom
+        # "expired" singletons at boot. Genuine rotations still read from 0.
+        self._skip_backlog = tail_from_end
 
     def poll(self) -> list[dict]:
         latest = newest(self.dir)
@@ -51,7 +56,11 @@ class Tail:
             return []
         if latest != self.path:
             self.path = latest
-            self.pos = 0
+            if self._skip_backlog:
+                self.pos = latest.stat().st_size
+                self._skip_backlog = False
+            else:
+                self.pos = 0
         out = []
         with open(self.path, "rb") as f:
             f.seek(self.pos)

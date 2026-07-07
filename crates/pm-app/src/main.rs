@@ -357,6 +357,18 @@ enum Cmd {
         /// least this margin against leg 1's cost (0 disables).
         #[arg(long, default_value = "0")]
         pair_completion_margin: f64,
+        /// Pair-lock loss hedge (research knob): with a held net position on
+        /// side A, buy the opposite side for exactly the net exposed shares
+        /// once avg_cost_A + opposite ask <= 1 - margin. One hedge per
+        /// market; exempt from entry gates. 0 disables (parity).
+        #[arg(long, default_value = "0.0")]
+        pair_lock_margin: f64,
+        /// Cut-loser stop (research knob): with a held net position on side
+        /// A at avg cost c, sell the net exposed shares at the bid once the
+        /// side's bid drops below this fraction of c. Once per market; first
+        /// trigger vs the pair lock wins. 0 disables (parity).
+        #[arg(long, default_value = "0.0")]
+        cut_loser_p: f64,
         /// Skip entries in calm_low_vol regime.
         #[arg(long)]
         skip_calm: bool,
@@ -1563,6 +1575,8 @@ async fn main() -> Result<()> {
             exit_at_mid,
             passive_exit_timeout_s,
             pair_completion_margin,
+            pair_lock_margin,
+            cut_loser_p,
             skip_calm,
             only_calm,
             aligned_mode,
@@ -1662,6 +1676,8 @@ async fn main() -> Result<()> {
                     exit_at_mid,
                     passive_exit_timeout_s,
                     pair_completion_margin,
+                    pair_lock_margin,
+                    cut_loser_p,
                     skip_calm,
                     only_calm,
                     aligned_mode,

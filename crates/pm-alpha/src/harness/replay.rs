@@ -300,6 +300,32 @@ struct OpenLeg {
     /// Decisions at-or-after this instant can no longer complete the pair
     /// (the leg's scheduled exit, or close when held to resolution).
     complete_until_ns: i64,
+    /// Already counted in the position-management held-exposure ledger
+    /// (false when the leg had a scheduled exit at push time).
+    in_held: bool,
+}
+
+/// One held-to-resolution leg, tracked for the position-management knobs
+/// (pair-lock hedge / cut-loser stop). Live from its fill instant onward.
+struct HeldLeg {
+    side: Side,
+    shares: f64,
+    /// Total dollars paid (shares * avg fill price).
+    cost: f64,
+    fill_ts_ns: i64,
+}
+
+/// Pair-lock trigger: buying the opposite side at `opp_ask` against a held
+/// position averaging `avg_cost` locks the pair at a combined cost of
+/// avg_cost + opp_ask; hedge once that locks at least `margin` under $1.
+pub(crate) fn should_pair_lock(avg_cost: f64, opp_ask: f64, margin: f64) -> bool {
+    opp_ask > 0.0 && avg_cost + opp_ask <= 1.0 - margin
+}
+
+/// Cut-loser trigger: the held side's current bid has decayed below
+/// `cut_p` of its average entry cost.
+pub(crate) fn should_cut_loser(avg_cost: f64, side_bid: f64, cut_p: f64) -> bool {
+    side_bid > 0.0 && avg_cost > 0.0 && side_bid < cut_p * avg_cost
 }
 
 /// Execute one (latency, threshold) combination against a shared belief
@@ -329,6 +355,14 @@ fn execute(
     // re-arm level). Inert when rearm_edge is 0.
     let rearm_active = cfg.rearm_edge > 0.0;
     let mut armed = true;
+    // Post-entry position management (research knobs, default off): while a
+    // held position has net exposure, hedge it (pair lock) or cut it (loser
+    // stop). First trigger wins; at most one action per market.
+    let pair_lock_active = cfg.pair_lock_margin > 0.0;
+    let cut_loser_active = cfg.cut_loser_p > 0.0;
+    let pm_active = pair_lock_active || cut_loser_active;
+    let mut pm_done = false;
+    let mut held: Vec<HeldLeg> = Vec::new();
 
     for d in &pass.decisions {
         // Pair completion: buy the opposite token once its ask locks at
@@ -409,14 +443,203 @@ fn execute(
                     stopped: false,
                     stop_hold_pnl: None,
                     maker_entry: false,
+                    is_hedge: false,
+                    is_cut: false,
                 });
+                if pm_active {
+                    // Leg 1 reverted to hold-to-resolution above: enter it in
+                    // the held ledger if its scheduled exit had kept it out.
+                    if !l1.in_held {
+                        held.push(HeldLeg {
+                            side: l1.side,
+                            shares: l1.shares,
+                            cost: l1.avg_price * l1.shares,
+                            fill_ts_ns: trades[l1.trade_idx].fill_ts_ns,
+                        });
+                    }
+                    held.push(HeldLeg {
+                        side: opp,
+                        shares: sh2,
+                        cost: px2 * sh2,
+                        fill_ts_ns: fill_tick.ts_ns,
+                    });
+                }
                 leg1 = None;
                 continue;
             }
         }
+        // Position management runs on every decision tick with an open net
+        // exposure, independent of clip budget and entry gates (it is loss
+        // management, not signal). belief_pass already bounds decisions to
+        // before the stop_before_close_s deadline.
+        if pm_active && !pm_done {
+            let (mut yes_sh, mut yes_cost, mut no_sh, mut no_cost) = (0.0, 0.0, 0.0, 0.0);
+            for l in held.iter().filter(|l| l.fill_ts_ns <= d.ts_ns) {
+                match l.side {
+                    Side::Yes => {
+                        yes_sh += l.shares;
+                        yes_cost += l.cost;
+                    }
+                    Side::No => {
+                        no_sh += l.shares;
+                        no_cost += l.cost;
+                    }
+                }
+            }
+            let net = yes_sh - no_sh;
+            if net.abs() > 1e-9 {
+                let (side_a, exposed, avg_a) = if net > 0.0 {
+                    (Side::Yes, net, yes_cost / yes_sh)
+                } else {
+                    (Side::No, -net, no_cost / no_sh)
+                };
+                let opp = side_a.opposite();
+                let opp_ask = match opp {
+                    Side::Yes => d.yes_ask,
+                    Side::No => d.no_buy,
+                };
+                if pair_lock_active
+                    && should_pair_lock(avg_a, opp_ask, cfg.pair_lock_margin)
+                    && let Some(fill_tick) = series.ticks[d.tick_idx..]
+                        .iter()
+                        .find(|t| t.ts_ns >= d.ts_ns + latency_ns && t.ts_ns <= close_ns)
+                    && let Some((px, sh)) = fill_shares(
+                        fill_tick,
+                        opp,
+                        exposed,
+                        cfg.depth_capture_frac,
+                        cfg.skip_touch_level,
+                    )
+                {
+                    let fee = px * sh * cfg.taker_fee_bps / 10_000.0
+                        + curve_fee(cfg.fee_curve_rate, px, sh);
+                    let won = match opp {
+                        Side::Yes => series.resolved_yes,
+                        Side::No => !series.resolved_yes,
+                    };
+                    let payout = if won { 1.0 } else { 0.0 };
+                    let (r10, r30, r60, r120, basis, aligned) = momentum_from_decision(d, opp);
+                    trades.push(TradeRecord {
+                        sigma_bar_bps: d.sigma_bar_bps,
+                        side_ask_at_decision: 0.0,
+                        trail_min_ask_10s: None,
+                        trail_min_ask_20s: None,
+                        trail_min_ask_40s: None,
+                        stable_entry: true,
+                        regime_at_decision: d.regime_at_decision,
+                        secs_from_open: 0,
+                        spot_ret_10s_bps: r10,
+                        spot_ret_30s_bps: r30,
+                        spot_ret_60s_bps: r60,
+                        spot_ret_120s_bps: r120,
+                        basis_mom_60s_bps: basis,
+                        side_aligned_30s: aligned,
+                        side: opp,
+                        decision_ts_ns: d.ts_ns,
+                        fill_ts_ns: fill_tick.ts_ns,
+                        avg_price: px,
+                        shares: sh,
+                        fee,
+                        p_exo: d.p_up,
+                        mid_at_decision: d.mid,
+                        pnl: sh * (payout - px) - fee,
+                        won,
+                        exit_price: None,
+                        mark_60s: None,
+                        pnl_exit_mid_optimistic: None,
+                        is_completion: false,
+                        exit_filled_at_mid: None,
+                        fee_hold: false,
+                        hold_alt_sell_pnl: None,
+                        hold_alt_exit_fee: None,
+                        stopped: false,
+                        stop_hold_pnl: None,
+                        maker_entry: false,
+                        is_hedge: true,
+                        is_cut: false,
+                    });
+                    pm_done = true;
+                    leg1 = None;
+                    continue;
+                }
+                if cut_loser_active
+                    && should_cut_loser(
+                        avg_a,
+                        side_bid(&series.ticks[d.tick_idx], side_a),
+                        cfg.cut_loser_p,
+                    )
+                    && let Some(sell_tick) = series.ticks[d.tick_idx..]
+                        .iter()
+                        .find(|t| t.ts_ns >= d.ts_ns + latency_ns && t.ts_ns <= close_ns)
+                    && let Some((px, sold)) = sell_fill(
+                        sell_tick,
+                        side_a,
+                        exposed,
+                        cfg.depth_capture_frac,
+                        cfg.skip_touch_level,
+                    )
+                {
+                    let fee = px * sold * cfg.taker_fee_bps / 10_000.0
+                        + curve_fee(cfg.fee_curve_rate, px, sold);
+                    let won_a = match side_a {
+                        Side::Yes => series.resolved_yes,
+                        Side::No => !series.resolved_yes,
+                    };
+                    let payout_a = if won_a { 1.0 } else { 0.0 };
+                    // Delta vs the held records' settle-at-resolution pnl:
+                    // the sold shares realize px instead of the payout.
+                    let pnl = sold * (px - payout_a) - fee;
+                    let (r10, r30, r60, r120, basis, aligned) =
+                        momentum_from_decision(d, side_a);
+                    trades.push(TradeRecord {
+                        sigma_bar_bps: d.sigma_bar_bps,
+                        side_ask_at_decision: 0.0,
+                        trail_min_ask_10s: None,
+                        trail_min_ask_20s: None,
+                        trail_min_ask_40s: None,
+                        stable_entry: true,
+                        regime_at_decision: d.regime_at_decision,
+                        secs_from_open: 0,
+                        spot_ret_10s_bps: r10,
+                        spot_ret_30s_bps: r30,
+                        spot_ret_60s_bps: r60,
+                        spot_ret_120s_bps: r120,
+                        basis_mom_60s_bps: basis,
+                        side_aligned_30s: aligned,
+                        side: side_a,
+                        decision_ts_ns: d.ts_ns,
+                        fill_ts_ns: sell_tick.ts_ns,
+                        avg_price: avg_a,
+                        shares: sold,
+                        fee,
+                        p_exo: d.p_up,
+                        mid_at_decision: d.mid,
+                        pnl,
+                        won: pnl > 0.0,
+                        exit_price: Some(px),
+                        mark_60s: None,
+                        pnl_exit_mid_optimistic: None,
+                        is_completion: false,
+                        exit_filled_at_mid: None,
+                        fee_hold: false,
+                        hold_alt_sell_pnl: None,
+                        hold_alt_exit_fee: None,
+                        stopped: false,
+                        stop_hold_pnl: None,
+                        maker_entry: false,
+                        is_hedge: false,
+                        is_cut: true,
+                    });
+                    pm_done = true;
+                    leg1 = None;
+                    continue;
+                }
+            }
+        }
         if n_clips >= max_clips {
-            if pair_completion && leg1.is_some() {
-                continue; // out of clips, but the pair may still complete
+            if (pair_completion && leg1.is_some()) || (pm_active && !pm_done) {
+                continue; // out of clips, but a pair completion or a
+                // position-management trigger may still act
             }
             break;
         }
@@ -553,6 +776,8 @@ fn execute(
                         stable_entry: true,
                         stopped: false,
                         stop_hold_pnl: None,
+                        is_hedge: false,
+                        is_cut: false,
                     });
                 }
             }
@@ -828,8 +1053,21 @@ fn execute(
             stopped,
             stop_hold_pnl,
             maker_entry: false,
-        
-                    });
+            is_hedge: false,
+            is_cut: false,
+        });
+        // Position-management ledger: only legs whose accounting settles at
+        // resolution carry open exposure forward (sold/stopped legs already
+        // managed themselves).
+        let entered_held = pm_active && exit_price.is_none();
+        if entered_held {
+            held.push(HeldLeg {
+                side,
+                shares,
+                cost: avg_price * shares,
+                fill_ts_ns: fill_tick.ts_ns,
+            });
+        }
         if pair_completion && !first_entry_done && !stopped {
             first_entry_done = true;
             leg1 = Some(OpenLeg {
@@ -843,6 +1081,7 @@ fn execute(
                 } else {
                     close_ns
                 },
+                in_held: entered_held,
             });
         }
 
@@ -908,7 +1147,17 @@ fn execute(
                     stopped: false,
                     stop_hold_pnl: None,
                     maker_entry: false,
+                    is_hedge: false,
+                    is_cut: false,
                 });
+                if pm_active {
+                    held.push(HeldLeg {
+                        side: tail_side,
+                        shares: tail_shares,
+                        cost: tail_price * tail_shares,
+                        fill_ts_ns: fill_tick.ts_ns,
+                    });
+                }
             }
         }
     }
@@ -1522,5 +1771,140 @@ mod tests {
             let p = d.dir_p_up.expect("move in progress must carry a dir belief");
             assert!((p - 0.5).abs() < 1e-12, "all-zero head is exactly 0.5: {p}");
         }
+    }
+
+    /// 0.48/0.50 book until t=2010, then `later_bid`/`later_ask` to close.
+    /// The pre-open +1% jump makes the first decision a YES entry at 0.50.
+    fn shifted_book_series(
+        resolved_yes: bool,
+        later_bid: f32,
+        later_ask: f32,
+    ) -> (MarketSeries, SpotHistory) {
+        let ticks = (2_000..2_300)
+            .map(|s| {
+                if s < 2_010 {
+                    book_tick(s, 0.48, 0.50)
+                } else {
+                    book_tick(s, later_bid, later_ask)
+                }
+            })
+            .collect();
+        (series(resolved_yes, ticks), spot_with_jump(2_400, 1_900))
+    }
+
+    #[test]
+    fn pair_lock_predicate_fires_only_when_the_pair_locks_the_margin() {
+        // 0.50 held + 0.30 opposite = 0.80 locks 0.10 under $1 - margin.
+        assert!(should_pair_lock(0.50, 0.30, 0.10));
+        // 0.95 combined cannot lock a 0.10 margin.
+        assert!(!should_pair_lock(0.50, 0.45, 0.10));
+        // Deeper margins still fire when the lock is cheap enough.
+        assert!(should_pair_lock(0.40, 0.55, 0.02));
+        // No opposite ask: nothing to buy.
+        assert!(!should_pair_lock(0.50, 0.0, 0.10));
+        // Margin 0 still requires the pair at-or-under $1.
+        assert!(!should_pair_lock(0.50, 0.52, 0.0));
+    }
+
+    #[test]
+    fn cut_loser_predicate_fires_only_below_the_cost_fraction() {
+        // Bid 0.10 < 0.3 * 0.50 = 0.15: the leg decayed below the fraction.
+        assert!(should_cut_loser(0.50, 0.10, 0.3));
+        // Bid 0.20 >= 0.15: still worth holding.
+        assert!(!should_cut_loser(0.50, 0.20, 0.3));
+        // Empty bid never triggers (nothing to sell into).
+        assert!(!should_cut_loser(0.50, 0.0, 0.9));
+        // Zero cost basis never triggers.
+        assert!(!should_cut_loser(0.0, 0.10, 0.3));
+        // Knob at 0 never triggers.
+        assert!(!should_cut_loser(0.50, 0.10, 0.0));
+    }
+
+    #[test]
+    fn position_management_knobs_default_off_and_emit_no_records() {
+        let defaults = HarnessConfig::default();
+        assert_eq!(defaults.pair_lock_margin, 0.0);
+        assert_eq!(defaults.cut_loser_p, 0.0);
+        // Books that would trigger each knob were it on: neither may act.
+        for (series, spot) in [
+            shifted_book_series(true, 0.70, 0.72),
+            shifted_book_series(false, 0.10, 0.12),
+        ] {
+            let cfg = HarnessConfig {
+                latency_ms: 0,
+                edge_threshold: 0.3,
+                ..HarnessConfig::default()
+            };
+            let out = run_market(&series, &spot, &AlphaModel::default(), &cfg);
+            assert_eq!(out.trades.len(), 1, "single entry, no management legs");
+            assert!(out.trades.iter().all(|t| !t.is_hedge && !t.is_cut));
+        }
+    }
+
+    #[test]
+    fn pair_lock_hedges_net_exposure_once_when_the_pair_locks() {
+        // Entry: Yes 100 @ 0.50 at t=2000. From t=2010 the book trades
+        // 0.70/0.72, so buying No costs 1 - 0.70 = 0.30 and the pair locks
+        // at 0.80 <= 1 - 0.10. The hedge buys exactly the exposed shares.
+        let (series, spot) = shifted_book_series(true, 0.70, 0.72);
+        let cfg = HarnessConfig {
+            latency_ms: 0,
+            edge_threshold: 0.3,
+            pair_lock_margin: 0.10,
+            ..HarnessConfig::default()
+        };
+        let out = run_market(&series, &spot, &AlphaModel::default(), &cfg);
+        assert_eq!(out.trades.len(), 2, "entry + one hedge");
+        let hedge = &out.trades[1];
+        assert!(hedge.is_hedge && !hedge.is_cut);
+        assert_eq!(hedge.side, Side::No);
+        assert_eq!(
+            hedge.decision_ts_ns,
+            2_010 * 1_000_000_000,
+            "first tick where the lock is available"
+        );
+        assert!((hedge.shares - 100.0).abs() < 1e-6, "net exposed: {}", hedge.shares);
+        assert!((hedge.avg_price - 0.30).abs() < 1e-6, "No ask: {}", hedge.avg_price);
+        // Resolved YES: the No hedge pays 0. 100 * (0 - 0.30) = -30.
+        assert!((hedge.pnl + 30.0).abs() < 1e-4, "hedge pnl: {}", hedge.pnl);
+        assert!(!hedge.won);
+        assert_eq!(
+            out.trades.iter().filter(|t| t.is_hedge).count(),
+            1,
+            "at most one hedge per market despite the lock persisting"
+        );
+        // Entry leg unchanged: 100 * (1 - 0.50) = +50.
+        assert!((out.trades[0].pnl - 50.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cut_loser_sells_net_exposure_at_the_bid_once() {
+        // Entry: Yes 100 @ 0.50 at t=2000. From t=2010 the book trades
+        // 0.10/0.12: the leg's bid is 0.10 < 0.3 * 0.50, so the cut sells
+        // the 100 exposed shares at the bid. The delta record carries
+        // sold * (px - payout) = 100 * (0.10 - 0) = +10 vs settling at 0.
+        let (series, spot) = shifted_book_series(false, 0.10, 0.12);
+        let cfg = HarnessConfig {
+            latency_ms: 0,
+            edge_threshold: 0.3,
+            cut_loser_p: 0.3,
+            ..HarnessConfig::default()
+        };
+        let out = run_market(&series, &spot, &AlphaModel::default(), &cfg);
+        assert_eq!(out.trades.len(), 2, "entry + one cut");
+        let cut = &out.trades[1];
+        assert!(cut.is_cut && !cut.is_hedge);
+        assert_eq!(cut.side, Side::Yes);
+        assert_eq!(cut.decision_ts_ns, 2_010 * 1_000_000_000);
+        assert!((cut.shares - 100.0).abs() < 1e-6, "net exposed: {}", cut.shares);
+        let px = cut.exit_price.expect("cut sells at the bid");
+        assert!((px - 0.10).abs() < 1e-6, "bid: {px}");
+        assert!((cut.pnl - 10.0).abs() < 1e-4, "delta vs hold-to-zero: {}", cut.pnl);
+        // Entry record keeps settle-at-resolution accounting: -50.
+        assert!((out.trades[0].pnl + 50.0).abs() < 1e-9);
+        // Market total improves from -50 held to -40 cut.
+        let total: f64 = out.trades.iter().map(|t| t.pnl).sum();
+        assert!((total + 40.0).abs() < 1e-4, "total: {total}");
+        assert_eq!(out.trades.iter().filter(|t| t.is_cut).count(), 1);
     }
 }

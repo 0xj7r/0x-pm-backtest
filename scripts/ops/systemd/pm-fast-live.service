@@ -1,0 +1,20 @@
+[Unit]
+Description=fast_live: in-process engine + execution, 100ms cadence (PAPER; the fast-architecture measurement stream)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu
+EnvironmentFile=-/home/ubuntu/.config/polymarket-exec/shadow_exec_tail.env
+Environment=PM_SHADOW_PAPER_MODE=true
+Environment=PM_SHADOW_LIVE_TRADE=false
+Environment=RUST_LOG=info
+ExecStart=/home/ubuntu/deploy-main/polymarket-agent/target/release/fast_live --paper --out-dir /home/ubuntu/data/pm-alpha/shadow-fast --decide-interval-ms 100
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/ubuntu/data/pm-alpha/fast_live.log
+StandardError=append:/home/ubuntu/data/pm-alpha/fast_live.log
+
+[Install]
+WantedBy=default.target

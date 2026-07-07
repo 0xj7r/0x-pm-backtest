@@ -74,3 +74,27 @@ Criteria fixed now; no threshold iteration on the same window. v1 (entry
 delay + extremity cap) continues to be judged on its own criteria; if both
 pass, v2 is preferred at current architecture (replay-superior), v1+v2
 combination requires a fresh window.
+
+## Candidate v2 verdict: FALSIFIED pre-judgment (2026-07-07)
+
+Pre-June validation (user-requested) on May 7-28, the protocol's own
+VERIFY+HOLDOUT windows, at truthful latencies:
+
+| May 7-28 | ungated | dwell>=60 | gate cost |
+|---|---|---|---|
+| 1250ms | +$17,342 | +$283 | -98% |
+| 750ms | +$25,986 | +$4,964 | -81% |
+
+In big-move regimes the young-dwell burst entries are the payload, profitable
+even at slow fills; June's chop made them worthless at 1250ms, which is the
+only reason the June replay preferred the gate. A standing dwell gate
+amputates the fat months. v2 is DEAD as a standing config; dwell remains a
+telemetry/diagnostic field. The same regime-dependence test (May at truthful
+latency) is now REQUIRED for any future gate candidate before its July-style
+judgment; v1 is undergoing it now.
+
+Standing conclusions this cements: speed generalizes across regimes (fast
+engine +50% in May, +200% in June); entry gates so far do not; the only
+quality layer with zero replay cost by construction is consensus execution
+(it drops only cross-observer disagreements, and a real burst is seen by
+both twins).

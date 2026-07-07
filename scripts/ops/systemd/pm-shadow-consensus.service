@@ -1,0 +1,16 @@
+[Unit]
+Description=Consensus sidecar: forward would_enter only when both 5m twins agree (PAPER measurement)
+After=network-online.target pm-shadow-final.service pm-shadow-final-b.service
+Wants=pm-shadow-final.service pm-shadow-final-b.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu
+ExecStart=/usr/bin/python3 /home/ubuntu/pm-backtest/scripts/ops/consensus_tail.py --a-dir /home/ubuntu/data/pm-alpha/shadow-final --b-dir /home/ubuntu/data/pm-alpha/shadow-final-b --out-dir /home/ubuntu/data/pm-alpha/shadow-consensus --window-s 45
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/ubuntu/data/pm-alpha/consensus.log
+StandardError=append:/home/ubuntu/data/pm-alpha/consensus.log
+
+[Install]
+WantedBy=default.target

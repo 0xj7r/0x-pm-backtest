@@ -98,3 +98,12 @@ engine +50% in May, +200% in June); entry gates so far do not; the only
 quality layer with zero replay cost by construction is consensus execution
 (it drops only cross-observer disagreements, and a real burst is seen by
 both twins).
+
+## v1 May falsification: PASS (2026-07-07)
+
+Same test that killed v2: May 7-28 at truthful latency. v1 gated keeps
++$15,571 of +$17,342 at 1250ms (-10%) and +$24,758 of +$25,986 at 750ms
+(-5%). May's payload trades are sustained-trend entries arriving after 15s,
+so the gate shaves only the open-second scalps (the live phantom zone).
+v1 is regime-robust where v2 was regime-fragile; its pre-registered July
+judgment (criteria in this doc, ~Jul 11-12) proceeds as planned.

@@ -6,7 +6,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/home/ubuntu
-EnvironmentFile=-/home/ubuntu/.config/polymarket-exec/shadow_exec_tail.env
+# No EnvironmentFile: paper mode needs no creds, and the exec env file
+# carries live-arming vars that EnvironmentFile would apply OVER Environment=.
 Environment=PM_SHADOW_PAPER_MODE=true
 Environment=PM_SHADOW_LIVE_TRADE=false
 Environment=RUST_LOG=info

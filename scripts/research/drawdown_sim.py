@@ -7,30 +7,45 @@ builds a daily P&L series, then simulates fractional sizing with the venue's
 5-share minimum order constraint (which puts a hard floor on clip size and breaks
 the "shrink smoothly to zero" property below a critical equity).
 
+NOTE (2026-07 hardening, per reviews/drawdown-glm-review.md): the floor entry price
+defaults to the p99 of the observed entry prices (--floor-price p99), the honest
+binding price. The median understated where the floor first bites, and the absolute
+max (0.95) is a <0.005%-frequency outlier that overstates it; p99 sits at the true
+binding edge. Also added in this pass: an asymmetric loss haircut, a clustered
+(regime-persistent) day-ordering adversary alongside the uniform shuffle, a
+floor-band-breach headline metric, and a committed CSV snapshot of the daily P&L
+series so the analysis re-runs from the repo alone.
+
 Model assumptions (all stated so a reviewer can challenge them):
   - Daily P&L at $50 telemetry clips is treated as linearly scalable to any clip
     size: pnl(clip) = pnl_at_50 * clip/50. Ignores market impact (clips are $2-10,
     book depth is far larger) and treats a day's fill mix as clip-invariant.
-  - REALIZATION haircut multiplies every day's P&L (default 1.0 = raw replay;
-    0.6 = conservative live capture). Applied symmetrically to wins and losses.
+  - REALIZATION haircut multiplies positive daily P&L; --loss-haircut multiplies
+    negative daily P&L (default = --haircut, i.e. symmetric = the prior behavior).
+    Live losses can exceed replay, so --loss-haircut can be set larger to model a
+    pessimistic-loss case without touching the win side.
   - 5-share floor: minimum order notional = 5 * entry_price. Below the equity
     where frac*E < floor, the clip is forced UP to the floor (flat-min betting).
-  - Median entry price used for the floor unless --price given; real entries span
-    ~0.45 (min_entry_ask) to ~0.85 (v1 p_side cap).
-  - Monte Carlo shuffles the day order to estimate drawdown/ruin distribution;
-    the daily P&L values are resampled without replacement (a permutation), which
-    preserves the realized win/loss mix but destroys autocorrelation.
+  - Floor entry price: p99 of observed entry prices by default (--floor-price p99),
+    i.e. the honest binding price; choose median/p95/p99/max via --floor-price or
+    override outright with --price.
+  - Day ordering: the uniform Monte Carlo shuffle is exchangeable and destroys loss
+    clustering; --cluster adds a regime-sticky 2-state model that preserves the
+    exact red-fraction while clustering reds, exposing the tail the uniform hides.
 
 Usage:
   python3 scripts/research/drawdown_sim.py
-  python3 scripts/research/drawdown_sim.py --start 850 --frac 0.0075 --haircut 0.6
+  python3 scripts/research/drawdown_sim.py --cluster --start 600
+  python3 scripts/research/drawdown_sim.py --loss-haircut 1.0 --haircut 0.6
+  python3 scripts/research/drawdown_sim.py --dump-series data/research/daily_pnl_series.csv
 """
 from __future__ import annotations
 
 import argparse
+import csv
 import datetime
-import glob
 import json
+import os
 import random
 
 TRADE_FILES = [
@@ -40,28 +55,106 @@ TRADE_FILES = [
     "data/runs/may_dwell_sweep/may_lat1250_ungated_trades.jsonl",
     "data/runs/latency_truth/btc5m_lat1250_trades.jsonl",
 ]
+SERIES_CSV = "data/research/daily_pnl_series.csv"
 MIN_SHARES = 5.0
 CEIL_DEFAULT = 10.0
 TELEMETRY_CLIP = 50.0
 
 
-def load_daily():
+def _load_raw():
+    """Aggregate the per-trade dumps into sorted (date, pnl) rows and the list of
+    entry prices. Returns ([], []) when the gitignored dumps are absent."""
     daily, prices = {}, []
     for fp in TRADE_FILES:
         try:
             f = open(fp)
         except FileNotFoundError:
             continue
-        for line in f:
-            t = json.loads(line)
-            d = datetime.datetime.fromtimestamp(
-                t["fill_ts_ns"] / 1e9, datetime.timezone.utc).date().isoformat()
-            daily[d] = daily.get(d, 0.0) + t["pnl"]
-            if t.get("avg_price"):
-                prices.append(t["avg_price"])
+        with f:
+            for line in f:
+                t = json.loads(line)
+                d = datetime.datetime.fromtimestamp(
+                    t["fill_ts_ns"] / 1e9, datetime.timezone.utc).date().isoformat()
+                daily[d] = daily.get(d, 0.0) + t["pnl"]
+                if t.get("avg_price"):
+                    prices.append(t["avg_price"])
+    rows = [(d, daily[d]) for d in sorted(daily)]
+    return rows, prices
+
+
+def _percentile(sorted_vals, p):
+    """Linear-interpolation percentile of an ascending-sorted list. Returns the
+    p-th percentile (e.g. p=95) used to pick a binding floor entry price."""
+    if not sorted_vals:
+        return None
+    k = (len(sorted_vals) - 1) * (p / 100.0)
+    lo = int(k)
+    hi = min(lo + 1, len(sorted_vals) - 1)
+    return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * (k - lo)
+
+
+def _load_series_csv(path):
+    """Read the committed daily P&L snapshot (date, pnl_at_50, med_price,
+    max_price, p95_price, p99_price). Fallback used when the raw trade dumps are
+    absent. Returns (seq, median, max, p95, p99)."""
+    try:
+        f = open(path)
+    except FileNotFoundError:
+        return [], 0.59, 0.95, 0.822, 0.8835
+    med, mx, p95, p99 = 0.59, 0.95, 0.822, 0.8835
+    seq = []
+    with f:
+        r = csv.reader(f)
+        next(r, None)  # header
+        for row in r:
+            if not row:
+                continue
+            seq.append(float(row[1]))
+            if len(row) >= 4:
+                med, mx = float(row[2]), float(row[3])
+            if len(row) >= 6:
+                p95, p99 = float(row[4]), float(row[5])
+    return seq, med, mx, p95, p99
+
+
+def load_daily(series_csv=SERIES_CSV):
+    """Return (daily_pnl_series, median_price, max_price, p95_price, p99_price).
+    Reads the raw trade dumps when present; otherwise falls back to the committed
+    CSV snapshot so the sim is reproducible from the repo with no external data."""
+    rows, prices = _load_raw()
+    if rows:
+        prices.sort()
+        med = prices[len(prices) // 2] if prices else 0.59
+        mx = prices[-1] if prices else 0.95
+        p95 = _percentile(prices, 95) or 0.822
+        p99 = _percentile(prices, 99) or 0.8835
+        return [p for _, p in rows], med, mx, p95, p99
+    return _load_series_csv(series_csv)
+
+
+def dump_series(path):
+    """Write the daily P&L series (date, pnl_at_50, med_price, max_price,
+    p95_price, p99_price) to CSV. Requires the raw trade dumps. Returns rows
+    written (0 = no data)."""
+    rows, prices = _load_raw()
+    if not rows:
+        return 0
     prices.sort()
-    med_price = prices[len(prices) // 2] if prices else 0.59
-    return [daily[d] for d in sorted(daily)], med_price
+    med = prices[len(prices) // 2] if prices else 0.59
+    mx = prices[-1] if prices else 0.95
+    p95 = _percentile(prices, 95) or 0.822
+    p99 = _percentile(prices, 99) or 0.8835
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["date", "pnl_at_50", "med_price", "max_price",
+                    "p95_price", "p99_price"])
+        for date, pnl in rows:
+            w.writerow([date, f"{pnl:.6f}", f"{med:.6f}", f"{mx:.6f}",
+                        f"{p95:.6f}", f"{p99:.6f}"])
+    return len(rows)
 
 
 def clip_for(E, peak, frac, ceil, price, throttle, thr, mult, floor_mode):
@@ -81,65 +174,186 @@ def clip_for(E, peak, frac, ceil, price, throttle, thr, mult, floor_mode):
     return shares * price
 
 
-def run(seq, start, frac, ceil, price, haircut,
+def run(seq, start, frac, ceil, price, haircut, loss_haircut=None,
         throttle=False, thr=0.80, mult=0.5, floor_mode="forced"):
+    """Walk one ordered daily-P&L sequence through the sizing model. `haircut`
+    scales positive days; `loss_haircut` (default = haircut, i.e. symmetric)
+    scales negative days, so an asymmetric pessimistic-loss case can be modeled.
+    Returns (end, trough, ruined). Ruin = equity too low for even one min order."""
+    if loss_haircut is None:
+        loss_haircut = haircut
     E = peak = trough = start
-    ruined = False
     for x in seq:
         clip = clip_for(E, peak, frac, ceil, price, throttle, thr, mult, floor_mode)
         if clip <= 0.0:      # skip-mode: cannot size, sit out
             continue
-        E += haircut * x * clip / TELEMETRY_CLIP
+        h = loss_haircut if x < 0 else haircut
+        E += h * x * clip / TELEMETRY_CLIP
         if E <= MIN_SHARES * price:  # cannot place even one min order -> dead
             return 0.0, 0.0, True
         peak = max(peak, E)
         trough = min(trough, E)
-    return E, trough, ruined
+    return E, trough, False
+
+
+def longest_red_run(order):
+    """Longest streak of consecutive losing (pnl < 0) days in an ordering."""
+    best = cur = 0
+    for x in order:
+        if x < 0:
+            cur += 1
+            if cur > best:
+                best = cur
+        else:
+            cur = 0
+    return best
+
+
+def uniform_order(seq, rng):
+    """Exchangeable shuffle: resamples without replacement, preserving the win/loss
+    mix but destroying autocorrelation (understates clustered-regime tails)."""
+    s = list(seq)
+    rng.shuffle(s)
+    return s
+
+
+def clustered_order(seq, p_stick, rng):
+    """Permute `seq` without replacement (so the red-fraction is preserved exactly)
+    with a 2-state persistence bias: after a red day the next draw is red with
+    probability p_stick, otherwise uniform over the remaining days. Clusters losses
+    the way a real adverse regime does, unlike an exchangeable shuffle."""
+    remaining = list(seq)
+    rng.shuffle(remaining)
+    order = []
+    cur = remaining.pop(rng.randrange(len(remaining)))
+    order.append(cur)
+    while remaining:
+        reds = [j for j, x in enumerate(remaining) if x < 0]
+        if cur < 0 and reds and rng.random() < p_stick:
+            j = rng.choice(reds)
+        else:
+            j = rng.randrange(len(remaining))
+        cur = remaining.pop(j)
+        order.append(cur)
+    return order
+
+
+def _mc(seq, n, seed, order_fn, starts, runkw, bite, primary_start):
+    """Run n Monte Carlo paths under one ordering model. Reports the longest-red-run
+    distribution, the trough distribution at primary_start, ruin count at
+    primary_start, and the floor-band-breach fraction (trough < bite) per start."""
+    rng = random.Random(seed)
+    troughs = {s: [] for s in starts}
+    runs, ruins = [], 0
+    breach = {s: 0 for s in starts}
+    for _ in range(n):
+        o = order_fn(seq, rng)
+        runs.append(longest_red_run(o))
+        for s in starts:
+            _, t, r = run(o, s, **runkw)
+            troughs[s].append(t)
+            if t < bite:
+                breach[s] += 1
+            if s == primary_start:
+                ruins += r
+    runs.sort()
+    pt = sorted(troughs[primary_start])
+    return {
+        "runs_p50": runs[len(runs) // 2],
+        "runs_p95": runs[min(len(runs) - 1, int(0.95 * len(runs)))],
+        "runs_max": runs[-1],
+        "ruins": ruins,
+        "breach": {s: breach[s] / n for s in starts},
+        "trough_p5": pt[int(0.05 * len(pt))],
+        "trough_worst": pt[0],
+    }
+
+
+def _print_mc(label, m, n, bite, starts, primary_start):
+    print(f"{label} {n}: ruin {m['ruins']}/{n} | longest-red-run "
+          f"p50={m['runs_p50']} p95={m['runs_p95']} max={m['runs_max']} | "
+          f"{primary_start:.0f} p5 trough ${m['trough_p5']:,.0f} "
+          f"worst ${m['trough_worst']:,.0f}")
+    print(f"  floor-band breach (equity < ${bite:.0f}): "
+          + " ".join(f"${s:.0f} {m['breach'][s] * 100:.1f}%" for s in starts))
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--start", type=float, default=850.0)
     ap.add_argument("--frac", type=float, default=0.0075)
     ap.add_argument("--ceil", type=float, default=CEIL_DEFAULT)
-    ap.add_argument("--haircut", type=float, default=0.6)
-    ap.add_argument("--price", type=float, default=None, help="entry price for floor")
+    ap.add_argument("--haircut", type=float, default=0.6,
+                    help="realization haircut on positive daily P&L")
+    ap.add_argument("--loss-haircut", type=float, default=None,
+                    help="haircut on negative daily P&L (default = --haircut)")
+    ap.add_argument("--price", type=float, default=None,
+                    help="entry price override for the 5-share floor")
+    ap.add_argument("--floor-price", choices=("median", "p95", "p99", "max"),
+                    default="p99",
+                    help="entry price used for the floor (default p99 = the honest "
+                         "binding price; max is outlier-driven, median understates it)")
     ap.add_argument("--shuffles", type=int, default=3000)
     ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--cluster", action="store_true",
+                    help="also run the clustered (regime-sticky) day-ordering adversary")
+    ap.add_argument("--cluster-stick", type=float, default=0.6,
+                    help="p(next day red | current red) for the clustered model")
+    ap.add_argument("--dump-series", metavar="PATH", default=None,
+                    help="write the daily P&L series to CSV and exit")
     args = ap.parse_args()
 
-    pnl, med_price = load_daily()
-    price = args.price or med_price
-    if not pnl:
-        print("no trade data found; run the TUNE/latency sweeps first")
-        return 1
-    floor = MIN_SHARES * price
-    print(f"days={len(pnl)} green={sum(1 for p in pnl if p>0)}/{len(pnl)} "
-          f"mean=${sum(pnl)/len(pnl):+,.0f}/day@$50 | floor=${floor:.2f} "
-          f"(5 sh @ {price:.2f}) bites at equity ${floor/args.frac:.0f}")
+    if args.dump_series:
+        n = dump_series(args.dump_series)
+        if not n:
+            print("no trade data found; run the TUNE/latency sweeps first")
+            return 1
+        print(f"wrote {n} daily rows -> {args.dump_series}")
+        return 0
 
-    end, tr, ruin = run(pnl, args.start, args.frac, args.ceil, price, args.haircut)
+    seq, med_price, max_price, p95_price, p99_price = load_daily()
+    if not seq:
+        print("no trade data found; run the TUNE/latency sweeps first "
+              f"(or commit {SERIES_CSV})")
+        return 1
+
+    floor_prices = {"median": med_price, "p95": p95_price,
+                    "p99": p99_price, "max": max_price}
+    floor_price = floor_prices[args.floor_price]
+    price = args.price if args.price is not None else floor_price
+    loss_hc = args.loss_haircut if args.loss_haircut is not None else args.haircut
+    floor = MIN_SHARES * price
+    bite = floor / args.frac
+    starts = (850.0, 600.0, 400.0)
+    runkw = dict(frac=args.frac, ceil=args.ceil, price=price,
+                 haircut=args.haircut, loss_haircut=loss_hc)
+
+    print(f"days={len(seq)} green={sum(1 for p in seq if p>0)}/{len(seq)} "
+          f"mean=${sum(seq)/len(seq):+,.0f}/day@$50 | floor=${floor:.2f} "
+          f"(5 sh @ {price:.2f}, {args.floor_price}) bites at ${bite:.0f} | "
+          f"haircut={args.haircut} loss-haircut={loss_hc}")
+
+    end, tr, ruin = run(seq, args.start, **runkw)
     print(f"chronological: end ${end:,.0f} trough ${tr:,.0f}"
           f"{' RUINED' if ruin else ''}")
 
-    worst8 = sorted(range(len(pnl)), key=lambda i: pnl[i])[:8]
-    adv = [pnl[i] for i in worst8] + [pnl[i] for i in range(len(pnl)) if i not in worst8]
-    end, tr, ruin = run(adv, args.start, args.frac, args.ceil, price, args.haircut)
+    worst8 = sorted(range(len(seq)), key=lambda i: seq[i])[:8]
+    adv = [seq[i] for i in worst8] + [seq[i] for i in range(len(seq)) if i not in worst8]
+    end, tr, ruin = run(adv, args.start, **runkw)
     print(f"adversarial(worst-8-first): end ${end:,.0f} trough ${tr:,.0f}"
           f"{' RUINED' if ruin else ''}")
 
-    rng = random.Random(args.seed)
-    ruins, troughs = 0, []
-    for _ in range(args.shuffles):
-        s = pnl[:]
-        rng.shuffle(s)
-        _, t, r = run(s, args.start, args.frac, args.ceil, price, args.haircut)
-        ruins += r
-        troughs.append(t)
-    troughs.sort()
-    p5 = troughs[len(troughs) // 20]
-    print(f"MC {args.shuffles} shuffles: ruin {ruins}/{args.shuffles} | "
-          f"p5 trough ${p5:,.0f} | worst ${troughs[0]:,.0f}")
+    u = _mc(seq, args.shuffles, args.seed, uniform_order,
+            starts, runkw, bite, args.start)
+    _print_mc("uniform MC", u, args.shuffles, bite, starts, args.start)
+
+    if args.cluster:
+        c = _mc(seq, args.shuffles, args.seed,
+                lambda s, r: clustered_order(s, args.cluster_stick, r),
+                starts, runkw, bite, args.start)
+        _print_mc(f"clustered MC (p_stick={args.cluster_stick})", c,
+                  args.shuffles, bite, starts, args.start)
     return 0
 
 

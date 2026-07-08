@@ -116,6 +116,10 @@ pub struct ShadowArgs {
     /// Decision evaluation cadence in ms (default 1000 = harness-matched;
     /// 100 = fast mode). Does not change decision logic, only when it runs.
     pub decide_interval_ms: u64,
+    /// Evaluate decisions on the next poll tick after any input event
+    /// (spot/perp/book/oi/funding), floored by 20ms spacing;
+    /// `decide_interval_ms` becomes the fallback heartbeat. Default off.
+    pub decide_on_event: bool,
 }
 
 /// Frozen leading config validated on backtest + the `shadow-final` live twin.
@@ -163,6 +167,7 @@ pub fn frozen_shadow_final_args(out_dir: PathBuf) -> ShadowArgs {
         open_fav_ask_max: 0.60,
         open_fav_secs: 5,
         decide_interval_ms: 1000,
+        decide_on_event: false,
     }
 }
 
@@ -727,6 +732,9 @@ pub struct ShadowCore {
     funding_series: Vec<(i64, f64)>,
     /// Cross-market loss streak for `pause_after_consec_losses`.
     session: SessionGateState,
+    /// Set whenever a decision input mutates (spot/perp/book/oi/funding);
+    /// read only by the event-driven decide trigger, cleared after a decide.
+    inputs_dirty: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -853,7 +861,16 @@ impl ShadowCore {
             funding_series: Vec::new(),
             session: SessionGateState::default(),
             stats: SummaryStats::default(),
+            inputs_dirty: false,
         }
+    }
+
+    pub fn inputs_dirty(&self) -> bool {
+        self.inputs_dirty
+    }
+
+    pub fn clear_inputs_dirty(&mut self) {
+        self.inputs_dirty = false;
     }
 
     // Feed ingestion
@@ -882,6 +899,7 @@ impl ShadowCore {
         while self.spot.front().is_some_and(|t| t.ts_ns < cutoff_ns) {
             self.spot.pop_front();
         }
+        self.inputs_dirty = true;
     }
 
     pub fn spot_history(&self) -> SpotHistory {
@@ -914,19 +932,21 @@ impl ShadowCore {
             }
             self.perp_buf.pop_front();
         }
+        self.inputs_dirty = true;
     }
 
-    fn push_series_point(buf: &mut Vec<(i64, f64)>, ts_ns: i64, value: f64, cap: usize) {
+    /// Returns true when the series actually mutated (finite, non-stale point).
+    fn push_series_point(buf: &mut Vec<(i64, f64)>, ts_ns: i64, value: f64, cap: usize) -> bool {
         if !value.is_finite() {
-            return;
+            return false;
         }
         if let Some((last_ts, last_v)) = buf.last_mut() {
             if *last_ts == ts_ns {
                 *last_v = value;
-                return;
+                return true;
             }
             if *last_ts > ts_ns {
-                return;
+                return false;
             }
         }
         buf.push((ts_ns, value));
@@ -934,19 +954,25 @@ impl ShadowCore {
             let drop = buf.len() - cap;
             buf.drain(0..drop);
         }
+        true
     }
 
     pub fn push_oi(&mut self, exchange_ms: i64, oi: f64) {
-        Self::push_series_point(&mut self.oi_series, exchange_ms * 1_000_000, oi, OI_SERIES_CAP);
+        if Self::push_series_point(&mut self.oi_series, exchange_ms * 1_000_000, oi, OI_SERIES_CAP)
+        {
+            self.inputs_dirty = true;
+        }
     }
 
     pub fn push_funding(&mut self, exchange_ms: i64, rate: f64) {
-        Self::push_series_point(
+        if Self::push_series_point(
             &mut self.funding_series,
             exchange_ms * 1_000_000,
             rate,
             FUNDING_SERIES_CAP,
-        );
+        ) {
+            self.inputs_dirty = true;
+        }
     }
 
     fn perp_state(&self) -> Option<pm_alpha::PerpState> {
@@ -980,6 +1006,7 @@ impl ShadowCore {
             .map(|(p, s)| (price_key(*p), *s))
             .collect();
         self.record_book_receipt(token, exchange_ms, receipt_ms);
+        self.inputs_dirty = true;
     }
 
     /// Polymarket `price_change`: `side` is BUY (bid level) or SELL (ask
@@ -1008,6 +1035,7 @@ impl ShadowCore {
             side.insert(price_key(price), size);
         }
         self.record_book_receipt(token, exchange_ms, receipt_ms);
+        self.inputs_dirty = true;
     }
 
     fn record_book_receipt(&mut self, token: &str, exchange_ms: Option<i64>, receipt_ms: i64) {
@@ -1941,6 +1969,24 @@ fn decide_interval_ns(ms: u64) -> i64 {
     (ms.max(20) as i64).saturating_mul(1_000_000)
 }
 
+/// Minimum spacing between event-triggered decisions (decide-on-event mode).
+const EVENT_DECIDE_MIN_SPACING_NS: i64 = 20_000_000;
+
+/// Decide-trigger predicate: cadence-due fires in either mode; a dirty input
+/// additionally fires in event mode once the 20ms spacing floor is met.
+fn should_decide(
+    now_ns: i64,
+    next_decide_ns: i64,
+    dirty: bool,
+    on_event: bool,
+    last_decide_ns: i64,
+) -> bool {
+    now_ns >= next_decide_ns
+        || (on_event
+            && dirty
+            && now_ns >= last_decide_ns.saturating_add(EVENT_DECIDE_MIN_SPACING_NS))
+}
+
 /// Same proven shadow engine + feeds + decide loop as `run_shadow`, but each
 /// `WouldEnter` decision is also emitted as an `ExecIntent` over `intent_tx` for
 /// live execution. The decision path is UNCHANGED — live trading driven off this
@@ -2011,7 +2057,9 @@ pub async fn run_shadow_with_sink(
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(10));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let decide_interval_ns = decide_interval_ns(args.decide_interval_ms);
+    let decide_on_event = args.decide_on_event;
     let mut next_decide_ns = 0i64;
+    let mut last_decide_ns = i64::MIN;
     let mut next_summary_ns = now_unix_ns() + 60_000_000_000;
 
     loop {
@@ -2037,8 +2085,13 @@ pub async fn run_shadow_with_sink(
                 {
                     let mut core = core.lock().expect("shadow core poisoned");
                     events.extend(core.poll_due(now_ns));
-                    if now_ns >= next_decide_ns {
+                    let dirty = decide_on_event && core.inputs_dirty();
+                    if should_decide(now_ns, next_decide_ns, dirty, decide_on_event, last_decide_ns) {
                         next_decide_ns = now_ns + decide_interval_ns;
+                        if decide_on_event {
+                            core.clear_inputs_dirty();
+                            last_decide_ns = now_ns;
+                        }
                         core.prune(now_ns);
                         events.extend(core.decide(now_ns, defer_entry_commit));
                     }
@@ -3186,6 +3239,40 @@ mod tests {
         assert_eq!(args.skip_spot_misalign_s, 0);
         assert_eq!(args.min_entry_ask, 0.0);
         assert_eq!(args.decide_interval_ms, 1000);
+    }
+
+    #[test]
+    fn frozen_args_decide_on_event_default_off() {
+        let args = frozen_shadow_final_args(PathBuf::from("shadow-final"));
+        assert!(!args.decide_on_event);
+        let gated = gated_shadow_final_args(PathBuf::from("shadow-final"));
+        assert!(!gated.decide_on_event);
+    }
+
+    #[test]
+    fn should_decide_trigger_predicate() {
+        let s = 1_000_000_000i64; // 1s in ns
+        let ms = 1_000_000i64;
+
+        // Cadence-due fires in either mode, dirty or clean.
+        assert!(should_decide(10 * s, 10 * s, false, false, i64::MIN));
+        assert!(should_decide(10 * s, 10 * s, false, true, i64::MIN));
+        assert!(should_decide(10 * s, 9 * s, true, false, 9 * s));
+        assert!(should_decide(10 * s, 9 * s, true, true, 9 * s));
+
+        // Dirty + spacing met fires only in event mode.
+        let last = 10 * s;
+        let now = last + 20 * ms; // exactly at the 20ms floor
+        assert!(should_decide(now, 11 * s, true, true, last));
+        assert!(!should_decide(now, 11 * s, true, false, last));
+
+        // Dirty but spacing not met does not fire.
+        let too_soon = last + 19 * ms;
+        assert!(!should_decide(too_soon, 11 * s, true, true, last));
+
+        // Clean and idle does not fire before the heartbeat, either mode.
+        assert!(!should_decide(now, 11 * s, false, true, last));
+        assert!(!should_decide(now, 11 * s, false, false, last));
     }
 
     #[test]

@@ -8,6 +8,11 @@
 set -euo pipefail
 
 SHADOW_FINAL_GATED_FLAGS=(
+  # Validated 90s pre-close stop. Explicit here because the shadow subcommand's
+  # clap default is 10, and sync_decide_cfg propagates the CLI value into the
+  # decide gate; omitting this flag made shadow-final enter up to 10s before
+  # close (vs the backtest/fast_live 90s window) - config-consistency-audit M-1.
+  --stop-before-close-s 90
   --skip-spot-misalign-s 30
   --min-entry-ask 0.45
   --skip-open-fav-gap

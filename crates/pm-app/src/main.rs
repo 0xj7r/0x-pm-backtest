@@ -196,6 +196,11 @@ enum Cmd {
         /// 100 = fast mode). Does not change decision logic, only when it runs.
         #[arg(long, default_value = "1000")]
         decide_interval_ms: u64,
+        /// Evaluate decisions on the next poll tick after any input event,
+        /// floored by 20ms spacing; decide-interval-ms becomes the fallback
+        /// heartbeat.
+        #[arg(long)]
+        decide_on_event: bool,
     },
     /// pm-alpha exogenous edge hunt: replay markets through the pm-alpha
     /// validation harness (latency-modeled, cost-aware, leakage-free belief).
@@ -1485,6 +1490,7 @@ async fn main() -> Result<()> {
             open_fav_ask_max,
             open_fav_secs,
             decide_interval_ms,
+            decide_on_event,
         } => {
             shadow::run_shadow(shadow::ShadowArgs {
                 slug_prefix,
@@ -1524,6 +1530,7 @@ async fn main() -> Result<()> {
                 open_fav_ask_max,
                 open_fav_secs,
                 decide_interval_ms,
+                decide_on_event,
             })
             .await
         }

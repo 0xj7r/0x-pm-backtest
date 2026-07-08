@@ -49,9 +49,18 @@ fi
 for tj in data/runs/daily_replay/*_trades.jsonl; do
   [[ -e "$tj" ]] || continue
   day=$(basename "$tj" _trades.jsonl)
+  # fantasy 250ms baseline (reference only)
   python3 scripts/ops/soak_realization_report.py --date "$day" \
     --shadow-dir "$SYNC_DIR" --replay-dir data/runs/daily_replay \
     --out data/runs/daily_replay/realization.jsonl > /dev/null 2>&1 || true
+done
+# latency-matched realization (the meaningful one; timer stream vs 1250ms replay)
+for tj in data/runs/daily_replay/lat1250/*_trades.jsonl; do
+  [[ -e "$tj" ]] || continue
+  day=$(basename "$tj" _trades.jsonl)
+  python3 scripts/ops/soak_realization_report.py --date "$day" \
+    --shadow-dir "$SYNC_DIR" --replay-dir data/runs/daily_replay/lat1250 \
+    --out data/runs/daily_replay/realization_lat1250.jsonl > /dev/null 2>&1 || true
 done
 # Dedupe the report log (last write per day wins).
 python3 - <<'PY'

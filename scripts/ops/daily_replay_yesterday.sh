@@ -94,6 +94,28 @@ wins = int(agg.get("n_wins", 0))
 print(f"{sys.argv[2]} replay: n={n} NET=${net:+,.0f} hit={100*wins/n if n else 0:.1f}%")
 PY
 
+# Latency-matched replay (1250ms = the live TIMER engine's measured effective
+# latency). Realization must compare live against edge ACHIEVABLE at our real
+# latency; the 250ms replay above is the fantasy-latency reference only. A
+# realization ratio vs the 250ms replay conflates the known latency tax with
+# genuine execution slippage and reads artificially catastrophic.
+mkdir -p "$OUT/lat1250"
+"$BIN" alpha \
+  --markets data/manifests/canonical/btc-updown-5m_up.jsonl \
+  --slug-prefix btc-updown-5m- \
+  --local-cache-dir data/cache \
+  --tick-cache-dir data/cache/ticks \
+  --exit-after-s 0 --perp-symbol BTCUSDT --perp-price-weight 0.75 \
+  --vol-estimator realized --vol-lookback-s 3600 \
+  --edge-thresholds 0.12 --notional-usdc 50 --latency-ms 1250 \
+  --max-clips 2 --rearm-edge 0.08 --clip-cooldown-ms 5000 \
+  --min-entry-sigma-bps 3 --skip-saturday --stop-before-close-s 90 \
+  --min-marginal-edge 0.04 --fee-curve-rate 0.07 \
+  --date-start "$DAY" --date-end "$DAY" \
+  --out-json "$OUT/lat1250/${DAY}.json" \
+  --trades-out "$OUT/lat1250/${DAY}_trades.jsonl" > "$LOG_DIR/${DAY}_replay1250.log" 2>&1 \
+  || echo "$DAY 1250ms replay FAILED (non-blocking)"
+
 # 15m book replay for the same day (separate output; used by the 15m
 # realization loop). Failure here does not block the 5m result.
 "$BIN" alpha \

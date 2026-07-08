@@ -135,6 +135,35 @@ optimistic on three axes (median floor, no-haircut, near-zero ruin line) and
 misses the ceiling flat-band. The corrections tighten rather than overturn the
 plan; the ceiling-scaling fix (item 3) is a real new pre-growth task.
 
+## Hardened numbers after the review fixes landed (2026-07-08)
+
+The sim was rebuilt (scripts/research/drawdown_sim.py, reproducible from the
+committed data/research/daily_pnl_series.csv) with the honest p99 floor price
+($4.42, bites at $589; p95 = $548 which validates the $550 stop) and a
+clustered (regime-persistent) day-ordering adversary. The corrected headline,
+$50-telemetry days at 0.6 haircut:
+
+| model | longest red run p95 | $850 floor-band breach | $600 breach |
+|---|---|---|---|
+| uniform shuffle (old, optimistic) | 5 days | 0.1% | 35% |
+| CLUSTERED (realistic) | 11 days | **11.8%** | 57% |
+
+Both models: 0/3000 ruin at $850 (no wipeout). But the clustered model,
+which is the honest one (June was a multi-day bleed), shows a ~12% chance at
+$850 of drawing into the sub-$589 band where the 5-share floor degrades
+fractional sizing. The old uniform-shuffle 0.5% was optimistic by ~20x.
+
+CONSEQUENCE FOR SIZING: an ~1-in-8 chance of touching the floor band is not
+negligible. Two responses, both cheap: (a) START MICRO-LIVE AT 0.5%, not
+0.75% (earlier sim: halves the tail for ~2% of endpoint); (b) hold reserve
+capital so the effective account is above the ~$700 level where clustered
+breach drops sharply. "$600 is marginal" is now quantified: 57% clustered
+breach. Revise "never start below $600" UP to "never start below ~$700".
+
+The engine ceiling fix (PM_SHADOW_CLIP_CEIL_FRAC, merged in polymarket-agent)
+closes item 3: set it to ~0.012 so the ceiling scales with equity and
+fractional protection holds past ~$1,300 as the account grows.
+
 ## Explicitly rejected (proven harmful)
 
 - P&L circuit breakers / auto-halt on loss: lock in the loss, miss recovery.

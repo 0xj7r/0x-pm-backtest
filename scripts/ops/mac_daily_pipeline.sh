@@ -12,6 +12,10 @@ SYNC_DIR="${SHADOW_SYNC_DIR:-data/runs/shadow_final_sync}"
 mkdir -p "$LOG_DIR" "$SYNC_DIR"
 
 # Resolve the Dublin host: env wins; otherwise ask AWS for the instance IP.
+# launchd runs with the bare system PATH: no homebrew python3 (pyarrow) and
+# no aws CLI. Prepend homebrew so scheduled runs match manual ones.
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
 HOST="${SHADOW_SSH_HOST:-}"
 if [[ -z "$HOST" ]]; then
   IP=$(AWS_PROFILE=visumlabs aws ec2 describe-instances --region eu-west-1 \

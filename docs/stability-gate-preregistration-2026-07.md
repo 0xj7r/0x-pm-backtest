@@ -1,5 +1,18 @@
 # Pre-registered stability gate: spec frozen 2026-07-02, judged on July soak
 
+# SOAK RESET 2026-07-08 (config-consistency-audit M-1)
+
+The Jul 2-7 soak evidence is INVALIDATED for the economic/realization verdict:
+shadow-final ran stop_before_close_s=10 (CLI default) instead of the canonical
+90 (fix 2745424f), so it took late-window entries the backtest never takes,
+corrupting the live-vs-replay comparison. Infrastructure metrics (heartbeats,
+executor integrity 0 orphans/0 mismatches, twin agreement 98.8-100%) remain
+VALID (config-independent). The soak restarts on the corrected config
+2026-07-08; the v1 gate verdict clock restarts from the first full corrected
+day, so the earliest judgment is ~2026-07-16 (7 non-Saturday evidence days).
+Do not judge the gate on pre-reset (drifted-config) data.
+
+
 This freezes the gate hypothesis BEFORE the out-of-sample data exists, so the
 July soak is a true test rather than another fit. Do not modify the spec or
 the pass criteria after soak data starts accruing.

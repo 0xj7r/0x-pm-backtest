@@ -76,6 +76,10 @@ for tj in $(ls data/runs/daily_replay/*_trades.jsonl 2>/dev/null | tail -3); do
   python3 scripts/ops/dwell_split_report.py --date "$day" \
     --out data/runs/daily_replay/dwell_split.jsonl > /dev/null 2>&1 || true
 done
+for d in $(python3 -c "from datetime import date,timedelta; [print((date.today()-timedelta(days=i)).isoformat()) for i in (1,2)]"); do
+  python3 scripts/ops/fast_vs_timer_report.py --date "$d" \
+    --out data/runs/daily_replay/fast_vs_timer.jsonl > /dev/null 2>&1 || true
+done
 for tj in $(ls data/runs/daily_replay/15m/*_trades.jsonl 2>/dev/null | tail -3); do
   day=$(basename "$tj" _trades.jsonl)
   python3 scripts/ops/soak_realization_report.py --date "$day" \

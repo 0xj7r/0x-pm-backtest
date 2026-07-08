@@ -83,6 +83,58 @@ is a mechanical boundary (the sizing math breaks), NOT a P&L circuit breaker,
 and it replaces the vague "accept 30% drawdowns" with a concrete floor.
 Corollary: never start a live account below ~$600.
 
+## GLM adversarial review corrections (2026-07-08, reviews/drawdown-glm-review.md)
+
+An independent model review found real holes. Corrections, with re-run numbers:
+
+1. USE THE MAX ENTRY PRICE (0.85) FOR THE FLOOR, not the median. The floor
+   binds on the trade you actually place; an 0.85 entry is un-sizable below
+   $567, not $393. Re-run with max-price floor + 0.6 haircut (the honest case):
+   $850 start still 0/3000 ruin, but worst shuffle trough $554 (grazes the
+   floor), p5 $731. Verdict SURVIVES but the buffer is 33% not 46%. At $600
+   start the worst shuffle reaches $371 (inside the flat-bet zone): $600 is
+   more marginal than the median-floor sim implied. This reinforces "never
+   start below ~$600" and the $550 stop.
+
+2. HEADLINE METRIC IS "% OF PATHS BREACHING THE FLOOR BAND (~$567)", not
+   "% ruined". The sim's ruin line (equity <= 5*price ~ $3) is a 99.6%
+   drawdown, so "0/3000 ruin" is near-vacuous. The meaningful risk is entering
+   the sub-$567 band where sizing breaks; that is the number to watch.
+
+3. THE $10 CEILING REINTRODUCES FLAT SIZING ABOVE ~$1,333. Fractional
+   protection ("clips shrink with equity") only operates in the ~$567-$1,333
+   band. Above it, clip is a constant $10 and losses drain linearly (the June
+   mechanism, slower: ~18 consecutive average-red-days to drain from $2k, so
+   low RUIN probability, but real loss of the protective property and of
+   compounding). FIX: scale the ceiling up with equity as the account grows
+   (e.g. keep ceiling = 1.2% of equity) so sizing stays fractional past $1,333.
+   Do this before the account grows past ~$1,300.
+
+4. THE MONTE CARLO UNDERSTATES CLUSTERED-REGIME TAILS. Shuffling 75 fixed days
+   without replacement assumes exchangeability and cannot emit a losing regime
+   worse than the sample; a Markov/clustered model gives ~2x longer red
+   streaks (p95 9 days vs the shuffle's 4). June was exactly such a multi-day
+   bleed. Mitigation is NOT the MC's comfort but the $550 mechanical stop and
+   sub-Kelly sizing; treat the MC drawdown percentiles as optimistic.
+
+5. CONCURRENCY NOT PRICED. 0.75% is per-trade; with N concurrent open markets
+   (and max_clips 2) gross simultaneous exposure is ~2-4 clips. Small at $850
+   (~2-3% of bankroll) but real, and larger on the 15m book. Portfolio risk >
+   single-trade risk.
+
+6. SYMMETRIC HAIRCUT IS OPTIMISTIC ON THE DOWNSIDE. Multiplying losses by 0.6
+   shrinks them, but live losses (worse fills, adverse selection) may EXCEED
+   replay. Downside stats should stress an asymmetric haircut (losses un-cut).
+
+7. REPRODUCIBILITY GAP. The trade dumps are gitignored, so the safety numbers
+   are not re-runnable from the committed repo. Before micro-live, snapshot the
+   daily P&L series into the repo so the safety case is auditable.
+
+Net: the $850 viability and $550 stop hold, but the analysis was biased
+optimistic on three axes (median floor, no-haircut, near-zero ruin line) and
+misses the ceiling flat-band. The corrections tighten rather than overturn the
+plan; the ceiling-scaling fix (item 3) is a real new pre-growth task.
+
 ## Explicitly rejected (proven harmful)
 
 - P&L circuit breakers / auto-halt on loss: lock in the loss, miss recovery.

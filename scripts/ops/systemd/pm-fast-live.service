@@ -11,7 +11,7 @@ WorkingDirectory=/home/ubuntu
 Environment=PM_SHADOW_PAPER_MODE=true
 Environment=PM_SHADOW_LIVE_TRADE=false
 Environment=RUST_LOG=info
-ExecStart=/home/ubuntu/deploy-main/polymarket-agent/target/release/fast_live --paper --out-dir /home/ubuntu/data/pm-alpha/shadow-fast --decide-interval-ms 100
+ExecStart=/home/ubuntu/deploy-main/polymarket-agent/target/release/fast_live --paper --out-dir /home/ubuntu/data/pm-alpha/shadow-fast --decide-interval-ms 100 --decide-on-event
 Restart=always
 RestartSec=10
 StandardOutput=append:/home/ubuntu/data/pm-alpha/fast_live.log

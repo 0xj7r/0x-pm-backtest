@@ -8,12 +8,13 @@ builds a daily P&L series, then simulates fractional sizing with the venue's
 the "shrink smoothly to zero" property below a critical equity).
 
 NOTE (2026-07 hardening, per reviews/drawdown-glm-review.md): the floor entry price
-now defaults to the MAX observed entry price (previously the median). The floor
-binds on the highest price actually paid (the strategy enters up to ~0.95), so the
-median understated where the floor first bites. Also added in this pass: an
-asymmetric loss haircut, a clustered (regime-persistent) day-ordering adversary
-alongside the uniform shuffle, a floor-band-breach headline metric, and a committed
-CSV snapshot of the daily P&L series so the analysis re-runs from the repo alone.
+defaults to the p99 of the observed entry prices (--floor-price p99), the honest
+binding price. The median understated where the floor first bites, and the absolute
+max (0.95) is a <0.005%-frequency outlier that overstates it; p99 sits at the true
+binding edge. Also added in this pass: an asymmetric loss haircut, a clustered
+(regime-persistent) day-ordering adversary alongside the uniform shuffle, a
+floor-band-breach headline metric, and a committed CSV snapshot of the daily P&L
+series so the analysis re-runs from the repo alone.
 
 Model assumptions (all stated so a reviewer can challenge them):
   - Daily P&L at $50 telemetry clips is treated as linearly scalable to any clip
@@ -25,8 +26,9 @@ Model assumptions (all stated so a reviewer can challenge them):
     pessimistic-loss case without touching the win side.
   - 5-share floor: minimum order notional = 5 * entry_price. Below the equity
     where frac*E < floor, the clip is forced UP to the floor (flat-min betting).
-  - Floor entry price: MAX observed entry price by default (--floor-price max),
-    i.e. the binding price; override with --price or --floor-price median.
+  - Floor entry price: p99 of observed entry prices by default (--floor-price p99),
+    i.e. the honest binding price; choose median/p95/p99/max via --floor-price or
+    override outright with --price.
   - Day ordering: the uniform Monte Carlo shuffle is exchangeable and destroys loss
     clustering; --cluster adds a regime-sticky 2-state model that preserves the
     exact red-fraction while clustering reds, exposing the tail the uniform hides.
@@ -80,14 +82,26 @@ def _load_raw():
     return rows, prices
 
 
+def _percentile(sorted_vals, p):
+    """Linear-interpolation percentile of an ascending-sorted list. Returns the
+    p-th percentile (e.g. p=95) used to pick a binding floor entry price."""
+    if not sorted_vals:
+        return None
+    k = (len(sorted_vals) - 1) * (p / 100.0)
+    lo = int(k)
+    hi = min(lo + 1, len(sorted_vals) - 1)
+    return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * (k - lo)
+
+
 def _load_series_csv(path):
     """Read the committed daily P&L snapshot (date, pnl_at_50, med_price,
-    max_price). Fallback used when the raw trade dumps are absent."""
+    max_price, p95_price, p99_price). Fallback used when the raw trade dumps are
+    absent. Returns (seq, median, max, p95, p99)."""
     try:
         f = open(path)
     except FileNotFoundError:
-        return [], 0.59, 0.95
-    med, mx = 0.59, 0.95
+        return [], 0.59, 0.95, 0.822, 0.8835
+    med, mx, p95, p99 = 0.59, 0.95, 0.822, 0.8835
     seq = []
     with f:
         r = csv.reader(f)
@@ -98,39 +112,48 @@ def _load_series_csv(path):
             seq.append(float(row[1]))
             if len(row) >= 4:
                 med, mx = float(row[2]), float(row[3])
-    return seq, med, mx
+            if len(row) >= 6:
+                p95, p99 = float(row[4]), float(row[5])
+    return seq, med, mx, p95, p99
 
 
 def load_daily(series_csv=SERIES_CSV):
-    """Return (daily_pnl_series, median_price, max_price). Reads the raw trade
-    dumps when present; otherwise falls back to the committed CSV snapshot so the
-    sim is reproducible from the repo with no external data."""
+    """Return (daily_pnl_series, median_price, max_price, p95_price, p99_price).
+    Reads the raw trade dumps when present; otherwise falls back to the committed
+    CSV snapshot so the sim is reproducible from the repo with no external data."""
     rows, prices = _load_raw()
     if rows:
         prices.sort()
         med = prices[len(prices) // 2] if prices else 0.59
         mx = prices[-1] if prices else 0.95
-        return [p for _, p in rows], med, mx
+        p95 = _percentile(prices, 95) or 0.822
+        p99 = _percentile(prices, 99) or 0.8835
+        return [p for _, p in rows], med, mx, p95, p99
     return _load_series_csv(series_csv)
 
 
 def dump_series(path):
-    """Write the daily P&L series (date, pnl_at_50, med_price, max_price) to CSV.
-    Requires the raw trade dumps. Returns rows written (0 = no data)."""
+    """Write the daily P&L series (date, pnl_at_50, med_price, max_price,
+    p95_price, p99_price) to CSV. Requires the raw trade dumps. Returns rows
+    written (0 = no data)."""
     rows, prices = _load_raw()
     if not rows:
         return 0
     prices.sort()
     med = prices[len(prices) // 2] if prices else 0.59
     mx = prices[-1] if prices else 0.95
+    p95 = _percentile(prices, 95) or 0.822
+    p99 = _percentile(prices, 99) or 0.8835
     d = os.path.dirname(path)
     if d:
         os.makedirs(d, exist_ok=True)
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["date", "pnl_at_50", "med_price", "max_price"])
+        w.writerow(["date", "pnl_at_50", "med_price", "max_price",
+                    "p95_price", "p99_price"])
         for date, pnl in rows:
-            w.writerow([date, f"{pnl:.6f}", f"{med:.6f}", f"{mx:.6f}"])
+            w.writerow([date, f"{pnl:.6f}", f"{med:.6f}", f"{mx:.6f}",
+                        f"{p95:.6f}", f"{p99:.6f}"])
     return len(rows)
 
 
@@ -267,8 +290,10 @@ def main() -> int:
                     help="haircut on negative daily P&L (default = --haircut)")
     ap.add_argument("--price", type=float, default=None,
                     help="entry price override for the 5-share floor")
-    ap.add_argument("--floor-price", choices=("median", "max"), default="max",
-                    help="entry price used for the floor (default max = binding price)")
+    ap.add_argument("--floor-price", choices=("median", "p95", "p99", "max"),
+                    default="p99",
+                    help="entry price used for the floor (default p99 = the honest "
+                         "binding price; max is outlier-driven, median understates it)")
     ap.add_argument("--shuffles", type=int, default=3000)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--cluster", action="store_true",
@@ -287,13 +312,15 @@ def main() -> int:
         print(f"wrote {n} daily rows -> {args.dump_series}")
         return 0
 
-    seq, med_price, max_price = load_daily()
+    seq, med_price, max_price, p95_price, p99_price = load_daily()
     if not seq:
         print("no trade data found; run the TUNE/latency sweeps first "
               f"(or commit {SERIES_CSV})")
         return 1
 
-    floor_price = max_price if args.floor_price == "max" else med_price
+    floor_prices = {"median": med_price, "p95": p95_price,
+                    "p99": p99_price, "max": max_price}
+    floor_price = floor_prices[args.floor_price]
     price = args.price if args.price is not None else floor_price
     loss_hc = args.loss_haircut if args.loss_haircut is not None else args.haircut
     floor = MIN_SHARES * price

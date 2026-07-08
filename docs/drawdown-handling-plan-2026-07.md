@@ -55,6 +55,34 @@ start (worse than any of 1500 random shuffles; astronomically unlikely).
    level and 4-day red streaks. These are intrinsic to a 72%-win edge and are
    NOT signals to act. Expectations set now so a -25% week is not a panic.
 
+## The share-quantum floor: a HARD viability line (2026-07-08 correction)
+
+Polymarket's CLOB enforces a 5-share minimum order (confirmed in code: the
+venue rejects smaller orders with "Size lower than the minimum: 5";
+polymarket-exec markets/descriptor.rs min_order_size=5.0). This BREAKS the
+"clips shrink smoothly to zero" claim: there is a hard floor on clip size of
+5 x entry_price dollars (~$2.25 at our 0.45 min ask, ~$2.95 median, ~$4.25 at
+the 0.85 cap). Below the equity where 0.75% < that floor, fractional sizing
+stops working and you are forced to flat-bet the ~$3 minimum, which reintro-
+duces linear ruin (the June mechanism) at a low level.
+
+Floor bites at equity = 5 x price / 0.0075 = 667 x price:
+- cheapest entries (0.45): $300 | median (0.59): $393 | max (0.85): $567
+
+Consequences (equity sim with the floor, 3000 shuffles, no haircut):
+- $850 start: 0/3000 ruin, 0% of paths even reach the <$400 zone. SAFE.
+- $600 start: 0 ruin, 2% touch the zone. $400: 36%. $300: 100%.
+- $200 start: 5/3000 ruin. $150: 31/3000 (1%). Small accounts are NOT viable.
+- Adversarial worst-8-first: survives from $850 (trough $203), RUINS from $300.
+
+GOVERNANCE RULE: this strategy is viable at ~$850 with a ~35% buffer to the
+floor. Treat ~$550 as a HARD stop-and-reassess line (the top of the
+degradation band, where pricier entries first hit the floor). At/below it,
+STOP and add capital or pause; do not grind on at forced-minimum bets. This
+is a mechanical boundary (the sizing math breaks), NOT a P&L circuit breaker,
+and it replaces the vague "accept 30% drawdowns" with a concrete floor.
+Corollary: never start a live account below ~$600.
+
 ## Explicitly rejected (proven harmful)
 
 - P&L circuit breakers / auto-halt on loss: lock in the loss, miss recovery.

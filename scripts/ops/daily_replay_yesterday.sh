@@ -33,6 +33,12 @@ PY
 
 BIN="${BIN:-./target/release/pm-app}"
 
+# Shell SSOT for the deployed shadow configs. The latency-matched replays below
+# derive their gate flags from these arrays so replay config is never
+# hand-copied (parity F2: matched replay per stream).
+source scripts/ops/shadow_final_gated_flags.sh
+source scripts/ops/shadow_recommended_flags.sh
+
 # The manifest builder reads the markets parquet; a stale one silently yields
 # zero manifest rows for recent days. Refresh when older than 20h.
 PQ=data/cache/telonex_markets.parquet
@@ -94,12 +100,15 @@ wins = int(agg.get("n_wins", 0))
 print(f"{sys.argv[2]} replay: n={n} NET=${net:+,.0f} hit={100*wins/n if n else 0:.1f}%")
 PY
 
-# Latency-matched replay (1250ms = the live TIMER engine's measured effective
+# Latency-matched replays (1250ms = the live TIMER engine's measured effective
 # latency). Realization must compare live against edge ACHIEVABLE at our real
 # latency; the 250ms replay above is the fantasy-latency reference only. A
 # realization ratio vs the 250ms replay conflates the known latency tax with
 # genuine execution slippage and reads artificially catastrophic.
-mkdir -p "$OUT/lat1250"
+# One replay per deployed shadow stream, gate flags appended from the shell
+# SSOT arrays sourced above. The arrays carry --stop-before-close-s, so the
+# base flags here omit it. Both non-blocking, like the 15m block.
+mkdir -p "$OUT/lat1250_gated" "$OUT/lat1250_recommended"
 "$BIN" alpha \
   --markets data/manifests/canonical/btc-updown-5m_up.jsonl \
   --slug-prefix btc-updown-5m- \
@@ -109,12 +118,30 @@ mkdir -p "$OUT/lat1250"
   --vol-estimator realized --vol-lookback-s 3600 \
   --edge-thresholds 0.12 --notional-usdc 50 --latency-ms 1250 \
   --max-clips 2 --rearm-edge 0.08 --clip-cooldown-ms 5000 \
-  --min-entry-sigma-bps 3 --skip-saturday --stop-before-close-s 90 \
+  --min-entry-sigma-bps 3 --skip-saturday \
   --min-marginal-edge 0.04 --fee-curve-rate 0.07 \
   --date-start "$DAY" --date-end "$DAY" \
-  --out-json "$OUT/lat1250/${DAY}.json" \
-  --trades-out "$OUT/lat1250/${DAY}_trades.jsonl" > "$LOG_DIR/${DAY}_replay1250.log" 2>&1 \
-  || echo "$DAY 1250ms replay FAILED (non-blocking)"
+  --out-json "$OUT/lat1250_gated/${DAY}.json" \
+  --trades-out "$OUT/lat1250_gated/${DAY}_trades.jsonl" \
+  "${SHADOW_FINAL_GATED_FLAGS[@]}" > "$LOG_DIR/${DAY}_replay1250_gated.log" 2>&1 \
+  || echo "$DAY 1250ms gated replay FAILED (non-blocking)"
+
+"$BIN" alpha \
+  --markets data/manifests/canonical/btc-updown-5m_up.jsonl \
+  --slug-prefix btc-updown-5m- \
+  --local-cache-dir data/cache \
+  --tick-cache-dir data/cache/ticks \
+  --exit-after-s 0 --perp-symbol BTCUSDT --perp-price-weight 0.75 \
+  --vol-estimator realized --vol-lookback-s 3600 \
+  --edge-thresholds 0.12 --notional-usdc 50 --latency-ms 1250 \
+  --max-clips 2 --rearm-edge 0.08 --clip-cooldown-ms 5000 \
+  --min-entry-sigma-bps 3 --skip-saturday \
+  --min-marginal-edge 0.04 --fee-curve-rate 0.07 \
+  --date-start "$DAY" --date-end "$DAY" \
+  --out-json "$OUT/lat1250_recommended/${DAY}.json" \
+  --trades-out "$OUT/lat1250_recommended/${DAY}_trades.jsonl" \
+  "${SHADOW_RECOMMENDED_FLAGS[@]}" > "$LOG_DIR/${DAY}_replay1250_recommended.log" 2>&1 \
+  || echo "$DAY 1250ms recommended replay FAILED (non-blocking)"
 
 # 15m book replay for the same day (separate output; used by the 15m
 # realization loop). Failure here does not block the 5m result.

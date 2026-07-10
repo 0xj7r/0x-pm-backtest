@@ -19,12 +19,59 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import sys
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 CLIP = 50.0
 DELAY_BUCKET_S = 15
+
+
+def live_config_canon(shadow_dir: Path, day: str) -> str | None:
+    """First '"type":"config"' line among the shadow files carrying the day."""
+    for fp in sorted(glob.glob(str(shadow_dir / "shadow-*.jsonl"))):
+        config_line = None
+        has_day = False
+        for line in open(fp, errors="replace"):
+            if config_line is None and '"type":"config"' in line:
+                config_line = line
+            if not has_day and f'"ts_utc":"{day}' in line:
+                has_day = True
+            if has_day and config_line is not None:
+                break
+        if has_day and config_line is not None:
+            try:
+                return json.loads(config_line).get("decide_config_canon")
+            except json.JSONDecodeError:
+                return None
+    return None
+
+
+def replay_config_canon(replay_dir: Path, day: str) -> str | None:
+    fp = replay_dir / f"{day}.json"
+    if not fp.exists():
+        return None
+    try:
+        return json.load(open(fp)).get("decide_config_canon")
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def canon_diff(live_canon: str, replay_canon: str) -> dict[str, list]:
+    """Per-field diff of two canon strings, each a compact JSON object."""
+    try:
+        live = json.loads(live_canon)
+        replay = json.loads(replay_canon)
+    except json.JSONDecodeError:
+        return {"_unparseable_canon": [live_canon, replay_canon]}
+    if not isinstance(live, dict) or not isinstance(replay, dict):
+        return {"_unparseable_canon": [live_canon, replay_canon]}
+    return {
+        k: [live.get(k), replay.get(k)]
+        for k in sorted(set(live) | set(replay))
+        if live.get(k) != replay.get(k)
+    }
 
 
 def live_day(shadow_dir: Path, day: str) -> dict[str, dict]:
@@ -97,6 +144,8 @@ def main() -> int:
     ap.add_argument("--shadow-dir", default="/home/ubuntu/data/pm-alpha/shadow-final")
     ap.add_argument("--replay-dir", default="data/runs/daily_replay")
     ap.add_argument("--out", default=None, help="append one JSON line here")
+    ap.add_argument("--allow-mismatch", action="store_true",
+                    help="report config fingerprint mismatches without exiting 3")
     args = ap.parse_args()
 
     day = args.date or (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -125,6 +174,33 @@ def main() -> int:
         f"replay_pnl_lt{DELAY_BUCKET_S}s": round(re_, 2),
         f"replay_pnl_ge{DELAY_BUCKET_S}s": round(rl, 2),
     }
+
+    # Strict config fingerprint check: the live stream's startup config event
+    # vs the replay out-json's decide_config_canon. Any field drift means the
+    # realization ratio compares two different strategies and is meaningless.
+    exit_code = 0
+    live_canon = live_config_canon(Path(args.shadow_dir).expanduser(), day)
+    replay_canon = replay_config_canon(Path(args.replay_dir).expanduser(), day)
+    if live_canon is None or replay_canon is None:
+        report["config_canon"] = "absent"
+        missing = [s for s, c in (("live", live_canon), ("replay", replay_canon)) if c is None]
+        print(f"WARNING: config canon absent on {'+'.join(missing)} side(s) for {day} "
+              "(pre-fingerprint data); realization NOT config-verified", file=sys.stderr)
+    else:
+        mismatch = canon_diff(live_canon, replay_canon)
+        if mismatch:
+            report["config_mismatch"] = mismatch
+            print("!" * 72, file=sys.stderr)
+            print(f"!!! CONFIG FINGERPRINT MISMATCH live vs replay for {day} !!!", file=sys.stderr)
+            for k, (lv, rv) in sorted(mismatch.items()):
+                print(f"!!!   {k}: live={lv!r} replay={rv!r}", file=sys.stderr)
+            print("!!! realization ratio is comparing two DIFFERENT configs", file=sys.stderr)
+            print("!" * 72, file=sys.stderr)
+            if not args.allow_mismatch:
+                exit_code = 3
+        else:
+            report["config_canon"] = "match"
+
     print(json.dumps(report, indent=2))
     if args.out:
         with open(args.out, "a") as f:
@@ -132,7 +208,7 @@ def main() -> int:
 
     if not rep:
         print(f"NOTE: no replay trades for {day}; run scripts/ops/daily_replay_yesterday.sh first")
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":

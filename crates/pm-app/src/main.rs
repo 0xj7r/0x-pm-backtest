@@ -84,14 +84,15 @@ enum Cmd {
         /// Market family slug prefix.
         #[arg(long, default_value = "btc-updown-5m-")]
         slug_prefix: String,
-        /// Entry edge threshold (champion config: 0.16).
-        #[arg(long, default_value = "0.16")]
+        /// Entry edge threshold (frozen shadow-final: 0.12).
+        #[arg(long, default_value = "0.12")]
         edge_threshold: f64,
-        /// Trailing realized-vol window in seconds (champion config: 3600).
+        /// Trailing realized-vol window in seconds (frozen: 3600).
         #[arg(long, default_value = "3600")]
         vol_lookback_s: u32,
-        /// Mark-to-book exit horizon after entry, seconds.
-        #[arg(long, default_value = "30")]
+        /// Mark-to-book exit horizon after entry, seconds (frozen: 0 =
+        /// hold to redemption).
+        #[arg(long, default_value = "0")]
         exit_after_s: u32,
         /// Quote-existence probe delay after entry, milliseconds.
         #[arg(long, default_value = "150")]
@@ -100,34 +101,37 @@ enum Cmd {
         #[arg(long)]
         out_dir: PathBuf,
         /// Weight on the basis-adjusted perp last in the effective-spot
-        /// blend (0 = spot-only champion; enables the futures feed).
-        #[arg(long, default_value = "0.0")]
+        /// blend (frozen: 0.75; 0 = spot-only, disables the futures feed).
+        #[arg(long, default_value = "0.75")]
         perp_price_weight: f64,
         /// LATE-FAVOURITE LANE mode: buy the >= align-min-mid favourite in
         /// the final entry window and HOLD to expiry (no sell exit). Off by
         /// default: the fade behaviour is byte-identical without this flag.
         #[arg(long)]
         lane_late_fav: bool,
-        /// Lane mode: minimum side book mid to qualify as the favourite.
-        #[arg(long, default_value = "0.85")]
+        /// Lane mode: minimum side book mid to qualify as the favourite
+        /// (frozen: 0.55; the late-fav lane passes 0.85 explicitly).
+        #[arg(long, default_value = "0.55")]
         align_min_mid: f64,
-        /// Lane mode: entries only within this many seconds of close.
-        #[arg(long, default_value = "120")]
+        /// Lane mode: entries only within this many seconds of close
+        /// (frozen: 0 = off; the late-fav lane passes 120 explicitly).
+        #[arg(long, default_value = "0")]
         enter_within_close_s: u32,
-        /// Lane mode entry deadline before close, seconds (fade mode keeps
-        /// its validated 90s constant regardless of this flag).
-        #[arg(long, default_value = "5")]
+        /// Entry deadline before close, seconds (frozen: 90; propagated
+        /// into the decide gate by sync_decide_cfg, so a wrong default
+        /// here IS a config drift - config-consistency-audit M-1).
+        #[arg(long, default_value = "90")]
         stop_before_close_s: u32,
         /// Minimum belief sigma_bar_bps to enter (a vol FLOOR, applies to
-        /// fade and lane). 0 = off. Lane uses 4.0; fade-hold uses 3.0.
-        #[arg(long, default_value = "0.0")]
+        /// fade and lane). Frozen fade-hold: 3.0; lane passes 4.0.
+        #[arg(long, default_value = "3.0")]
         min_entry_sigma_bps: f64,
         /// Fade re-entry: re-arm once both sides' edges drop below this
-        /// (0 = off = single entry per market; validated combo: 0.08).
-        #[arg(long, default_value = "0.0")]
+        /// (frozen: 0.08; 0 = off = single entry per market).
+        #[arg(long, default_value = "0.08")]
         rearm_edge: f64,
-        /// Fade re-entry: max entries per market (validated combo: 2).
-        #[arg(long, default_value = "1")]
+        /// Fade re-entry: max entries per market (frozen: 2).
+        #[arg(long, default_value = "2")]
         max_clips: u32,
         /// Vol estimator: "realized" (rolling) or "ewma" (validated combo).
         #[arg(long, default_value = "realized")]
@@ -135,8 +139,16 @@ enum Cmd {
         /// EWMA half-life seconds (only when --vol-estimator ewma).
         #[arg(long, default_value = "600.0")]
         ewma_halflife_s: f64,
-        /// Skip UTC-Saturday entries (finalized-candidate behaviour).
-        #[arg(long)]
+        /// Skip UTC-Saturday entries (frozen: ON). Bare `--skip-saturday`
+        /// still parses; pass `--skip-saturday=false` to trade Saturdays.
+        #[arg(
+            long,
+            default_value_t = true,
+            action = clap::ArgAction::Set,
+            num_args = 0..=1,
+            require_equals = true,
+            default_missing_value = "true"
+        )]
         skip_saturday: bool,
         /// Vol-responsive sizing reference (bps): clip = SHADOW_NOTIONAL *
         /// clamp(sigma_bar_bps/ref, lo, hi). 0 = off (flat, behaviour unchanged).
@@ -1447,92 +1459,103 @@ fn init_tracing() {
     tracing_subscriber::fmt().with_env_filter(filter).init();
 }
 
+/// The ONLY Cmd::Shadow -> ShadowArgs mapping. main() and the clap/shell
+/// parity tests share it, so a parsed CLI in tests is exactly what a real
+/// invocation would run.
+fn shadow_args_from_cmd(cmd: Cmd) -> Option<shadow::ShadowArgs> {
+    let Cmd::Shadow {
+        slug_prefix,
+        edge_threshold,
+        vol_lookback_s,
+        exit_after_s,
+        latency_probe_ms,
+        out_dir,
+        perp_price_weight,
+        lane_late_fav,
+        align_min_mid,
+        enter_within_close_s,
+        stop_before_close_s,
+        min_entry_sigma_bps,
+        rearm_edge,
+        max_clips,
+        vol_estimator,
+        ewma_halflife_s,
+        skip_saturday,
+        vol_sizing_ref_bps,
+        vol_sizing_lo,
+        vol_sizing_hi,
+        min_entry_ask,
+        max_entry_ask,
+        skip_spot_misalign_s,
+        skip_spot_against_all,
+        min_secs_from_open,
+        min_belief_dwell_s,
+        max_p_side,
+        skip_calm,
+        only_calm,
+        skip_expanded_mixed,
+        skip_expanded_high_flip,
+        pause_after_consec_losses,
+        skip_open_fav_gap,
+        open_fav_p_min,
+        open_fav_ask_max,
+        open_fav_secs,
+        decide_interval_ms,
+        decide_on_event,
+    } = cmd
+    else {
+        return None;
+    };
+    Some(shadow::ShadowArgs {
+        slug_prefix,
+        edge_threshold,
+        vol_lookback_s,
+        exit_after_s,
+        latency_probe_ms,
+        out_dir,
+        perp_price_weight,
+        lane_late_fav,
+        align_min_mid,
+        enter_within_close_s,
+        stop_before_close_s,
+        min_entry_sigma_bps,
+        rearm_edge,
+        max_clips,
+        vol_estimator,
+        ewma_halflife_s,
+        skip_saturday,
+        vol_sizing_ref_bps,
+        vol_sizing_lo,
+        vol_sizing_hi,
+        min_entry_ask,
+        max_entry_ask,
+        skip_spot_misalign_s,
+        skip_spot_against_all,
+        min_secs_from_open,
+        min_belief_dwell_s,
+        max_p_side,
+        skip_calm,
+        only_calm,
+        skip_expanded_mixed,
+        skip_expanded_high_flip,
+        pause_after_consec_losses,
+        skip_open_fav_gap,
+        open_fav_p_min,
+        open_fav_ask_max,
+        open_fav_secs,
+        decide_interval_ms,
+        decide_on_event,
+    })
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Shadow {
-            slug_prefix,
-            edge_threshold,
-            vol_lookback_s,
-            exit_after_s,
-            latency_probe_ms,
-            out_dir,
-            perp_price_weight,
-            lane_late_fav,
-            align_min_mid,
-            enter_within_close_s,
-            stop_before_close_s,
-            min_entry_sigma_bps,
-            rearm_edge,
-            max_clips,
-            vol_estimator,
-            ewma_halflife_s,
-            skip_saturday,
-            vol_sizing_ref_bps,
-            vol_sizing_lo,
-            vol_sizing_hi,
-            min_entry_ask,
-            max_entry_ask,
-            skip_spot_misalign_s,
-            skip_spot_against_all,
-            min_secs_from_open,
-            min_belief_dwell_s,
-            max_p_side,
-            skip_calm,
-            only_calm,
-            skip_expanded_mixed,
-            skip_expanded_high_flip,
-            pause_after_consec_losses,
-            skip_open_fav_gap,
-            open_fav_p_min,
-            open_fav_ask_max,
-            open_fav_secs,
-            decide_interval_ms,
-            decide_on_event,
-        } => {
-            shadow::run_shadow(shadow::ShadowArgs {
-                slug_prefix,
-                edge_threshold,
-                vol_lookback_s,
-                exit_after_s,
-                latency_probe_ms,
-                out_dir,
-                perp_price_weight,
-                lane_late_fav,
-                align_min_mid,
-                enter_within_close_s,
-                stop_before_close_s,
-                min_entry_sigma_bps,
-                rearm_edge,
-                max_clips,
-                vol_estimator,
-                ewma_halflife_s,
-                skip_saturday,
-                vol_sizing_ref_bps,
-                vol_sizing_lo,
-                vol_sizing_hi,
-                min_entry_ask,
-                max_entry_ask,
-                skip_spot_misalign_s,
-                skip_spot_against_all,
-                min_secs_from_open,
-                min_belief_dwell_s,
-                max_p_side,
-                skip_calm,
-                only_calm,
-                skip_expanded_mixed,
-                skip_expanded_high_flip,
-                pause_after_consec_losses,
-                skip_open_fav_gap,
-                open_fav_p_min,
-                open_fav_ask_max,
-                open_fav_secs,
-                decide_interval_ms,
-                decide_on_event,
-            })
-            .await
+        cmd @ Cmd::Shadow { .. } => {
+            let args = shadow_args_from_cmd(cmd).expect("Cmd::Shadow variant");
+            shadow::run_shadow(args).await
         }
         Cmd::Alpha {
             markets,
@@ -3993,5 +4016,231 @@ mod tests {
     fn parse_strategies_rejects_unknown_names() {
         assert!(parse_strategies("reactive_directional", false).is_err());
         assert!(parse_strategies("reactive_directional", true).is_err());
+    }
+
+    // CONFIG PARITY GATE (deep-review F1). The clap layer and the shell flag
+    // files are both potential shadow configs; these tests pin BOTH to the
+    // Rust canon (frozen_/gated_/recommended_shadow_final_args). If one of
+    // these fails, fix the clap default or the flags file, never the test.
+
+    fn parse_shadow_args(argv: &[String]) -> shadow::ShadowArgs {
+        // The Cmd enum is large enough that clap parsing overflows the
+        // default 2MiB test-thread stack in debug builds; parse on a
+        // dedicated thread with the main-thread-sized stack instead.
+        let argv = argv.to_vec();
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(move || {
+                let cli = Cli::try_parse_from(&argv)
+                    .unwrap_or_else(|e| panic!("clap rejected {argv:?}: {e}"));
+                shadow_args_from_cmd(cli.cmd).expect("shadow subcommand")
+            })
+            .expect("spawn parse thread")
+            .join()
+            .expect("parse thread panicked")
+    }
+
+    #[test]
+    fn shadow_clap_defaults_equal_frozen_canon() {
+        // Minimal invocation: only the required arg. Every default the CLI
+        // fills in must equal the frozen constant, field for field, with NO
+        // whitelist. A default that must differ is a bug in the default.
+        let argv: Vec<String> = ["pm-app", "shadow", "--out-dir", "shadow-final"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let args = parse_shadow_args(&argv);
+        let frozen = shadow::frozen_shadow_final_args(PathBuf::from("shadow-final"));
+        assert_eq!(
+            args, frozen,
+            "shadow clap defaults drifted from frozen_shadow_final_args; \
+             align the clap default, do not whitelist"
+        );
+    }
+
+    #[test]
+    fn shadow_clap_skip_saturday_optout_still_parses() {
+        let argv: Vec<String> = [
+            "pm-app",
+            "shadow",
+            "--out-dir",
+            "shadow-final",
+            "--skip-saturday=false",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let args = parse_shadow_args(&argv);
+        assert!(!args.skip_saturday);
+    }
+
+    // Shell SSOT parsing: extract the exec argv from a foreground launcher
+    // plus its sourced flags array, substituting ${VAR:-default} with the
+    // default. Panics loudly on any construct it does not understand, so a
+    // creative launcher edit fails the gate rather than slipping past it.
+
+    fn read_ops_script(name: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/ops")
+            .join(name);
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    }
+
+    /// Replace every `${NAME:-default}` with `default`; leave other text.
+    fn expand_param_defaults(s: &str) -> String {
+        let mut out = String::new();
+        let mut rest = s;
+        while let Some(start) = rest.find("${") {
+            out.push_str(&rest[..start]);
+            let after = &rest[start + 2..];
+            let Some(end) = after.find('}') else {
+                panic!("unterminated ${{ in shell fragment: {s}");
+            };
+            let inner = &after[..end];
+            match inner.split_once(":-") {
+                Some((_, default)) => out.push_str(default),
+                None => panic!("plain ${{{inner}}} has no :-default; teach the parity test"),
+            }
+            rest = &after[end + 1..];
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// Scan `NAME="value"` assignments (defaults resolved) into a map.
+    fn shell_assignments(script: &str) -> HashMap<String, String> {
+        let mut vars = HashMap::new();
+        for line in script.lines() {
+            let line = line.trim();
+            let Some((name, value)) = line.split_once('=') else {
+                continue;
+            };
+            if name.is_empty()
+                || !name.chars().all(|c| c.is_ascii_uppercase() || c == '_')
+                || value.starts_with("\"$(")
+                || value.starts_with("$(")
+                || value.starts_with('(')
+            {
+                continue;
+            }
+            let value = value.trim_matches('"');
+            vars.insert(name.to_string(), expand_param_defaults(value));
+        }
+        vars
+    }
+
+    /// Tokens of a `NAME=( ... )` flags array, comments stripped.
+    fn shell_flags_array(script: &str, array_name: &str) -> Vec<String> {
+        let open = format!("{array_name}=(");
+        let start = script
+            .find(&open)
+            .unwrap_or_else(|| panic!("flags array {array_name} not found"));
+        let body = &script[start + open.len()..];
+        let end = body.find("\n)").expect("flags array not closed");
+        let mut out = Vec::new();
+        for line in body[..end].lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            for tok in line.split_whitespace() {
+                out.push(tok.trim_matches('"').to_string());
+            }
+        }
+        assert!(!out.is_empty(), "flags array {array_name} parsed empty");
+        out
+    }
+
+    /// The full argv a foreground launcher would exec: base flags from the
+    /// `exec "$BIN" shadow \` block with env defaults substituted, plus the
+    /// sourced flags array spliced where `"${ARRAY[@]}"` appears.
+    fn launcher_argv(
+        foreground: &str,
+        flags_file: &str,
+        array_name: &str,
+    ) -> Vec<String> {
+        let fg = read_ops_script(foreground);
+        let flags = shell_flags_array(&read_ops_script(flags_file), array_name);
+        let vars = shell_assignments(&fg);
+
+        let mut block = String::new();
+        let mut in_exec = false;
+        for line in fg.lines() {
+            let t = line.trim();
+            if !in_exec {
+                if !t.starts_with("exec ") {
+                    continue;
+                }
+                in_exec = true;
+            }
+            let cont = t.ends_with('\\');
+            block.push_str(t.trim_end_matches('\\'));
+            block.push(' ');
+            if !cont {
+                break;
+            }
+        }
+        assert!(in_exec, "{foreground}: no exec block found");
+
+        let raw: Vec<&str> = block.split_whitespace().collect();
+        assert_eq!(raw[0], "exec", "{foreground}: exec block malformed");
+        assert_eq!(
+            raw[2], "shadow",
+            "{foreground}: launcher no longer runs the shadow subcommand"
+        );
+        let splice_marker = format!("${{{array_name}[@]}}");
+        let mut argv = vec!["pm-app".to_string(), "shadow".to_string()];
+        for tok in &raw[3..] {
+            let tok = tok.trim_matches('"');
+            if tok == splice_marker {
+                argv.extend(flags.iter().cloned());
+                continue;
+            }
+            let expanded = expand_param_defaults(tok);
+            if let Some(name) = expanded.strip_prefix('$') {
+                let value = vars.get(name).unwrap_or_else(|| {
+                    panic!("{foreground}: unresolved shell var ${name} in exec block")
+                });
+                argv.push(value.clone());
+            } else {
+                argv.push(expanded);
+            }
+        }
+        argv
+    }
+
+    #[test]
+    fn shadow_final_launcher_flags_equal_gated_canon() {
+        let argv = launcher_argv(
+            "shadow_final_foreground.sh",
+            "shadow_final_gated_flags.sh",
+            "SHADOW_FINAL_GATED_FLAGS",
+        );
+        let args = parse_shadow_args(&argv);
+        let expected = shadow::gated_shadow_final_args(args.out_dir.clone());
+        assert_eq!(
+            args, expected,
+            "shadow_final_foreground.sh + shadow_final_gated_flags.sh no longer \
+             render gated_shadow_final_args; update the flags file AND the Rust \
+             canon together (with backtest evidence per PROD.md)"
+        );
+    }
+
+    #[test]
+    fn shadow_recommended_launcher_flags_equal_recommended_canon() {
+        let argv = launcher_argv(
+            "shadow_recommended_foreground.sh",
+            "shadow_recommended_flags.sh",
+            "SHADOW_RECOMMENDED_FLAGS",
+        );
+        let args = parse_shadow_args(&argv);
+        let expected = shadow::recommended_shadow_final_args(args.out_dir.clone());
+        assert_eq!(
+            args, expected,
+            "shadow_recommended_foreground.sh + shadow_recommended_flags.sh no \
+             longer render recommended_shadow_final_args; update the flags file \
+             AND the Rust canon together"
+        );
     }
 }

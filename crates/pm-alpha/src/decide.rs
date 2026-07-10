@@ -237,6 +237,98 @@ pub struct DecideConfig {
 }
 
 impl DecideConfig {
+    /// Canonical config fingerprint: a compact JSON object with keys in
+    /// struct declaration order. The string IS the fingerprint (no hashing);
+    /// two streams with byte-equal canon strings run the same decide config.
+    /// Written by hand (not serde) so the field order and number formatting
+    /// stay frozen even if serialization defaults change.
+    pub fn canon(&self) -> String {
+        let entry_mode = match self.entry_mode {
+            EntryMode::Fade => "fade",
+            EntryMode::Aligned => "aligned",
+        };
+        format!(
+            concat!(
+                "{{",
+                "\"edge_threshold\":{},",
+                "\"min_marginal_edge\":{},",
+                "\"min_entry_sigma_bps\":{},",
+                "\"max_entry_sigma_bps\":{},",
+                "\"skip_saturday\":{},",
+                "\"rearm_edge\":{},",
+                "\"clip_cooldown_ms\":{},",
+                "\"exit_after_s\":{},",
+                "\"enter_within_close_s\":{},",
+                "\"stop_before_close_s\":{},",
+                "\"notional_usdc\":{},",
+                "\"kelly_sizing\":{},",
+                "\"min_p_side\":{},",
+                "\"max_p_side\":{},",
+                "\"min_entry_ask\":{},",
+                "\"min_secs_from_open\":{},",
+                "\"min_belief_dwell_s\":{},",
+                "\"max_entry_ask\":{},",
+                "\"vol_sizing_ref_bps\":{},",
+                "\"vol_sizing_lo\":{},",
+                "\"vol_sizing_hi\":{},",
+                "\"basis_mom_agree\":{},",
+                "\"basis_mom_disagree\":{},",
+                "\"entry_mode\":\"{}\",",
+                "\"align_min_mid\":{},",
+                "\"skip_calm\":{},",
+                "\"only_calm\":{},",
+                "\"skip_expanded_mixed\":{},",
+                "\"skip_expanded_high_flip\":{},",
+                "\"skip_open_fav_gap\":{},",
+                "\"open_fav_p_min\":{},",
+                "\"open_fav_ask_max\":{},",
+                "\"open_fav_secs\":{},",
+                "\"pause_after_consec_losses\":{},",
+                "\"max_rearm_entry_ask\":{},",
+                "\"skip_spot_misalign_s\":{},",
+                "\"skip_spot_against_all\":{}",
+                "}}",
+            ),
+            self.edge_threshold,
+            self.min_marginal_edge,
+            self.min_entry_sigma_bps,
+            self.max_entry_sigma_bps,
+            self.skip_saturday,
+            self.rearm_edge,
+            self.clip_cooldown_ms,
+            self.exit_after_s,
+            self.enter_within_close_s,
+            self.stop_before_close_s,
+            self.notional_usdc,
+            self.kelly_sizing,
+            self.min_p_side,
+            self.max_p_side,
+            self.min_entry_ask,
+            self.min_secs_from_open,
+            self.min_belief_dwell_s,
+            self.max_entry_ask,
+            self.vol_sizing_ref_bps,
+            self.vol_sizing_lo,
+            self.vol_sizing_hi,
+            self.basis_mom_agree,
+            self.basis_mom_disagree,
+            entry_mode,
+            self.align_min_mid,
+            self.skip_calm,
+            self.only_calm,
+            self.skip_expanded_mixed,
+            self.skip_expanded_high_flip,
+            self.skip_open_fav_gap,
+            self.open_fav_p_min,
+            self.open_fav_ask_max,
+            self.open_fav_secs,
+            self.pause_after_consec_losses,
+            self.max_rearm_entry_ask,
+            self.skip_spot_misalign_s,
+            self.skip_spot_against_all,
+        )
+    }
+
     /// Backtest construction. `edge_threshold` is the grid value the harness
     /// sweeps, passed separately (not `HarnessConfig::edge_threshold`).
     pub fn from_harness(cfg: &HarnessConfig, edge_threshold: f64) -> Self {
@@ -1237,5 +1329,44 @@ mod tests {
             &cfg,
         );
         assert_eq!(dec2.action, EntryAction::Enter);
+    }
+
+    #[test]
+    fn canon_is_the_exact_frozen_fingerprint() {
+        // The canon string IS the config fingerprint shared across shadow
+        // startup events, alpha out-json, and the matched-replay tooling.
+        // Any change here is a fingerprint break: bump ALL consumers.
+        let expected = concat!(
+            "{\"edge_threshold\":0.12,\"min_marginal_edge\":0.04,",
+            "\"min_entry_sigma_bps\":3,\"max_entry_sigma_bps\":0,",
+            "\"skip_saturday\":true,\"rearm_edge\":0.08,",
+            "\"clip_cooldown_ms\":5000,\"exit_after_s\":0,",
+            "\"enter_within_close_s\":0,\"stop_before_close_s\":90,",
+            "\"notional_usdc\":50,\"kelly_sizing\":false,",
+            "\"min_p_side\":0,\"max_p_side\":1,\"min_entry_ask\":0,",
+            "\"min_secs_from_open\":0,\"min_belief_dwell_s\":0,",
+            "\"max_entry_ask\":1,\"vol_sizing_ref_bps\":0,",
+            "\"vol_sizing_lo\":0.5,\"vol_sizing_hi\":2,",
+            "\"basis_mom_agree\":1,\"basis_mom_disagree\":1,",
+            "\"entry_mode\":\"fade\",\"align_min_mid\":0.55,",
+            "\"skip_calm\":false,\"only_calm\":false,",
+            "\"skip_expanded_mixed\":false,\"skip_expanded_high_flip\":false,",
+            "\"skip_open_fav_gap\":false,\"open_fav_p_min\":0.9,",
+            "\"open_fav_ask_max\":0.6,\"open_fav_secs\":5,",
+            "\"pause_after_consec_losses\":0,\"max_rearm_entry_ask\":0,",
+            "\"skip_spot_misalign_s\":0,\"skip_spot_against_all\":false}",
+        );
+        assert_eq!(frozen_fade_decide_config(50.0).canon(), expected);
+    }
+
+    #[test]
+    fn canon_is_valid_json_and_aligned_mode_renders() {
+        let mut cfg = frozen_fade_decide_config(50.0);
+        cfg.entry_mode = EntryMode::Aligned;
+        let canon = cfg.canon();
+        let parsed: serde_json::Value = serde_json::from_str(&canon).expect("canon parses");
+        assert_eq!(parsed["entry_mode"], "aligned");
+        assert_eq!(parsed["edge_threshold"], 0.12);
+        assert_eq!(parsed["stop_before_close_s"], 90);
     }
 }

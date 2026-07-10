@@ -44,7 +44,7 @@ const OI_SERIES_CAP: usize = 600;
 /// ~40 days of 8h funding events.
 const FUNDING_SERIES_CAP: usize = 120;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ShadowArgs {
     pub slug_prefix: String,
     pub edge_threshold: f64,
@@ -186,6 +186,18 @@ pub fn gated_shadow_final_args(out_dir: PathBuf) -> ShadowArgs {
     args
 }
 
+/// Recommended config: the gated package MINUS `min_entry_ask` (0.45 -> 0.0).
+/// docs/deployed-config-negative-2026-07.md: the lottery-band floor alone
+/// blocked the cheap-underdog fades (the payoff tail) and flipped the June
+/// backtest negative; this profile keeps the open-fav + spot-misalign gates.
+/// SSOT twin of scripts/ops/shadow_recommended_flags.sh (enforced by the
+/// pm-app shell-vs-Rust parity test).
+pub fn recommended_shadow_final_args(out_dir: PathBuf) -> ShadowArgs {
+    let mut args = gated_shadow_final_args(out_dir);
+    args.min_entry_ask = 0.0;
+    args
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
     Up,
@@ -212,6 +224,19 @@ pub struct Touch {
 #[derive(Debug, serde::Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LogEvent {
+    /// Startup config fingerprint: the FIRST event of every stream's JSONL.
+    /// `decide_config_canon` is `DecideConfig::canon()` for the RESOLVED
+    /// decide config (post `sync_decide_cfg`), so the matched replay can
+    /// derive its invocation from the stream's own log and refuse to compare
+    /// mismatched fingerprints (deep-review F2).
+    Config {
+        ts_utc: String,
+        slug_prefix: String,
+        out_dir: String,
+        decide_interval_ms: u64,
+        decide_on_event: bool,
+        decide_config_canon: String,
+    },
     WouldEnter {
         ts_utc: String,
         slug: String,
@@ -1299,6 +1324,15 @@ impl ShadowCore {
         }
     }
 
+    /// The decide config this stream actually runs: CLI/runtime values
+    /// propagated over the frozen SSOT exactly as `decide()` will apply them.
+    /// This is what the startup config fingerprint must report; the raw
+    /// `frozen_fade_decide_config` would hide CLI overrides (class C1/M-1).
+    pub fn resolved_decide_cfg(&mut self) -> DecideConfig {
+        self.sync_decide_cfg();
+        self.cfg.decide_cfg
+    }
+
     pub fn decide(&mut self, now_ns: i64, defer_entry_commit: bool) -> Vec<LogEvent> {
         self.sync_decide_cfg();
         let spot = self.spot_history();
@@ -2005,6 +2039,26 @@ pub async fn run_shadow_with_sink(
     let core = std::sync::Arc::new(std::sync::Mutex::new(ShadowCore::new(
         shadow_config_from_args(&args),
     )));
+
+    // FIRST event of every stream: the resolved config fingerprint, so the
+    // matched replay derives its invocation from the log itself (F2) and any
+    // clap-default drift is visible in the stream, not just the launcher.
+    let config_event = {
+        let mut core = core.lock().expect("shadow core poisoned");
+        LogEvent::Config {
+            ts_utc: ts_utc(now_unix_ns()),
+            slug_prefix: args.slug_prefix.clone(),
+            out_dir: args.out_dir.display().to_string(),
+            decide_interval_ms: args.decide_interval_ms,
+            decide_on_event: args.decide_on_event,
+            decide_config_canon: core.resolved_decide_cfg().canon(),
+        }
+    };
+    tracing::info!(
+        event = %serde_json::to_string(&config_event).unwrap_or_default(),
+        "shadow"
+    );
+    logger.write(&config_event)?;
 
     bootstrap::warm_buffers(core.clone(), args.perp_price_weight).await?;
 
@@ -3304,6 +3358,49 @@ mod tests {
         assert!(!cfg.skip_calm);
         assert!(!cfg.skip_expanded_mixed);
         assert!(!cfg.skip_expanded_high_flip);
+    }
+
+    #[test]
+    fn recommended_args_differ_from_gated_in_exactly_min_entry_ask() {
+        let gated = gated_shadow_final_args(PathBuf::from("shadow-final"));
+        let rec = recommended_shadow_final_args(PathBuf::from("shadow-final"));
+        assert_ne!(rec, gated, "recommended must actually drop a gate");
+        assert_eq!(rec.min_entry_ask, 0.0);
+        // Restoring the single dropped field must make them byte-equal:
+        // proves exactly one field differs (PartialEq covers every field).
+        let mut gated_minus_floor = gated;
+        gated_minus_floor.min_entry_ask = 0.0;
+        assert_eq!(rec, gated_minus_floor);
+    }
+
+    #[test]
+    fn config_event_serializes_to_contract_shape() {
+        let mut core = ShadowCore::new(shadow_config_from_args(&gated_shadow_final_args(
+            PathBuf::from("shadow-final"),
+        )));
+        let event = LogEvent::Config {
+            ts_utc: "2026-07-10T00:00:00.000Z".to_string(),
+            slug_prefix: "btc-updown-5m-".to_string(),
+            out_dir: "shadow-final".to_string(),
+            decide_interval_ms: 1000,
+            decide_on_event: false,
+            decide_config_canon: core.resolved_decide_cfg().canon(),
+        };
+        let line = serde_json::to_string(&event).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["type"], "config");
+        assert_eq!(v["slug_prefix"], "btc-updown-5m-");
+        assert_eq!(v["out_dir"], "shadow-final");
+        assert_eq!(v["decide_interval_ms"], 1000);
+        assert_eq!(v["decide_on_event"], false);
+        // The canon reflects the RESOLVED config: gated overrides visible.
+        let canon: serde_json::Value =
+            serde_json::from_str(v["decide_config_canon"].as_str().unwrap()).unwrap();
+        assert_eq!(canon["min_entry_ask"], 0.45);
+        assert_eq!(canon["skip_spot_misalign_s"], 30);
+        assert_eq!(canon["stop_before_close_s"], 90);
+        assert_eq!(canon["edge_threshold"], 0.12);
+        assert_eq!(canon["entry_mode"], "fade");
     }
 
     fn cfg() -> ShadowConfig {

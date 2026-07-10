@@ -163,6 +163,11 @@ pub struct AlphaArgs {
 struct AlphaRunReport {
     model_cfg: AlphaModelConfig,
     harness_cfg: HarnessConfig,
+    /// `DecideConfig::canon()` for the config this run replayed (first edge
+    /// threshold when sweeping). Byte-comparable against the shadow streams'
+    /// startup config events, so realization reports can refuse to compare
+    /// mismatched configs (deep-review F2).
+    decide_config_canon: String,
     slug_prefix: String,
     date_start: Option<String>,
     date_end: Option<String>,
@@ -1234,9 +1239,11 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        let edge0 = args.edge_thresholds.first().copied().unwrap_or(0.12);
         let report = AlphaRunReport {
             model_cfg,
             harness_cfg: base_cfg,
+            decide_config_canon: DecideConfig::from_harness(&base_cfg, edge0).canon(),
             slug_prefix: args.slug_prefix.clone(),
             date_start: args.date_start.clone(),
             date_end: args.date_end.clone(),

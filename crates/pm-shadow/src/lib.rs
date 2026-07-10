@@ -235,6 +235,12 @@ pub enum LogEvent {
         out_dir: String,
         decide_interval_ms: u64,
         decide_on_event: bool,
+        /// Belief-model params: outside DecideConfig but decision-relevant
+        /// (verify finding: fingerprint must cover the model, not just gates).
+        perp_price_weight: f64,
+        vol_lookback_s: u32,
+        vol_estimator: String,
+        max_clips: u32,
         decide_config_canon: String,
     },
     WouldEnter {
@@ -2051,6 +2057,10 @@ pub async fn run_shadow_with_sink(
             out_dir: args.out_dir.display().to_string(),
             decide_interval_ms: args.decide_interval_ms,
             decide_on_event: args.decide_on_event,
+            perp_price_weight: args.perp_price_weight,
+            vol_lookback_s: args.vol_lookback_s,
+            vol_estimator: format!("{:?}", args.vol_estimator).to_lowercase(),
+            max_clips: args.max_clips,
             decide_config_canon: core.resolved_decide_cfg().canon(),
         }
     };
@@ -3384,6 +3394,10 @@ mod tests {
             out_dir: "shadow-final".to_string(),
             decide_interval_ms: 1000,
             decide_on_event: false,
+            perp_price_weight: 0.75,
+            vol_lookback_s: 3600,
+            vol_estimator: "realized".to_string(),
+            max_clips: 2,
             decide_config_canon: core.resolved_decide_cfg().canon(),
         };
         let line = serde_json::to_string(&event).unwrap();

@@ -28,6 +28,9 @@ CLIP = 50.0
 DELAY_BUCKET_S = 15
 
 
+MODEL_PARAM_KEYS = ("perp_price_weight", "vol_lookback_s", "vol_estimator", "max_clips")
+
+
 def live_config_canon(shadow_dir: Path, day: str) -> str | None:
     """First '"type":"config"' line among the shadow files carrying the day."""
     for fp in sorted(glob.glob(str(shadow_dir / "shadow-*.jsonl"))):
@@ -42,9 +45,22 @@ def live_config_canon(shadow_dir: Path, day: str) -> str | None:
                 break
         if has_day and config_line is not None:
             try:
-                return json.loads(config_line).get("decide_config_canon")
+                ev = json.loads(config_line)
             except json.JSONDecodeError:
                 return None
+            canon = ev.get("decide_config_canon")
+            if canon is None:
+                return None
+            # Fold the belief-model params (outside DecideConfig but
+            # decision-relevant) into the compared dict when present.
+            try:
+                d = json.loads(canon)
+                for k in MODEL_PARAM_KEYS:
+                    if k in ev:
+                        d[f"model.{k}"] = ev[k]
+                return json.dumps(d)
+            except json.JSONDecodeError:
+                return canon
     return None
 
 
@@ -53,9 +69,24 @@ def replay_config_canon(replay_dir: Path, day: str) -> str | None:
     if not fp.exists():
         return None
     try:
-        return json.load(open(fp)).get("decide_config_canon")
+        r = json.load(open(fp))
     except (json.JSONDecodeError, OSError):
         return None
+    canon = r.get("decide_config_canon")
+    if canon is None:
+        return None
+    hc = r.get("harness_cfg") or {}
+    try:
+        d = json.loads(canon)
+        for k in MODEL_PARAM_KEYS:
+            if k in hc:
+                v = hc[k]
+                if k == "vol_estimator" and isinstance(v, str):
+                    v = v.lower()
+                d[f"model.{k}"] = v
+        return json.dumps(d)
+    except json.JSONDecodeError:
+        return canon
 
 
 def canon_diff(live_canon: str, replay_canon: str) -> dict[str, list]:
@@ -67,10 +98,12 @@ def canon_diff(live_canon: str, replay_canon: str) -> dict[str, list]:
         return {"_unparseable_canon": [live_canon, replay_canon]}
     if not isinstance(live, dict) or not isinstance(replay, dict):
         return {"_unparseable_canon": [live_canon, replay_canon]}
+    # notional_usdc is telemetry/sizing scale, not an enter/skip decision
+    # input; live streams and replays may legitimately differ there.
     return {
         k: [live.get(k), replay.get(k)]
         for k in sorted(set(live) | set(replay))
-        if live.get(k) != replay.get(k)
+        if k != "notional_usdc" and live.get(k) != replay.get(k)
     }
 
 

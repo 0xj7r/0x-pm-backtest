@@ -114,6 +114,25 @@ check_env() {
     esac
   done < <(grep '^Environment=' "$unit_file" 2>/dev/null || true)
 
+  # Vars from EnvironmentFile= paths declared in the repo unit are declared
+  # config too (the '-' prefix marks optional files). Read each referenced
+  # file on the box so its PM_*/SHADOW_* vars are not flagged as undeclared.
+  local envfile
+  while IFS= read -r envfile; do
+    envfile="${envfile#EnvironmentFile=}"
+    envfile="${envfile#-}"
+    [[ -r "$envfile" ]] || continue
+    while IFS= read -r line; do
+      line="${line%%#*}"
+      [[ -z "$line" ]] && continue
+      line="${line#\"}"; line="${line%\"}"
+      k="${line%%=*}"
+      case "$k" in
+        PM_*|SHADOW_*) declared+="$line"$'\n' ;;
+      esac
+    done < "$envfile"
+  done < <(grep '^EnvironmentFile=' "$unit_file" 2>/dev/null || true)
+
   if ! [[ -r "/proc/$pid/environ" ]]; then
     fail "$unit env: cannot read /proc/$pid/environ"
     return

@@ -9,10 +9,17 @@ PartOf=pm-shadow-final.service
 [Service]
 Type=simple
 WorkingDirectory=/home/ubuntu
-EnvironmentFile=/home/ubuntu/.config/polymarket-exec/shadow_exec_tail.env
+# NO EnvironmentFile: systemd gives EnvironmentFile precedence over
+# Environment= lines, and shadow_exec_tail.env carries LIVE-ARMING values
+# (verify_deploy caught the running process armed-shaped on 2026-07-10; the
+# --paper flag and the kill file were the guards that held). The paper
+# executor needs no creds; sizing declared explicitly.
 Environment=PAPER_MODE=1
 Environment=PM_SHADOW_PAPER_MODE=true
 Environment=PM_SHADOW_LIVE_TRADE=false
+Environment=PM_SHADOW_CLIP_FRAC=0.0075
+Environment=PM_SHADOW_CLIP_CEIL_FRAC=0.012
+Environment=PM_SHADOW_LIVE_KILL_SWITCH_PATH=/home/ubuntu/fade.kill
 # Give a just-(re)started engine time to create its new JSONL before the
 # tailer picks the latest file in the directory.
 ExecStartPre=/bin/sleep 5

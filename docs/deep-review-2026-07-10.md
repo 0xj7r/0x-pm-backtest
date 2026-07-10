@@ -165,9 +165,58 @@ W6. The v1 gate pre-registration criteria predate the baseline fixes and do
     not specify config-matched replay; they need a re-freeze before the
     (reset) soak is judged against them.
 
-## 7. Audit-agent findings (folded in on completion)
+## 7. Audit-agent findings (three parallel auditors, 2026-07-10)
 
-See section appended below.
+A1. CLI-vs-frozen sweep: sync_decide_cfg propagates 24 DecideConfig fields
+    from CLI args every tick - the full exposure surface for the M-1 class.
+    TODAY zero committed live/replay paths run a divergent default (post-fix),
+    but 10 shadow + 9 alpha clap defaults still silently diverge on any bare
+    or ad-hoc invocation: a bare `pm-app shadow` runs edge 0.16, NO perp
+    blend, 30s mark-to-book exit, no sigma floor, trades Saturdays, 1 clip -
+    a different strategy that would look like ours in the logs. The parity
+    build (in flight) aligns all clap defaults to frozen constants and adds
+    the enforcement test.
+
+A2. M-1 CORRECTION (defense-in-depth masked the drift): the outer decision
+    loop has carried `const STOP_BEFORE_CLOSE_S = 90` since the shared-engine
+    foundation commit; in fade mode it cuts decision ticks at T-90s BEFORE
+    decide_entry's synced (drifted) gate can bind. So shadow-final never
+    actually took late-window entries; the soak-week entries were correctly
+    windowed. The soak evidence remains invalidated - but by the
+    backtest-negative deployed config, not by M-1. Meta-lesson: the GLM
+    audit found the drift and missed the mask; this auditor found the mask.
+    No single audit pass is sufficient for safety conclusions.
+
+A3. Coverage matrix - THE HEADLINE: the validated and deployed gate sets are
+    DISJOINT. The v1 stability gate (max_p_side 0.85 + min_secs_from_open
+    15) is validated across all five months at truthful latency - and NO
+    live stream runs it. The deployed gate package (min_entry_ask 0.45 +
+    open_fav + misalign) runs in FOUR streams (final, final-b, 15m,
+    fast_live compiled-in) - and has exactly one backtest cell, which is
+    negative. All three daily-replay blocks are bare config, so every
+    realization file is config-mismatched; no replay exists for
+    shadow-recommended or shadow-fast yet.
+
+A4. 15m provenance: the "+$4,586 June validated" figure was bare config at
+    250ms fantasy latency; truthful-latency bare is +$1,889, and the gated
+    config the 15m stream actually runs has ZERO backtest cells. The 15m
+    book needs the same revalidation as the 5m.
+
+A5. Governance archaeology: the base gates went live on Dublin BEFORE any
+    git history captured them (the box predated git-backed deploys); the
+    first commit (Jun 18) documented an already-live fact - and the SAME
+    commit recorded backtest evidence AGAINST any min_entry_ask above
+    0.10-0.15. The gate values were cherry-picked from mayjune_btc5m.toml,
+    whose own header disclaimed promotion, and incoherently: min_entry_ask
+    0.45 was taken WITHOUT its offsetting max_entry_ask 0.85 / max_p_side
+    0.92 band, changing its meaning entirely. The open_fav gate's only
+    validation used 250ms latency + at-touch scoring + in-sample June
+    selection. PROD.md's rule prohibiting exactly this was written Jul 1,
+    two weeks after the fact, and was never applied retroactively to the
+    config it grandfathered. Mechanism, in one line: validation evidence
+    was transferred by association from the bare strategy to
+    strategy-plus-gates, under drawdown urgency, with no mechanical gate to
+    stop it.
 
 ## 8. Fix plan - structural, prioritized
 

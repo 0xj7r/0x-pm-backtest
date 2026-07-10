@@ -23,7 +23,21 @@ edge threshold, buy the cheap side and hold to redemption. The edge is staleness
 capture: CEX state updates faster than the PM book reprices (~150-250ms), so we
 monetize episodic dislocations, not superior calibration.
 
-## 2. Frozen prod config
+## 2. THE candidate config (single-candidate policy, 2026-07-10)
+
+POLICY: there is exactly ONE production candidate config at any time. Every
+5m measurement stream (twins, fast engine, consensus, executor) and every
+replay baseline runs THE candidate and nothing else. Research variants live
+in backtests only; a live A/B experiment requires an explicit, documented,
+time-boxed exception with its own stream name, and at most one may exist at
+a time. Rationale: docs/deep-review-2026-07-10.md - running a zoo of configs
+made validation evidence and live measurement disjoint, and an unvalidated
+config reached the deploy path unnoticed.
+
+THE candidate = the BARE FROZEN config. It is the only config with full-depth
+evidence: positive in all five validated months at truthful latency
+(Feb +$11.9k / Mar +$18.5k / Apr +$13.1k / May +$17.3k / Jun +$2.0k @1250ms;
+substantially more at the fast engine's 750ms class).
 
 | Flag | Value |
 |---|---|
@@ -35,16 +49,29 @@ monetize episodic dislocations, not superior calibration.
 | `max_clips` | 2 |
 | `min_entry_sigma_bps` | 3.0 |
 | `clip_cooldown_ms` | 5000 |
-| `stop_before_close_s` | 90 |
+| `stop_before_close_s` | 90 (pinned explicitly; see M-1) |
 | `skip_saturday` | true |
-| `min_entry_ask` | 0.45 |
-| `skip_open_fav_gap` | true (p_min 0.88, ask_max 0.62, secs 300) |
-| `skip_spot_misalign_s` | 30 |
 | `min_marginal_edge` | 0.04 |
+| Base gates (`min_entry_ask`, `open_fav_*`, `skip_spot_misalign_s`) | **NONE** |
 | Regime gates (`skip_calm`, `skip_expanded_mixed`, ...) | **NONE** (removed 2026-07-01, overfit) |
 
-Flags SSOT: `scripts/ops/shadow_final_gated_flags.sh`. Restart script:
-`scripts/ops/shadow_final_restart_gated.sh`. Assembled command line:
+Gate history (why the candidate is bare):
+- Regime gates: selected on Jun 14-19 live tape; blocked 99% of entries OOS
+  Jun 20-30. Removed 2026-07-01.
+- Base gates (min_entry_ask 0.45 + open_fav + misalign 30): adopted un-
+  validated during the June drawdown firefight (governance archaeology in
+  docs/deep-review-2026-07-10.md section 7). The package is backtest-NEGATIVE
+  (June @1250ms: -$459 vs bare +$1,957; min_entry_ask alone -$2,106 - it
+  blocks the cheap-underdog payoff tail). Removed 2026-07-10. Any gate
+  returns only through the front door: multi-month truthful-latency evidence
+  + the deployment gate.
+- v1 stability gate (min_secs_from_open 15 + max_p_side 0.85): validated as
+  a COST across all five months (-6% to -34%); its live BENEFIT hypothesis
+  is pre-registered and judged on the candidate-config soak. Not in the
+  candidate unless it passes.
+
+Flags SSOT: `scripts/ops/shadow_candidate_flags.sh` (enforced against the
+Rust canon by the config-parity test). Reference command:
 
 ```bash
 pm-app shadow \
@@ -57,19 +84,9 @@ pm-app shadow \
   --vol-estimator realized \
   --vol-lookback-s 3600 \
   --skip-saturday \
-  --out-dir ~/data/pm-alpha/shadow-final \
-  --skip-spot-misalign-s 30 \
-  --min-entry-ask 0.45 \
-  --skip-open-fav-gap \
-  --open-fav-p-min 0.88 \
-  --open-fav-ask-max 0.62 \
-  --open-fav-secs 300
+  --stop-before-close-s 90 \
+  --out-dir ~/data/pm-alpha/shadow-final
 ```
-
-Regime gates history: `skip_calm` + `skip_expanded_mixed` were selected on Jun
-14-19 live tape only; out-of-sample Jun 20-30 they blocked 99% of entries (10
-entries in 10 days, all clean_directional) while the ungated stream was green
-every June day. Removed from prod 2026-07-01.
 
 ## 3. Live execution path
 

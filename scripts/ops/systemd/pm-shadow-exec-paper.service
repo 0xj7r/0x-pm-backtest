@@ -16,10 +16,17 @@ WorkingDirectory=/home/ubuntu
 # executor needs no creds; sizing declared explicitly.
 Environment=PAPER_MODE=1
 Environment=PM_SHADOW_PAPER_MODE=true
+Environment=PM_SHADOW_PAPER_TRADE=true
 Environment=PM_SHADOW_LIVE_TRADE=false
-Environment=PM_SHADOW_CLIP_FRAC=0.0075
-Environment=PM_SHADOW_CLIP_CEIL_FRAC=0.012
+Environment=PM_SHADOW_JSONL_PATH=/home/ubuntu/data/pm-alpha/shadow-final
+Environment=PM_SHADOW_TAIL_STATE_PATH=/home/ubuntu/data/pm-alpha/exec_tail_state.json
+Environment=PM_SHADOW_REDEEM_LEDGER_PATH=/home/ubuntu/data/pm-alpha/redeem_ledger.jsonl
+Environment=PM_SHADOW_CLIP_USD=10
+Environment=PM_SHADOW_CLIP_FRAC=0.01
+Environment=PM_SHADOW_MAX_ORDER_NOTIONAL_USD=12
+Environment=PM_SHADOW_MAX_MARKET_NOTIONAL_USD=24
 Environment=PM_SHADOW_LIVE_KILL_SWITCH_PATH=/home/ubuntu/fade.kill
+Environment=RUST_LOG=info
 # Give a just-(re)started engine time to create its new JSONL before the
 # tailer picks the latest file in the directory.
 ExecStartPre=/bin/sleep 5

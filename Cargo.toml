@@ -9,7 +9,6 @@ members = [
     "crates/pm-risk",
     "crates/pm-engine",
     "crates/pm-app",
-    "crates/pm-copytrade",
     "crates/pm-shadow",
 ]
 

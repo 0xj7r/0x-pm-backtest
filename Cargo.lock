@@ -1870,7 +1870,6 @@ dependencies = [
  "object_store",
  "parquet",
  "pm-alpha",
- "pm-copytrade",
  "pm-engine",
  "pm-model",
  "pm-risk",
@@ -1888,23 +1887,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zstd",
-]
-
-[[package]]
-name = "pm-copytrade"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "futures",
- "pm-risk",
- "pm-types",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
 ]
 
 [[package]]

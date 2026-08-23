@@ -34,7 +34,7 @@ export PM_TELONEX_REGION=us-east-1
 # Discover markets for a day from S3/availability API.
 ./target/release/pm-app discover-day --date 2026-05-12 --out /tmp/markets.jsonl
 
-# Run walk-forward. exo_fade is the only strategy currently wired up.
+# Run walk-forward (exo_fade here; mayjune_fade and noop also accepted).
 ./target/release/pm-app walk-forward \
     --markets /tmp/markets.jsonl \
     --strategies exo_fade \

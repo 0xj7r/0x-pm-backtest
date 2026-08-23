@@ -17,3 +17,4 @@ __pycache__/
 *.pyc
 *.trades.jsonl
 shadow_tail_state.json
+logs/

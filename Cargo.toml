@@ -20,23 +20,6 @@ license = "Proprietary"
 publish = false
 
 [workspace.dependencies]
-# Nautilus (pinned; bump in lockstep)
-nautilus-core        = { version = "0.57", default-features = false }
-nautilus-common      = { version = "0.57", default-features = false }
-nautilus-model       = { version = "0.57", default-features = false }
-nautilus-data        = { version = "0.57", default-features = false }
-nautilus-execution   = { version = "0.57", default-features = false }
-nautilus-trading     = { version = "0.57", default-features = false }
-nautilus-backtest    = { version = "0.57", default-features = false }
-nautilus-live        = { version = "0.57", default-features = false }
-nautilus-portfolio   = { version = "0.57", default-features = false }
-nautilus-risk        = { version = "0.57", default-features = false }
-nautilus-persistence = { version = "0.57", default-features = false }
-nautilus-polymarket  = { version = "0.57", default-features = false }
-nautilus-indicators  = { version = "0.57", default-features = false }
-nautilus-analysis    = { version = "0.57", default-features = false }
-nautilus-system      = { version = "0.57", default-features = false }
-
 # Arrow-rs + parquet (async S3-streaming reader)
 arrow         = { version = "58", default-features = false }
 parquet       = { version = "58", default-features = false, features = ["arrow", "async", "object_store", "snap", "lz4", "zstd", "brotli"] }

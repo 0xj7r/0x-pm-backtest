@@ -9,9 +9,6 @@ publish = false
 [dependencies]
 pm-types       = { workspace = true }
 
-nautilus-core   = { workspace = true }
-nautilus-model  = { workspace = true }
-
 arrow          = { workspace = true }
 parquet        = { workspace = true }
 object_store   = { workspace = true }

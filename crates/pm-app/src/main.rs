@@ -14,8 +14,7 @@ use pm_strategy::{
 };
 use pm_telonex_loader::{
     Channel, TelonexStore, TelonexStoreConfig, load_binance_agg_trades_async,
-    load_book_snapshot_async, load_pm_trades_async, polymarket_instrument_id, resolve_binance_day,
-    resolve_pm_trades_day, to_quote_tick,
+    load_book_snapshot_async, load_pm_trades_async, resolve_binance_day, resolve_pm_trades_day,
 };
 use pm_types::{MarketId, SpotHistory, TradeHistory};
 use std::fs::File;
@@ -575,27 +574,6 @@ enum Cmd {
         #[arg(long, default_value = "1")]
         decision_log_every_n: usize,
         /// Read data from a local cache mirror instead of S3.
-        #[arg(long)]
-        local_cache_dir: Option<PathBuf>,
-    },
-    /// Stream the tape from S3 and emit Nautilus QuoteTicks (validates that
-    /// nautilus-model types are usable downstream).
-    QuotesS3 {
-        #[arg(long, default_value = "polymarket")]
-        exchange: String,
-        #[arg(long, default_value = "book_snapshot_25")]
-        channel: String,
-        #[arg(long)]
-        date: String,
-        #[arg(long)]
-        asset_id: String,
-        #[arg(long)]
-        slug: String,
-        #[arg(long, default_value = "1")]
-        market_id: u32,
-        #[arg(long, default_value = "5")]
-        head: usize,
-        /// Read from a local cache mirror instead of S3.
         #[arg(long)]
         local_cache_dir: Option<PathBuf>,
     },
@@ -1755,31 +1733,6 @@ async fn main() -> Result<()> {
                 equity_curve,
                 decision_log,
                 decision_log_every_n,
-                local_cache_dir,
-            )
-            .await
-        }
-        Cmd::QuotesS3 {
-            exchange,
-            channel,
-            date,
-            asset_id,
-            slug,
-            market_id,
-            head,
-            local_cache_dir,
-        } => {
-            let channel: Channel = channel
-                .parse()
-                .map_err(|e: String| anyhow!("bad --channel: {e}"))?;
-            quotes_s3(
-                exchange,
-                channel,
-                date,
-                asset_id,
-                slug,
-                MarketId(market_id),
-                head,
                 local_cache_dir,
             )
             .await
@@ -3695,12 +3648,6 @@ async fn run_market_backtest(
     Ok(())
 }
 
-/// Build a Nautilus-conformant symbol from a Polymarket slug. The dotted
-/// venue suffix is added inside `polymarket_instrument_id`.
-fn slug_to_nautilus_symbol(slug: &str) -> String {
-    slug.to_uppercase()
-}
-
 async fn load_spot_history(store: &TelonexStore, symbol: &str, date: &str) -> Result<SpotHistory> {
     let load_started = Instant::now();
     let path = resolve_binance_day(store, "agg_trades", symbol, date).await?;
@@ -3713,57 +3660,6 @@ async fn load_spot_history(store: &TelonexStore, symbol: &str, date: &str) -> Re
         "spot history loaded"
     );
     Ok(SpotHistory::new(ticks))
-}
-
-async fn quotes_s3(
-    exchange: String,
-    channel: Channel,
-    date: String,
-    asset_id: String,
-    slug: String,
-    market_id: MarketId,
-    head: usize,
-    local_cache_dir: Option<PathBuf>,
-) -> Result<()> {
-    let (_store, events, stats) = fetch_tape(
-        &exchange,
-        channel,
-        &date,
-        &asset_id,
-        market_id,
-        local_cache_dir.as_ref(),
-    )
-    .await?;
-    let symbol = slug_to_nautilus_symbol(&slug);
-    let iid = polymarket_instrument_id(&symbol);
-
-    println!("== nautilus QuoteTick conversion ==");
-    println!("symbol        : {symbol}");
-    println!("instrument_id : {iid}");
-    println!("rows_emitted  : {}", stats.rows_emitted);
-
-    let convert_start = Instant::now();
-    let mut converted = 0usize;
-    println!("\nfirst {head} QuoteTicks:");
-    for (idx, e) in events.iter().enumerate() {
-        let q = to_quote_tick(e, iid);
-        converted += 1;
-        if idx < head {
-            let dt = DateTime::<Utc>::from_timestamp_nanos(u64::from(q.ts_event) as i64);
-            println!(
-                "  {} bid={}x{} ask={}x{}",
-                dt.format("%H:%M:%S%.3f"),
-                q.bid_price,
-                q.bid_size,
-                q.ask_price,
-                q.ask_size
-            );
-        }
-    }
-    let convert_ms = convert_start.elapsed().as_millis() as u64;
-    println!("converted     : {converted} QuoteTicks in {convert_ms}ms");
-
-    Ok(())
 }
 
 async fn prep_cache_cmd(

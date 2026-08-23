@@ -82,3 +82,27 @@ than a scoped experiment.
 for the subset of trades where both-sides-hold actually occurs, quantifying how often a
 re-reversal happens and whether the recovered residual exceeds the transaction/spread cost of
 exiting the losing leg early.
+
+## 5. pm-model removal deferred to Plan 2 engine extraction
+
+Task 11 of the phase-1 reset re-traced `pm_model` usage after legacy strategy removal (Task 10)
+expecting most consumers to be gone. They are not: `run_backtest` in `crates/pm-app/src/runner.rs`
+unconditionally constructs a `pm_model::ModelState`, evaluates it every event via
+`evaluate_detailed_with_market_context`, and feeds the result into `pm_strategy::Ctx` (whose
+`model_output` / `model_attribution` fields are typed as `pm_model::ModelOutput` /
+`pm_model::ModelAttribution`). This happens regardless of which `Strategy` impl runs, so it is on
+the `pm-app walk-forward --strategies exo_fade` path, not just legacy dispatch.
+
+pm-model removal deferred to Plan 2 engine extraction; live refs:
+`crates/pm-app/src/runner.rs:24,412,730,740,780-798,819` (RunnerConfig.shared_model_state,
+canonical model eval in `run_backtest`, `side_edge_vs_mid`),
+`crates/pm-app/src/walkforward.rs:13` (imports feeding `run_one_strategy`),
+`crates/pm-app/src/main.rs:2719` (`RunnerConfig.model_market_context`, `run` subcommand),
+`crates/pm-strategy/src/lib.rs:14,63,67,132` (`Ctx.model_output`/`model_attribution`,
+`Strategy::on_event_scored` return type), plus the crate deps in `Cargo.toml`,
+`crates/pm-app/Cargo.toml`, and `crates/pm-strategy/Cargo.toml`.
+
+**What would answer it:** Plan 2's engine extraction needs to decide whether the canonical model
+evaluation stays a mandatory part of the runner loop or becomes optional/pluggable. Until that
+decision is made, `pm-model` cannot be deleted without changing runner behavior on the exo_fade
+path, which is out of scope for phase-1 cleanup.

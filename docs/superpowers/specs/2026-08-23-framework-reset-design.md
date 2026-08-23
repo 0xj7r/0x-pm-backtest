@@ -136,6 +136,21 @@ rule, the evidence, and where the enforcement lives.
    price basis; the loader refuses mixed-basis configurations
    (binance_proxy is canonical; official strikes are resolution-verification
    only).
+9. **TWAP-era settlement modeling** (added 2026-08-23 after the platform
+   research; see docs/research/strategy-refresh-2026-08.md). Polymarket
+   5m/15m/4h crypto markets resolve on a Chainlink TWAP since 2026-08-07
+   (5m window 30s from Aug 7, 60s from Aug 14; 15m/4h 60s; hourly still
+   Binance candles). The engine models settlement per market era: snapshot
+   before 2026-08-07, then the correct TWAP window by date. Backtest results
+   never pool across settlement eras without per-era breakdown in the
+   scorecard. The fill model's venue taker delay is era-aware too (500ms to
+   2026-02, none to Jun 5, 250ms to 2026-08-17, 50ms after).
+10. **TWAP-aware belief primitive.** pm-alpha gains a bridge-adjusted digital
+   alongside the classic one: P(TWAP_w >= K) with effective variance over
+   (T - t - w) + w/3 while outside the averaging window, and, inside the
+   final window, the observed locked partial average combined with remaining
+   vol. Strategies choose the primitive matching the market's settlement era;
+   the scorecard flags a mismatch.
 
 ## 5. Cloud runtime
 

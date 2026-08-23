@@ -26,7 +26,6 @@ mod alpha;
 mod discovery;
 mod perp;
 use pm_shadow as shadow;
-mod engine_driver;
 mod prep_cache;
 mod result_summary;
 mod runner;
@@ -694,60 +693,6 @@ enum Cmd {
         max_concurrent: usize,
         #[arg(long, default_value_t = true)]
         skip_existing: bool,
-    },
-    /// Run the standalone pm-engine BTC-5m backtest (faithful both-book fill
-    /// model). `walk-forward` remains the default path; run both to measure the
-    /// both-book P&L delta. Discovers YES+NO leg pairs from the local book cache.
-    EngineBacktest {
-        #[arg(long)]
-        local_cache_dir: PathBuf,
-        #[arg(long)]
-        start_date: String,
-        #[arg(long)]
-        end_date: String,
-        #[arg(long, default_value = "btc-updown-5m")]
-        slug_prefix: String,
-        #[arg(long, default_value = "BTCUSDT")]
-        spot_symbol: String,
-        #[arg(long, default_value = "data/snap062901.json")]
-        meta_calibrator_snapshot_in: PathBuf,
-        #[arg(long, default_value_t = 1000.0)]
-        starting_cash: f64,
-        #[arg(long, default_value_t = 30.0)]
-        max_clip_usdc: f64,
-        #[arg(long, default_value_t = 500)]
-        taker_latency_ms: u64,
-        #[arg(long, default_value_t = 0.0)]
-        taker_fee_bps: f64,
-        #[arg(long, default_value_t = 0.0)]
-        maker_rebate_bps: f64,
-        /// Book-event thinning in ms (champion ran 1000). 0 = keep every event.
-        #[arg(long, default_value_t = 1000)]
-        replay_sample_ms: i64,
-        /// Cap on markets (for small fixed slices). Omit to use all discovered.
-        #[arg(long)]
-        max_markets: Option<usize>,
-        /// Strategy to run: bonereaper_v2 (legacy taker) or convex (directional convex-book).
-        #[arg(long, default_value = "convex")]
-        strategy: String,
-        /// Convex: minimum model edge over entry price to gate a favourite load.
-        #[arg(long, default_value_t = 0.03)]
-        signal_min_edge: f32,
-        /// Convex: minimum model confidence to gate a favourite load.
-        #[arg(long, default_value_t = 0.68)]
-        signal_min_confidence: f32,
-        /// Convex: maximum model risk to gate a favourite load.
-        #[arg(long, default_value_t = 0.72)]
-        signal_max_risk: f32,
-        /// Convex: seconds into the market window before favourite loads begin.
-        #[arg(long, default_value_t = 180.0)]
-        favourite_start_secs: f32,
-        /// Convex: favourite loads stop when secs_to_close drops below this floor (0 = disabled).
-        #[arg(long, default_value_t = 0.0)]
-        favourite_stop_secs_before_close: f32,
-        /// Convex: tail target as fraction of favourite shares (1.0 = share-balanced).
-        #[arg(long, default_value_t = 1.0)]
-        tail_balance_frac: f64,
     },
     /// Run a walk-forward backtest over many markets.
     WalkForward {
@@ -1924,75 +1869,6 @@ async fn main() -> Result<()> {
                 skip_existing,
             )
             .await
-        }
-        Cmd::EngineBacktest {
-            local_cache_dir,
-            start_date,
-            end_date,
-            slug_prefix,
-            spot_symbol,
-            meta_calibrator_snapshot_in,
-            starting_cash,
-            max_clip_usdc,
-            taker_latency_ms,
-            taker_fee_bps,
-            maker_rebate_bps,
-            replay_sample_ms,
-            max_markets,
-            strategy,
-            signal_min_edge,
-            signal_min_confidence,
-            signal_max_risk,
-            favourite_start_secs,
-            favourite_stop_secs_before_close,
-            tail_balance_frac,
-        } => {
-            let strategy_kind = match strategy.as_str() {
-                "bonereaper_v2" | "br2" => engine_driver::StrategyKind::BonereaperV2,
-                "convex" => engine_driver::StrategyKind::Convex,
-                other => anyhow::bail!("unknown --strategy {other} (use bonereaper_v2|convex)"),
-            };
-            let report = engine_driver::run_engine_backtest(engine_driver::EngineBacktestCfg {
-                cache_dir: local_cache_dir,
-                start_date,
-                end_date,
-                slug_prefix,
-                spot_symbol,
-                snapshot_path: meta_calibrator_snapshot_in,
-                starting_cash,
-                max_clip_usdc,
-                taker_latency_ms,
-                taker_fee_bps,
-                maker_rebate_bps,
-                replay_sample_ms,
-                max_markets,
-                strategy: strategy_kind,
-                signal_min_edge,
-                signal_min_confidence,
-                signal_max_risk,
-                favourite_start_secs,
-                favourite_stop_secs_before_close,
-                tail_balance_frac,
-            })
-            .await?;
-            let pnl = report.final_equity_usd - report.starting_cash_usd;
-            let pct = if report.starting_cash_usd != 0.0 {
-                (report.final_equity_usd / report.starting_cash_usd - 1.0) * 100.0
-            } else {
-                0.0
-            };
-            println!(
-                "engine backtest: markets_total={} markets_traded={} orders={} fills={} \
-                 start_cash=${:.2} final_equity=${:.2} pnl=${:.2} ({pct:+.2}%)",
-                report.markets_total,
-                report.markets_traded,
-                report.orders_submitted,
-                report.fills,
-                report.starting_cash_usd,
-                report.final_equity_usd,
-                pnl,
-            );
-            Ok(())
         }
         Cmd::WalkForward {
             markets,

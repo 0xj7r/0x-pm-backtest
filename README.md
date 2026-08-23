@@ -18,7 +18,7 @@ crates/
 ├── pm-alpha/             # belief (BSM digital), vol, fee curve, ExoState features, equivalence machinery
 ├── pm-strategy/          # Strategy trait + exo_fade (Plan 2 extraction reference) + NoopStrategy
 ├── pm-shadow/            # live-twin log-only engine (JSONL stream, executor tail seam)
-└── pm-app/               # CLI: discover-day | walk-forward | shadow | paper | live
+└── pm-app/               # CLI: shadow | alpha | walk-forward | discover-day | prep-cache | backtest-s3 | paper | live | ...
 ```
 
 ## Quickstart
@@ -43,10 +43,10 @@ export PM_TELONEX_REGION=us-east-1
     --out-markets /tmp/wf.jsonl --out-summary /tmp/wf-summary.json
 ```
 
-`--strategies` accepts `exo_fade` or `noop`; there is nothing else to pick.
-`--profile` is still accepted for backward compatibility but applies nothing
-and warns; profile-driven strategy overrides were removed with the legacy
-strategies.
+`--strategies` accepts `exo_fade`, `mayjune_fade`, or `noop`; there is nothing
+else to pick. `--profile` is still accepted for backward compatibility but
+applies nothing and warns; profile-driven strategy overrides were removed
+with the legacy strategies.
 
 ## State
 

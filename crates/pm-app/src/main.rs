@@ -40,7 +40,7 @@ use walkforward::{
 #[command(
     name = "pm-app",
     version,
-    about = "Polymarket backtest engine (Nautilus pure Rust)"
+    about = "Polymarket backtest engine (pure Rust)"
 )]
 struct Cli {
     #[command(subcommand)]

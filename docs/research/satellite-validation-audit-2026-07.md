@@ -42,10 +42,10 @@ confirm cycle at 250ms before any capital.
 
 ## 1. BR2 `late_favourite` lane (bonereaper_v2 engine)
 
-**Claims audited.** `docs/active_btc5m_experiments.md`: selected 1K profile
+**Claims audited.** `docs/archive/2026-06/active_btc5m_experiments.md`: selected 1K profile
 `+$8,990.21` (+899%) over 23,705 markets Feb 27 to May 20, with
 `br2_late_favourite_load +$4,726.87` attribution.
-`docs/handoff/2026-06-19-regime-gates-high-variance-research.md` §6 markets BR2
+`docs/archive/2026-06/handoff/2026-06-19-regime-gates-high-variance-research.md` §6 markets BR2
 `late_favourite` as the primary directional satellite.
 
 **Evidence type.** AWS portfolio grid, own fill model (`lat500ms` labels, engine
@@ -82,7 +82,7 @@ sealed July slice: `pm-app walk-forward --strategies bonereaper_v2 --portfolio-m
 bar: VERIFY NET > 0, daily Sharpe > 1, worst day > -$50 at $1K, and last-30d-style
 decay check (final-third NET > 0.5x first-third NET/day).
 
-## 2. BR2 cluster router (`docs/global_regime_classifier_router.md`)
+## 2. BR2 cluster router (`docs/archive/2026-06/global_regime_classifier_router.md`)
 
 **Claims audited.** "Cluster router test PnL +$3,138.08 vs BR2-only +$2,294.25";
 "best adaptive policy +$5,671.72, max DD 13.55%"; BR2 per-cluster table
@@ -133,7 +133,7 @@ latency). Selected and evaluated on the same 6 days.
 
 **Outcome.** OOS Jun 20-30 the gates blocked 99% of entries (10 entries in 10 days)
 while the ungated stream was green every day (`docs/PROD.md` §2 history; retraction
-banners on the handoff and on `docs/directional_satellite_candidates.md`). Removed
+banners on the handoff and on `docs/archive/2026-06/directional_satellite_candidates.md`). Removed
 from prod 2026-07-01. June backfill (`docs/archive/2026-07/june-2026-backfill-results.md`) confirms
 the ungated frozen config made +$17,689 fee-net over the same month.
 
@@ -142,7 +142,7 @@ the ungated frozen config made +$17,689 fee-net over the same month.
 must show all-window harness evidence plus a paper soak before prod (PROD.md
 governance now requires exactly this).
 
-## 4. Directional satellite candidates (`docs/directional_satellite_candidates.md`)
+## 4. Directional satellite candidates (`docs/archive/2026-06/directional_satellite_candidates.md`)
 
 **Claims audited.** Four candidate designs (flow-following, basis+OI momentum,
 multi-horizon alignment continuation, reversal-pressure late/tail hybrid), pitched as
@@ -272,7 +272,7 @@ breakeven study on ETH-4h tapes (F11 methodology), then if positive a TUNE scree
 `--fee-curve-rate 0.07 --latency-ms 250`. Pass bar: realized win rate of <= 0.05
 entries exceeds priced rate + fees with t > 2, plus capacity accounting.
 
-## 8. Late-favourite expiry lane (Class B, `docs/late-favourite-lane.md`)
+## 8. Late-favourite expiry lane (Class B, `docs/archive/2026-06/late-favourite-lane.md`)
 
 **Claims audited.** Lane cells C / E090 "advance-worthy on margin (+1.2 to +1.6pp,
 9-10/12 green days)"; 07 doc Class B "VERIFY result +$392 NET, 93.0% hit"; ledger
@@ -403,7 +403,7 @@ with t > 2.
 
 ## Cross-cutting contradictions found
 
-1. **VERIFY-window contamination in the lane doc.** `docs/late-favourite-lane.md`
+1. **VERIFY-window contamination in the lane doc.** `docs/archive/2026-06/late-favourite-lane.md`
    calls May 7-18 "tune window ONLY" while `00-protocol.md`/`07` designate those
    dates as VERIFY. The lane (and the whole F9/F10 series) spent the fade's
    confirmation window on selection. Not fatal for the fade (different strategy) but

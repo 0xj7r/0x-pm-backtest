@@ -22,8 +22,10 @@ MarketData → FeatureState → AlphaModel → StrategyDecision → RiskEngine �
 ## Strategy
 
 A **Strategy** implements `pm_strategy::Strategy::on_event` and composes the layers
-above. Configuration is a serde struct (`*Config`) loaded from TOML profiles.
-Decision logic that must match live is pure functions in `pm-alpha::decide` (SSOT).
+above. Configuration is a serde struct (`*Config`) of compiled defaults plus CLI
+flags; the legacy `--profile` flag is still accepted but applies nothing (warns)
+since the TOML-profile system was removed. Decision logic that must match live is
+pure functions in `pm-alpha::decide` (SSOT).
 
 ## Active strategies
 

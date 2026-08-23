@@ -6,14 +6,8 @@
 
 #![forbid(unsafe_code)]
 
-pub mod back_to_explore;
-pub mod bonereaper_v2;
 pub mod exo_fade;
-pub mod paired_mm;
 pub mod regime;
-pub mod signals;
-#[path = "archive/spot_momentum.rs"]
-pub mod spot_momentum;
 #[path = "archive/trivial.rs"]
 pub mod trivial;
 
@@ -142,8 +136,5 @@ pub trait Strategy {
     fn on_market_resolved(&mut self, _market_mid: f32, _resolved_yes: bool) {}
 }
 
-pub use back_to_explore::{BackToExploreConfig, BackToExploreTaker};
 pub use exo_fade::{ExoFadeConfig, ExoFadeGateStats, ExoFadeStrategy};
-pub use bonereaper_v2::{BonereaperV2, BonereaperV2Config};
-pub use paired_mm::{PairedMmDense, PairedMmDenseConfig};
 pub use trivial::NoopStrategy;

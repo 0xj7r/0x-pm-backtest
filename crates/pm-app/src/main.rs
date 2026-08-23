@@ -8,10 +8,7 @@ use clap::{Parser, Subcommand};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use pm_model::MetaTrainingConfig;
 use pm_risk::PortfolioLimits;
-use pm_strategy::{
-    BonereaperV2, PairedMmDense,
-    bonereaper_v2::BonereaperV2Config, paired_mm::PairedMmDenseConfig,
-};
+use pm_strategy::NoopStrategy;
 use pm_telonex_loader::{
     Channel, TelonexStore, TelonexStoreConfig, load_binance_agg_trades_async,
     load_book_snapshot_async, load_pm_trades_async, resolve_binance_day, resolve_pm_trades_day,
@@ -35,8 +32,8 @@ use runner::{RunnerConfig, pretty_print, run_backtest};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use walkforward::{
-    StratId, StrategyProfileFile, WalkForwardConfig, print_summary, run_walkforward,
-    write_market_results_jsonl_atomic, write_summary_json_atomic,
+    StratId, WalkForwardConfig, print_summary, run_walkforward, write_market_results_jsonl_atomic,
+    write_summary_json_atomic,
 };
 
 #[derive(Parser, Debug)]
@@ -52,8 +49,7 @@ struct Cli {
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 enum StrategyKind {
-    PairedMm,
-    BonereaperV2,
+    Noop,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -547,7 +543,7 @@ enum Cmd {
         resolved_yes: Option<bool>,
         #[arg(long, default_value = "1")]
         market_id: u32,
-        #[arg(long, value_enum, default_value = "bonereaper-v2")]
+        #[arg(long, value_enum, default_value = "noop")]
         strategy: StrategyKind,
         #[arg(long, default_value = "100.0")]
         starting_cash: f64,
@@ -681,10 +677,6 @@ enum Cmd {
         /// values for the fields present in the profile.
         #[arg(long)]
         profile: Option<PathBuf>,
-        /// Optional per-market BTE risk scale JSONL exported by
-        /// scripts/bte_cluster_policy_search.py --out-scale-jsonl.
-        #[arg(long)]
-        back_to_explore_policy_scales_jsonl: Option<PathBuf>,
         /// Chronological offset for smoke/diagnostic slices.
         #[arg(long, default_value_t = 0)]
         skip_markets: usize,
@@ -723,13 +715,9 @@ enum Cmd {
         /// Comma-separated active strategy IDs.
         ///
         /// Active set by default: `exo_fade` (canonical quant implementation).
-        /// Also available: `back_to_explore,paired_mm,bonereaper_v2`.
-        /// Use `--allow-legacy-strategies` to enable legacy names.
+        /// Also available: `noop` (baseline, emits no orders).
         #[arg(long, default_value = "exo_fade")]
         strategies: String,
-        /// Allow previously archived strategy identifiers (for historical experiments).
-        #[arg(long, default_value_t = false)]
-        allow_legacy_strategies: bool,
         #[arg(long, default_value = "64")]
         max_concurrent_fetches: usize,
         /// Research-speed replay thinning in milliseconds. 0 keeps every raw event.
@@ -791,338 +779,6 @@ enum Cmd {
         /// 1.0 or higher disables. Simple hard daily loss limit on top of drawdown scaling.
         #[arg(long, default_value = "1.0")]
         daily_loss_cap_pct: f64,
-        /// Disable Bonereaper v2's internal model gates for pure heuristic strategy tests.
-        #[arg(long, default_value_t = false)]
-        br2_disable_internal_model_gates: bool,
-        /// Bonereaper v2 market-neutral maker participation clip multiplier.
-        #[arg(long, default_value = "0.0")]
-        br2_participation_clip_frac: f32,
-        /// Bonereaper v2 maximum paired maker entry cost.
-        #[arg(long, default_value = "0.99")]
-        br2_participation_max_pair_cost: f32,
-        /// Bonereaper v2 maximum participation quote count per leg.
-        #[arg(long, default_value = "500")]
-        br2_participation_max_orders_per_leg: usize,
-        /// Bonereaper v2 participation inventory hard cap in shares.
-        #[arg(long, default_value = "25.0")]
-        br2_participation_max_inventory_delta_shares: f64,
-        /// Bonereaper v2 participation inventory repair threshold in shares.
-        #[arg(long, default_value = "5.0")]
-        br2_participation_repair_inventory_delta_shares: f64,
-        /// Bonereaper v2 participation same-leg quote refresh seconds.
-        #[arg(long, default_value = "0.50")]
-        br2_participation_refresh_secs: f32,
-        /// Bonereaper v2 seconds before close where participation maker quotes stop.
-        #[arg(long, default_value = "20.0")]
-        br2_participation_stop_secs_before_close: f32,
-        /// Bonereaper v2 hedge-first arb-anchored base lane toggle.
-        #[arg(long, default_value_t = false)]
-        br2_hedged_base_enabled: bool,
-        /// Bonereaper v2 hedge-first base only fires within this many seconds of window open.
-        #[arg(long, default_value = "240.0")]
-        br2_hedged_base_max_secs_in: f32,
-        /// Bonereaper v2 hedge-first base max combined taker pair cost to lock arb.
-        #[arg(long, default_value = "0.98")]
-        br2_hedged_base_max_pair_cost: f32,
-        /// Bonereaper v2 hedge-first base minimum minority-leg fraction of base book.
-        #[arg(long, default_value = "0.20")]
-        br2_hedged_base_min_minority_leg_frac: f32,
-        /// Bonereaper v2 hedge-first base per-add clip in USDC.
-        #[arg(long, default_value = "5.0")]
-        br2_hedged_base_clip_usdc: f32,
-        /// Bonereaper v2 hedge-first base total budget per market in USDC (0 disables).
-        #[arg(long, default_value = "0.0")]
-        br2_hedged_base_max_notional_usdc: f32,
-        /// Bonereaper v2 cap on directional notional as a fraction of hedged base notional.
-        #[arg(long, default_value = "1000000000.0")]
-        br2_late_directional_overlay_frac: f32,
-        /// Bonereaper v2 minimum composite direction for early/mid/late lanes.
-        #[arg(long, default_value = "0.10")]
-        br2_min_composite_direction: f32,
-        /// Bonereaper v2 early directional clip multiplier.
-        #[arg(long, default_value = "0.00")]
-        br2_early_clip_frac: f32,
-        /// Bonereaper v2 mid-ladder clip multiplier.
-        #[arg(long, default_value = "0.00")]
-        br2_mid_clip_frac: f32,
-        /// Bonereaper v2 late confirmation clip multiplier.
-        #[arg(long, default_value = "1.0")]
-        br2_late_clip_frac: f32,
-        /// Bonereaper v2 maximum late confirmation fires.
-        #[arg(long, default_value = "3")]
-        br2_late_max_fires: usize,
-        /// Bonereaper v2 minimum ML confidence for late confirmation entries.
-        #[arg(long, default_value = "0.58")]
-        br2_late_confirm_min_model_confidence: f32,
-        /// Bonereaper v2 maximum ML risk for late confirmation entries.
-        #[arg(long, default_value = "0.80")]
-        br2_late_confirm_max_model_risk: f32,
-        /// Bonereaper v2 minimum ML predicted-side probability for late confirmation entries.
-        #[arg(long, default_value = "0.58")]
-        br2_late_confirm_min_model_side_p: f32,
-        /// Bonereaper v2 minimum ML probability edge over entry price for late confirmation entries.
-        #[arg(long, default_value = "0.02")]
-        br2_late_confirm_min_model_edge: f32,
-        /// Bonereaper v2 minimum absolute book skew from 0.5 for late confirmation entries.
-        #[arg(long, default_value = "0.06")]
-        br2_late_confirm_min_book_skew: f32,
-        /// Bonereaper v2 maximum continuous whipsaw score for late confirmation entries.
-        #[arg(long, default_value = "0.85")]
-        br2_late_confirm_max_whipsaw_score: f32,
-        /// Bonereaper v2 minimum BTC 180s realized volatility for late confirmation entries.
-        #[arg(long, default_value = "0.0")]
-        br2_late_confirm_min_realized_vol_180s_bps: f32,
-        /// Bonereaper v2 maximum observed market range for late confirmation entries.
-        #[arg(long, default_value = "1.0")]
-        br2_late_confirm_max_observed_range: f32,
-        /// Enable Bonereaper v2 replay-safe recent-regime logistic gate.
-        #[arg(long, default_value_t = false)]
-        br2_recent_regime_gate_enabled: bool,
-        /// Minimum logistic win-probability edge over entry price for recent-regime gate.
-        #[arg(long, default_value = "0.08")]
-        br2_recent_regime_gate_min_edge: f32,
-        /// Apply recent-regime gate to late confirmation entries.
-        #[arg(long, default_value_t = true)]
-        br2_recent_regime_gate_late_confirm: bool,
-        /// Apply recent-regime gate to high-skew entries.
-        #[arg(long, default_value_t = true)]
-        br2_recent_regime_gate_high_skew: bool,
-        /// Apply recent-regime gate to late-favourite entries.
-        #[arg(long, default_value_t = true)]
-        br2_recent_regime_gate_late_favourite: bool,
-        /// Bonereaper v2 high-skew clip multiplier.
-        #[arg(long, default_value = "0.60")]
-        br2_high_skew_clip_frac: f32,
-        /// Bonereaper v2 per-lane directional size multiplier (late favourite). 1.0 = no change.
-        #[arg(long, default_value = "1.0")]
-        br2_lane_size_late_favourite: f32,
-        /// Bonereaper v2 per-lane directional size multiplier (late confirm). 1.0 = no change.
-        #[arg(long, default_value = "1.0")]
-        br2_lane_size_late_confirm: f32,
-        /// Bonereaper v2 per-lane directional size multiplier (high skew). 1.0 = no change.
-        #[arg(long, default_value = "1.0")]
-        br2_lane_size_high_skew: f32,
-        /// Bonereaper v2 regime-conditional lane gate. Ex-ante and inert by
-        /// default. When set, amputates the directional lanes (late favourite +
-        /// late confirm) toward the floor in whippy regimes; high skew untouched.
-        #[arg(long, default_value = "false")]
-        br2_regime_gate_enabled: bool,
-        /// Trailing window for the regime score: 1, 3 or 7 (days of prior markets).
-        #[arg(long, default_value = "3")]
-        br2_regime_gate_window: u8,
-        /// Trailing-range threshold above which the directional lanes are amputated.
-        #[arg(long, default_value = "0.50")]
-        br2_regime_gate_threshold: f32,
-        /// Soft ramp width below the threshold. 0 = hard step.
-        #[arg(long, default_value = "0.0")]
-        br2_regime_gate_soft_band: f32,
-        /// Directional lane multiplier when fully whippy. 0 = full amputation.
-        #[arg(long, default_value = "0.0")]
-        br2_regime_gate_lane_floor: f32,
-        /// Blend weight in [0,1] for the live ex-ante whipsaw score. 0 = trailing-range only.
-        #[arg(long, default_value = "0.0")]
-        br2_regime_gate_whipsaw_weight: f32,
-        /// Bonereaper v2 maximum high-skew load clips.
-        #[arg(long, default_value = "5")]
-        br2_high_skew_max_clips: usize,
-        /// Bonereaper v2 maximum continuous whipsaw score for high-skew loads.
-        #[arg(long, default_value = "0.75")]
-        br2_high_skew_max_whipsaw_score: f32,
-        /// Bonereaper v2 minimum BTC 180s realized volatility for high-skew loads.
-        #[arg(long, default_value = "0.0")]
-        br2_high_skew_min_realized_vol_180s_bps: f32,
-        /// Bonereaper v2 seconds into market before late-favourite loads begin.
-        #[arg(long, default_value = "180.0")]
-        br2_late_favourite_start_secs: f32,
-        /// Bonereaper v2 late-favourite absolute skew threshold from 0.5.
-        #[arg(long, default_value = "0.22")]
-        br2_late_favourite_threshold: f32,
-        /// Bonereaper v2 minimum ask price for late-favourite loads.
-        #[arg(long, default_value = "0.70")]
-        br2_late_favourite_min_ask: f32,
-        /// Bonereaper v2 maximum ask price for late-favourite loads.
-        #[arg(long, default_value = "0.97")]
-        br2_late_favourite_max_ask: f32,
-        /// Bonereaper v2 late-favourite clip multiplier.
-        #[arg(long, default_value = "1.00")]
-        br2_late_favourite_clip_frac: f32,
-        /// Bonereaper v2 late-favourite clip multiplier once ask is >= high-cert threshold.
-        #[arg(long, default_value = "1.00")]
-        br2_late_favourite_high_cert_clip_frac: f32,
-        /// Bonereaper v2 high-cert edge where late-favourite loads reach full clip size.
-        #[arg(long, default_value = "0.04")]
-        br2_late_favourite_high_cert_full_clip_edge: f32,
-        /// Ask threshold for fragile high-cert late-favourite size taper; disabled at 1.0.
-        #[arg(long, default_value = "0.923")]
-        br2_late_favourite_fragile_high_cert_ask: f32,
-        /// Maximum model edge for fragile high-cert late-favourite size taper.
-        #[arg(long, default_value = "0.005")]
-        br2_late_favourite_fragile_high_cert_max_edge: f32,
-        /// Maximum BTC path efficiency for fragile high-cert late-favourite size taper.
-        #[arg(long, default_value = "0.50")]
-        br2_late_favourite_fragile_high_cert_max_path_efficiency: f32,
-        /// Size multiplier applied to fragile high-cert late-favourite loads.
-        #[arg(long, default_value = "0.50")]
-        br2_late_favourite_fragile_high_cert_size_frac: f32,
-        /// Bonereaper v2 maximum late-favourite load clips.
-        #[arg(long, default_value = "12")]
-        br2_late_favourite_max_clips: usize,
-        /// Bonereaper v2 minimum seconds favourite skew must persist before late-favourite loads.
-        #[arg(long, default_value = "0.0")]
-        br2_late_favourite_min_sustain_secs: f32,
-        /// Bonereaper v2 book depth to sweep for late-favourite loads.
-        #[arg(long, default_value = "7")]
-        br2_late_favourite_sweep_depth: usize,
-        /// Bonereaper v2 minimum ML confidence for late-favourite loads.
-        #[arg(long, default_value = "0.68")]
-        br2_late_favourite_min_model_confidence: f32,
-        /// Bonereaper v2 minimum absolute model direction score for late-favourite loads.
-        #[arg(long, default_value = "0.0")]
-        br2_late_favourite_min_model_direction_abs: f32,
-        /// Bonereaper v2 maximum ML risk for late-favourite loads.
-        #[arg(long, default_value = "0.72")]
-        br2_late_favourite_max_model_risk: f32,
-        /// Bonereaper v2 minimum ML predicted-side probability for late-favourite loads.
-        #[arg(long, default_value = "0.62")]
-        br2_late_favourite_min_model_side_p: f32,
-        /// Bonereaper v2 minimum ML probability edge over entry price for late-favourite loads.
-        #[arg(long, default_value = "0.03")]
-        br2_late_favourite_min_model_edge: f32,
-        /// Bonereaper v2 minimum ML edge over entry price once ask is >= high-cert threshold.
-        #[arg(long, default_value = "0.02")]
-        br2_late_favourite_high_cert_min_model_edge: f32,
-        /// Let high-cert favourite loads use par-discount logic instead of requiring calibrated_p >= entry price.
-        #[arg(long, default_value_t = false)]
-        br2_late_favourite_high_cert_bypass_model_edge: bool,
-        /// Bonereaper v2 maximum continuous whipsaw score for late-favourite loads.
-        #[arg(long, default_value = "0.75")]
-        br2_late_favourite_max_whipsaw_score: f32,
-        /// Bonereaper v2 maximum short-window reversal pressure for late-favourite loads.
-        #[arg(long, default_value = "1.0")]
-        br2_late_favourite_max_reversal_pressure: f32,
-        /// Bonereaper v2 minimum spot path efficiency for late-favourite loads.
-        #[arg(long, default_value = "0.0")]
-        br2_late_favourite_min_path_efficiency: f32,
-        /// Bonereaper v2 minimum BTC 180s realized volatility for late-favourite loads.
-        #[arg(long, default_value = "0.0")]
-        br2_late_favourite_min_realized_vol_180s_bps: f32,
-        /// Bonereaper v2 maximum live-observed YES-mid range before late-favourite loads.
-        #[arg(long, default_value = "1.0")]
-        br2_late_favourite_max_observed_range: f32,
-        /// Bonereaper v2 live-observed YES-mid range where late-favourite size starts throttling.
-        #[arg(long, default_value = "0.78")]
-        br2_late_favourite_range_soft_throttle: f32,
-        /// Bonereaper v2 live-observed YES-mid range where late-favourite size reaches zero.
-        #[arg(long, default_value = "0.98")]
-        br2_late_favourite_range_hard_throttle: f32,
-        /// Extra model edge required at the hard observed-range throttle.
-        #[arg(long, default_value = "0.03")]
-        br2_late_favourite_range_extra_edge: f32,
-        /// Extra model confidence required at the hard observed-range throttle.
-        #[arg(long, default_value = "0.08")]
-        br2_late_favourite_range_extra_confidence: f32,
-        /// Bonereaper v2 maximum fast BTC momentum allowed against the late favourite direction.
-        #[arg(long, default_value = "1.0")]
-        br2_late_favourite_max_adverse_fast_momentum: f32,
-        /// Bonereaper v2 maximum broad BTC momentum allowed against the late favourite direction.
-        #[arg(long, default_value = "1.0")]
-        br2_late_favourite_max_adverse_broad_momentum: f32,
-        /// Bonereaper v2 maximum same-side late-favourite entry pullback from best prior entry price.
-        #[arg(long, default_value = "1.0")]
-        br2_late_favourite_max_entry_pullback: f32,
-        /// Bonereaper v2 maximum same-side late-favourite drawdown from average emitted entry price.
-        #[arg(long, default_value = "1.0")]
-        br2_late_favourite_max_avg_entry_drawdown: f32,
-        /// Bonereaper v2 convex-tail clip multiplier.
-        #[arg(long, default_value = "0.10")]
-        br2_tail_clip_frac: f32,
-        /// Bonereaper v2 maximum convex-tail clips.
-        #[arg(long, default_value = "3")]
-        br2_tail_max_clips: usize,
-        /// Bonereaper v2 book depth to sweep for convex-tail entries.
-        #[arg(long, default_value = "3")]
-        br2_tail_sweep_depth: usize,
-        /// Bonereaper v2 minimum convex-tail ask price.
-        #[arg(long, default_value = "0.01")]
-        br2_tail_min_ask: f32,
-        /// Bonereaper v2 maximum convex-tail ask price.
-        #[arg(long, default_value = "0.10")]
-        br2_tail_max_ask: f32,
-        /// Bonereaper v2 minimum seconds remaining before opening a convex-tail entry.
-        #[arg(long, default_value = "10.0")]
-        br2_tail_min_seconds_to_close: f32,
-        /// Bonereaper v2 minimum favourite mark-to-market edge before buying convex-tail insurance.
-        #[arg(long, default_value = "0.0")]
-        br2_tail_min_favourite_unrealized_edge: f32,
-        /// Bonereaper v2 minimum live-observed YES-mid range before convex-tail entries.
-        #[arg(long, default_value = "0.0")]
-        br2_tail_min_observed_range: f32,
-        /// Bonereaper v2 tail target coverage of favourite loss, disabled at 0.
-        #[arg(long, default_value = "0.50")]
-        br2_tail_target_favourite_loss_coverage_frac: f32,
-        /// Bonereaper v2 higher tail coverage target for high-cert favourite reversal windows.
-        #[arg(long, default_value = "0.00")]
-        br2_tail_reversal_coverage_frac: f32,
-        /// Bonereaper v2 lower bound of seconds remaining for reversal tail boost.
-        #[arg(long, default_value = "10.0")]
-        br2_tail_reversal_min_seconds_to_close: f32,
-        /// Bonereaper v2 upper bound of seconds remaining for reversal tail boost.
-        #[arg(long, default_value = "35.0")]
-        br2_tail_reversal_max_seconds_to_close: f32,
-        /// Bonereaper v2 minimum favourite ask for reversal tail boost.
-        #[arg(long, default_value = "0.895")]
-        br2_tail_reversal_min_favourite_ask: f32,
-        /// Bonereaper v2 minimum absolute skew from 0.5 before tail laddering.
-        #[arg(long, default_value = "0.30")]
-        br2_tail_extreme_threshold: f32,
-        /// Bonereaper v2 minimum additional skew before another tail rung.
-        #[arg(long, default_value = "0.02")]
-        br2_tail_min_skew_step: f32,
-        /// Bonereaper v2 tail budget cap as fraction of favourite spend.
-        #[arg(long, default_value = "0.20")]
-        br2_tail_budget_favourite_spend_frac: f32,
-        /// Bonereaper v2 tail budget cap as fraction of favourite upside.
-        #[arg(long, default_value = "0.25")]
-        br2_tail_budget_favourite_upside_frac: f32,
-        /// Bonereaper v2 boosted tail coverage target in choppy/reversal regimes.
-        #[arg(long, default_value = "0.0")]
-        br2_tail_regime_boost_coverage_frac: f32,
-        /// Bonereaper v2 boosted tail spend cap as fraction of favourite spend.
-        #[arg(long, default_value = "0.0")]
-        br2_tail_regime_boost_budget_spend_frac: f32,
-        /// Bonereaper v2 boosted tail spend cap as fraction of favourite upside.
-        #[arg(long, default_value = "0.0")]
-        br2_tail_regime_boost_budget_upside_frac: f32,
-        /// Bonereaper v2 minimum whipsaw score for boosted tail coverage.
-        #[arg(long, default_value = "1.0")]
-        br2_tail_regime_boost_min_whipsaw_score: f32,
-        /// Bonereaper v2 minimum reversal pressure for boosted tail coverage.
-        #[arg(long, default_value = "1.0")]
-        br2_tail_regime_boost_min_reversal_pressure: f32,
-        /// Bonereaper v2 minimum 180s realized vol for boosted tail coverage.
-        #[arg(long, default_value = "1000000000.0")]
-        br2_tail_regime_boost_min_realized_vol_180s_bps: f32,
-        /// Bonereaper v2 maximum path efficiency for boosted tail coverage.
-        #[arg(long, default_value = "-1.0")]
-        br2_tail_regime_boost_max_path_efficiency: f32,
-        /// Enable the Phase-3 reversal-risk score modulators.
-        #[arg(long, default_value_t = false)]
-        br2_reversal_score_enabled: bool,
-        /// Path to the Phase-2 reversal-score logistic coefficients JSON.
-        #[arg(long)]
-        br2_reversal_score_coeffs: Option<PathBuf>,
-        /// Convex-tail coverage at reversal score 0 (NaN => use base coverage).
-        #[arg(long, default_value = "nan")]
-        br2_reversal_score_cov_min: f32,
-        /// Convex-tail coverage at reversal score 1 (NaN => use base coverage).
-        #[arg(long, default_value = "nan")]
-        br2_reversal_score_cov_max: f32,
-        /// Late-lane size multiplier at reversal score 1 (1.0 => no change).
-        #[arg(long, default_value = "1.0")]
-        br2_reversal_score_size_floor: f32,
-        /// Late-lane size multiplier at reversal score 0 (1.0 => no change).
-        #[arg(long, default_value = "1.0")]
-        br2_reversal_score_size_ceiling: f32,
         /// Enable the runner-level model gate after strategy emission.
         #[arg(long, default_value_t = true)]
         enforce_model_gate: bool,
@@ -1244,7 +900,7 @@ enum Cmd {
         #[arg(long)]
         markets: PathBuf,
         /// Strategy key inside `per_strategy`.
-        #[arg(long, default_value = "bonereaper_v2")]
+        #[arg(long, default_value = "exo_fade")]
         strategy: String,
         /// Optional JSON output path for the computed summary.
         #[arg(long)]
@@ -1273,7 +929,7 @@ enum Cmd {
         resolved_yes: Option<bool>,
         #[arg(long, default_value = "1")]
         market_id: u32,
-        #[arg(long, value_enum, default_value = "bonereaper-v2")]
+        #[arg(long, value_enum, default_value = "noop")]
         strategy: StrategyKind,
         #[arg(long, default_value = "100.0")]
         starting_cash: f64,
@@ -1326,7 +982,7 @@ enum Cmd {
         resolved_yes: Option<bool>,
         #[arg(long, default_value = "1")]
         market_id: u32,
-        #[arg(long, value_enum, default_value = "bonereaper-v2")]
+        #[arg(long, value_enum, default_value = "noop")]
         strategy: StrategyKind,
         #[arg(long, default_value = "100.0")]
         starting_cash: f64,
@@ -1826,7 +1482,6 @@ async fn main() -> Result<()> {
         Cmd::WalkForward {
             markets,
             profile,
-            back_to_explore_policy_scales_jsonl,
             skip_markets,
             max_markets,
             starting_cash,
@@ -1840,7 +1495,6 @@ async fn main() -> Result<()> {
             perp_cache_dir,
             directional_tilt_strength,
             strategies,
-            allow_legacy_strategies,
             max_concurrent_fetches,
             replay_sample_ms,
             taker_latency_ms,
@@ -1857,116 +1511,6 @@ async fn main() -> Result<()> {
             clip_session_drawdown_hard_pct,
             clip_session_drawdown_min_multiplier,
             daily_loss_cap_pct,
-            br2_disable_internal_model_gates,
-            br2_participation_clip_frac,
-            br2_participation_max_pair_cost,
-            br2_participation_max_orders_per_leg,
-            br2_participation_max_inventory_delta_shares,
-            br2_participation_repair_inventory_delta_shares,
-            br2_participation_refresh_secs,
-            br2_participation_stop_secs_before_close,
-            br2_hedged_base_enabled,
-            br2_hedged_base_max_secs_in,
-            br2_hedged_base_max_pair_cost,
-            br2_hedged_base_min_minority_leg_frac,
-            br2_hedged_base_clip_usdc,
-            br2_hedged_base_max_notional_usdc,
-            br2_late_directional_overlay_frac,
-            br2_min_composite_direction,
-            br2_early_clip_frac,
-            br2_mid_clip_frac,
-            br2_late_clip_frac,
-            br2_late_max_fires,
-            br2_late_confirm_min_model_confidence,
-            br2_late_confirm_max_model_risk,
-            br2_late_confirm_min_model_side_p,
-            br2_late_confirm_min_model_edge,
-            br2_late_confirm_min_book_skew,
-            br2_late_confirm_max_whipsaw_score,
-            br2_late_confirm_min_realized_vol_180s_bps,
-            br2_late_confirm_max_observed_range,
-            br2_recent_regime_gate_enabled,
-            br2_recent_regime_gate_min_edge,
-            br2_recent_regime_gate_late_confirm,
-            br2_recent_regime_gate_high_skew,
-            br2_recent_regime_gate_late_favourite,
-            br2_high_skew_clip_frac,
-            br2_lane_size_late_favourite,
-            br2_lane_size_late_confirm,
-            br2_lane_size_high_skew,
-            br2_regime_gate_enabled,
-            br2_regime_gate_window,
-            br2_regime_gate_threshold,
-            br2_regime_gate_soft_band,
-            br2_regime_gate_lane_floor,
-            br2_regime_gate_whipsaw_weight,
-            br2_high_skew_max_clips,
-            br2_high_skew_max_whipsaw_score,
-            br2_high_skew_min_realized_vol_180s_bps,
-            br2_late_favourite_start_secs,
-            br2_late_favourite_threshold,
-            br2_late_favourite_min_ask,
-            br2_late_favourite_max_ask,
-            br2_late_favourite_clip_frac,
-            br2_late_favourite_high_cert_clip_frac,
-            br2_late_favourite_high_cert_full_clip_edge,
-            br2_late_favourite_fragile_high_cert_ask,
-            br2_late_favourite_fragile_high_cert_max_edge,
-            br2_late_favourite_fragile_high_cert_max_path_efficiency,
-            br2_late_favourite_fragile_high_cert_size_frac,
-            br2_late_favourite_max_clips,
-            br2_late_favourite_min_sustain_secs,
-            br2_late_favourite_sweep_depth,
-            br2_late_favourite_min_model_confidence,
-            br2_late_favourite_min_model_direction_abs,
-            br2_late_favourite_max_model_risk,
-            br2_late_favourite_min_model_side_p,
-            br2_late_favourite_min_model_edge,
-            br2_late_favourite_high_cert_min_model_edge,
-            br2_late_favourite_high_cert_bypass_model_edge,
-            br2_late_favourite_max_whipsaw_score,
-            br2_late_favourite_max_reversal_pressure,
-            br2_late_favourite_min_path_efficiency,
-            br2_late_favourite_min_realized_vol_180s_bps,
-            br2_late_favourite_max_observed_range,
-            br2_late_favourite_range_soft_throttle,
-            br2_late_favourite_range_hard_throttle,
-            br2_late_favourite_range_extra_edge,
-            br2_late_favourite_range_extra_confidence,
-            br2_late_favourite_max_adverse_fast_momentum,
-            br2_late_favourite_max_adverse_broad_momentum,
-            br2_late_favourite_max_entry_pullback,
-            br2_late_favourite_max_avg_entry_drawdown,
-            br2_tail_clip_frac,
-            br2_tail_max_clips,
-            br2_tail_sweep_depth,
-            br2_tail_min_ask,
-            br2_tail_max_ask,
-            br2_tail_min_seconds_to_close,
-            br2_tail_min_favourite_unrealized_edge,
-            br2_tail_min_observed_range,
-            br2_tail_target_favourite_loss_coverage_frac,
-            br2_tail_reversal_coverage_frac,
-            br2_tail_reversal_min_seconds_to_close,
-            br2_tail_reversal_max_seconds_to_close,
-            br2_tail_reversal_min_favourite_ask,
-            br2_tail_extreme_threshold,
-            br2_tail_min_skew_step,
-            br2_tail_budget_favourite_spend_frac,
-            br2_tail_budget_favourite_upside_frac,
-            br2_tail_regime_boost_coverage_frac,
-            br2_tail_regime_boost_budget_spend_frac,
-            br2_tail_regime_boost_budget_upside_frac,
-            br2_tail_regime_boost_min_whipsaw_score,
-            br2_tail_regime_boost_min_reversal_pressure,
-            br2_tail_regime_boost_min_realized_vol_180s_bps,
-            br2_tail_regime_boost_max_path_efficiency,
-            br2_reversal_score_enabled,
-            br2_reversal_score_coeffs,
-            br2_reversal_score_cov_min,
-            br2_reversal_score_cov_max,
-            br2_reversal_score_size_floor,
-            br2_reversal_score_size_ceiling,
             enforce_model_gate,
             disable_model_gate,
             model_gate_min_confidence,
@@ -2006,7 +1550,6 @@ async fn main() -> Result<()> {
             walk_forward(
                 markets,
                 profile,
-                back_to_explore_policy_scales_jsonl,
                 skip_markets,
                 max_markets,
                 starting_cash,
@@ -2020,7 +1563,6 @@ async fn main() -> Result<()> {
             perp_cache_dir,
             directional_tilt_strength,
             strategies,
-            allow_legacy_strategies,
             max_concurrent_fetches,
             replay_sample_ms,
             taker_latency_ms,
@@ -2037,116 +1579,6 @@ async fn main() -> Result<()> {
                 clip_session_drawdown_hard_pct,
                 clip_session_drawdown_min_multiplier,
                 daily_loss_cap_pct,
-                br2_disable_internal_model_gates,
-                br2_participation_clip_frac,
-                br2_participation_max_pair_cost,
-                br2_participation_max_orders_per_leg,
-                br2_participation_max_inventory_delta_shares,
-                br2_participation_repair_inventory_delta_shares,
-                br2_participation_refresh_secs,
-                br2_participation_stop_secs_before_close,
-                br2_hedged_base_enabled,
-                br2_hedged_base_max_secs_in,
-                br2_hedged_base_max_pair_cost,
-                br2_hedged_base_min_minority_leg_frac,
-                br2_hedged_base_clip_usdc,
-                br2_hedged_base_max_notional_usdc,
-                br2_late_directional_overlay_frac,
-                br2_min_composite_direction,
-                br2_early_clip_frac,
-                br2_mid_clip_frac,
-                br2_late_clip_frac,
-                br2_late_max_fires,
-                br2_late_confirm_min_model_confidence,
-                br2_late_confirm_max_model_risk,
-                br2_late_confirm_min_model_side_p,
-                br2_late_confirm_min_model_edge,
-                br2_late_confirm_min_book_skew,
-                br2_late_confirm_max_whipsaw_score,
-                br2_late_confirm_min_realized_vol_180s_bps,
-                br2_late_confirm_max_observed_range,
-                br2_recent_regime_gate_enabled,
-                br2_recent_regime_gate_min_edge,
-                br2_recent_regime_gate_late_confirm,
-                br2_recent_regime_gate_high_skew,
-                br2_recent_regime_gate_late_favourite,
-                br2_high_skew_clip_frac,
-                br2_lane_size_late_favourite,
-                br2_lane_size_late_confirm,
-                br2_lane_size_high_skew,
-                br2_regime_gate_enabled,
-                br2_regime_gate_window,
-                br2_regime_gate_threshold,
-                br2_regime_gate_soft_band,
-                br2_regime_gate_lane_floor,
-                br2_regime_gate_whipsaw_weight,
-                br2_high_skew_max_clips,
-                br2_high_skew_max_whipsaw_score,
-                br2_high_skew_min_realized_vol_180s_bps,
-                br2_late_favourite_start_secs,
-                br2_late_favourite_threshold,
-                br2_late_favourite_min_ask,
-                br2_late_favourite_max_ask,
-                br2_late_favourite_clip_frac,
-                br2_late_favourite_high_cert_clip_frac,
-                br2_late_favourite_high_cert_full_clip_edge,
-                br2_late_favourite_fragile_high_cert_ask,
-                br2_late_favourite_fragile_high_cert_max_edge,
-                br2_late_favourite_fragile_high_cert_max_path_efficiency,
-                br2_late_favourite_fragile_high_cert_size_frac,
-                br2_late_favourite_max_clips,
-                br2_late_favourite_min_sustain_secs,
-                br2_late_favourite_sweep_depth,
-                br2_late_favourite_min_model_confidence,
-                br2_late_favourite_min_model_direction_abs,
-                br2_late_favourite_max_model_risk,
-                br2_late_favourite_min_model_side_p,
-                br2_late_favourite_min_model_edge,
-                br2_late_favourite_high_cert_min_model_edge,
-                br2_late_favourite_high_cert_bypass_model_edge,
-                br2_late_favourite_max_whipsaw_score,
-                br2_late_favourite_max_reversal_pressure,
-                br2_late_favourite_min_path_efficiency,
-                br2_late_favourite_min_realized_vol_180s_bps,
-                br2_late_favourite_max_observed_range,
-                br2_late_favourite_range_soft_throttle,
-                br2_late_favourite_range_hard_throttle,
-                br2_late_favourite_range_extra_edge,
-                br2_late_favourite_range_extra_confidence,
-                br2_late_favourite_max_adverse_fast_momentum,
-                br2_late_favourite_max_adverse_broad_momentum,
-                br2_late_favourite_max_entry_pullback,
-                br2_late_favourite_max_avg_entry_drawdown,
-                br2_tail_clip_frac,
-                br2_tail_max_clips,
-                br2_tail_sweep_depth,
-                br2_tail_min_ask,
-                br2_tail_max_ask,
-                br2_tail_min_seconds_to_close,
-                br2_tail_min_favourite_unrealized_edge,
-                br2_tail_min_observed_range,
-                br2_tail_target_favourite_loss_coverage_frac,
-                br2_tail_reversal_coverage_frac,
-                br2_tail_reversal_min_seconds_to_close,
-                br2_tail_reversal_max_seconds_to_close,
-                br2_tail_reversal_min_favourite_ask,
-                br2_tail_extreme_threshold,
-                br2_tail_min_skew_step,
-                br2_tail_budget_favourite_spend_frac,
-                br2_tail_budget_favourite_upside_frac,
-                br2_tail_regime_boost_coverage_frac,
-                br2_tail_regime_boost_budget_spend_frac,
-                br2_tail_regime_boost_budget_upside_frac,
-                br2_tail_regime_boost_min_whipsaw_score,
-                br2_tail_regime_boost_min_reversal_pressure,
-                br2_tail_regime_boost_min_realized_vol_180s_bps,
-                br2_tail_regime_boost_max_path_efficiency,
-                br2_reversal_score_enabled,
-                br2_reversal_score_coeffs,
-                br2_reversal_score_cov_min,
-                br2_reversal_score_cov_max,
-                br2_reversal_score_size_floor,
-                br2_reversal_score_size_ceiling,
                 enforce_model_gate && !disable_model_gate,
                 model_gate_min_confidence,
                 model_gate_max_risk,
@@ -2720,7 +2152,6 @@ fn string_value(array: &StringArray, row: usize) -> Option<&str> {
 async fn walk_forward(
     markets_path: PathBuf,
     profile: Option<PathBuf>,
-    back_to_explore_policy_scales_jsonl: Option<PathBuf>,
     skip_markets: usize,
     max_markets: usize,
     starting_cash: f64,
@@ -2734,7 +2165,6 @@ async fn walk_forward(
     perp_cache_dir: Option<PathBuf>,
     directional_tilt_strength: f64,
     strategies_csv: String,
-    allow_legacy_strategies: bool,
     max_concurrent_fetches: usize,
     replay_sample_ms: u64,
     taker_latency_ms: u64,
@@ -2751,116 +2181,6 @@ async fn walk_forward(
     clip_session_drawdown_hard_pct: f64,
     clip_session_drawdown_min_multiplier: f64,
     daily_loss_cap_pct: f64,
-    br2_disable_internal_model_gates: bool,
-    br2_participation_clip_frac: f32,
-    br2_participation_max_pair_cost: f32,
-    br2_participation_max_orders_per_leg: usize,
-    br2_participation_max_inventory_delta_shares: f64,
-    br2_participation_repair_inventory_delta_shares: f64,
-    br2_participation_refresh_secs: f32,
-    br2_participation_stop_secs_before_close: f32,
-    br2_hedged_base_enabled: bool,
-    br2_hedged_base_max_secs_in: f32,
-    br2_hedged_base_max_pair_cost: f32,
-    br2_hedged_base_min_minority_leg_frac: f32,
-    br2_hedged_base_clip_usdc: f32,
-    br2_hedged_base_max_notional_usdc: f32,
-    br2_late_directional_overlay_frac: f32,
-    br2_min_composite_direction: f32,
-    br2_early_clip_frac: f32,
-    br2_mid_clip_frac: f32,
-    br2_late_clip_frac: f32,
-    br2_late_max_fires: usize,
-    br2_late_confirm_min_model_confidence: f32,
-    br2_late_confirm_max_model_risk: f32,
-    br2_late_confirm_min_model_side_p: f32,
-    br2_late_confirm_min_model_edge: f32,
-    br2_late_confirm_min_book_skew: f32,
-    br2_late_confirm_max_whipsaw_score: f32,
-    br2_late_confirm_min_realized_vol_180s_bps: f32,
-    br2_late_confirm_max_observed_range: f32,
-    br2_recent_regime_gate_enabled: bool,
-    br2_recent_regime_gate_min_edge: f32,
-    br2_recent_regime_gate_late_confirm: bool,
-    br2_recent_regime_gate_high_skew: bool,
-    br2_recent_regime_gate_late_favourite: bool,
-    br2_high_skew_clip_frac: f32,
-    br2_lane_size_late_favourite: f32,
-    br2_lane_size_late_confirm: f32,
-    br2_lane_size_high_skew: f32,
-    br2_regime_gate_enabled: bool,
-    br2_regime_gate_window: u8,
-    br2_regime_gate_threshold: f32,
-    br2_regime_gate_soft_band: f32,
-    br2_regime_gate_lane_floor: f32,
-    br2_regime_gate_whipsaw_weight: f32,
-    br2_high_skew_max_clips: usize,
-    br2_high_skew_max_whipsaw_score: f32,
-    br2_high_skew_min_realized_vol_180s_bps: f32,
-    br2_late_favourite_start_secs: f32,
-    br2_late_favourite_threshold: f32,
-    br2_late_favourite_min_ask: f32,
-    br2_late_favourite_max_ask: f32,
-    br2_late_favourite_clip_frac: f32,
-    br2_late_favourite_high_cert_clip_frac: f32,
-    br2_late_favourite_high_cert_full_clip_edge: f32,
-    br2_late_favourite_fragile_high_cert_ask: f32,
-    br2_late_favourite_fragile_high_cert_max_edge: f32,
-    br2_late_favourite_fragile_high_cert_max_path_efficiency: f32,
-    br2_late_favourite_fragile_high_cert_size_frac: f32,
-    br2_late_favourite_max_clips: usize,
-    br2_late_favourite_min_sustain_secs: f32,
-    br2_late_favourite_sweep_depth: usize,
-    br2_late_favourite_min_model_confidence: f32,
-    br2_late_favourite_min_model_direction_abs: f32,
-    br2_late_favourite_max_model_risk: f32,
-    br2_late_favourite_min_model_side_p: f32,
-    br2_late_favourite_min_model_edge: f32,
-    br2_late_favourite_high_cert_min_model_edge: f32,
-    br2_late_favourite_high_cert_bypass_model_edge: bool,
-    br2_late_favourite_max_whipsaw_score: f32,
-    br2_late_favourite_max_reversal_pressure: f32,
-    br2_late_favourite_min_path_efficiency: f32,
-    br2_late_favourite_min_realized_vol_180s_bps: f32,
-    br2_late_favourite_max_observed_range: f32,
-    br2_late_favourite_range_soft_throttle: f32,
-    br2_late_favourite_range_hard_throttle: f32,
-    br2_late_favourite_range_extra_edge: f32,
-    br2_late_favourite_range_extra_confidence: f32,
-    br2_late_favourite_max_adverse_fast_momentum: f32,
-    br2_late_favourite_max_adverse_broad_momentum: f32,
-    br2_late_favourite_max_entry_pullback: f32,
-    br2_late_favourite_max_avg_entry_drawdown: f32,
-    br2_tail_clip_frac: f32,
-    br2_tail_max_clips: usize,
-    br2_tail_sweep_depth: usize,
-    br2_tail_min_ask: f32,
-    br2_tail_max_ask: f32,
-    br2_tail_min_seconds_to_close: f32,
-    br2_tail_min_favourite_unrealized_edge: f32,
-    br2_tail_min_observed_range: f32,
-    br2_tail_target_favourite_loss_coverage_frac: f32,
-    br2_tail_reversal_coverage_frac: f32,
-    br2_tail_reversal_min_seconds_to_close: f32,
-    br2_tail_reversal_max_seconds_to_close: f32,
-    br2_tail_reversal_min_favourite_ask: f32,
-    br2_tail_extreme_threshold: f32,
-    br2_tail_min_skew_step: f32,
-    br2_tail_budget_favourite_spend_frac: f32,
-    br2_tail_budget_favourite_upside_frac: f32,
-    br2_tail_regime_boost_coverage_frac: f32,
-    br2_tail_regime_boost_budget_spend_frac: f32,
-    br2_tail_regime_boost_budget_upside_frac: f32,
-    br2_tail_regime_boost_min_whipsaw_score: f32,
-    br2_tail_regime_boost_min_reversal_pressure: f32,
-    br2_tail_regime_boost_min_realized_vol_180s_bps: f32,
-    br2_tail_regime_boost_max_path_efficiency: f32,
-    br2_reversal_score_enabled: bool,
-    br2_reversal_score_coeffs: Option<PathBuf>,
-    br2_reversal_score_cov_min: f32,
-    br2_reversal_score_cov_max: f32,
-    br2_reversal_score_size_floor: f32,
-    br2_reversal_score_size_ceiling: f32,
     enforce_model_gate: bool,
     model_gate_min_confidence: f32,
     model_gate_max_risk: f32,
@@ -2918,7 +2238,7 @@ async fn walk_forward(
             "input --markets path lives under a data/runs/ experiment dir. \
              This often indicates a copy-paste error or stale path. \
              Prefer manifests in data/manifests/ (or a dedicated data/manifests/<experiment>/) \
-             so runs for different strategies (e.g. lively vs back_to_explore) do not mix inputs."
+             so runs for different strategies do not mix inputs."
         );
     }
     if skip_markets > 0 || max_markets > 0 {
@@ -2963,48 +2283,7 @@ async fn walk_forward(
         crate::walkforward::validate_outcome_labels(&markets)?;
     }
 
-    let strategies = parse_strategies(&strategies_csv, allow_legacy_strategies)?;
-
-    // Load optional strategy profile (currently supports bonereaper_v2 and back_to_explore).
-    let selected_profile = if let Some(p) = &profile {
-        match StrategyProfileFile::load(p) {
-            Ok(profile_file) => {
-                if profile_file.warn_if_inactive(&strategies) {
-                    tracing::warn!(
-                        path = %p.display(),
-                        available_strategies = ?strategies.iter().map(|s| s.name()).collect::<Vec<_>>(),
-                        selected_profile = %profile_file
-                            .strategy_name()
-                            .unwrap_or(""),
-                        "profile strategy is not part of --strategies and will be ignored"
-                    );
-                    None
-                } else {
-                    match profile_file.selected_strategy_profile(&strategies) {
-                        Ok(Some(profile)) => {
-                            let strategy_name = profile_file.strategy_name().unwrap_or("unknown");
-                            tracing::info!(path = %p.display(), strategy = strategy_name, "loaded strategy profile");
-                            Some((strategy_name.to_string(), profile))
-                        }
-                        Ok(None) => {
-                            tracing::warn!(path = %p.display(), "profile strategy not active in selected strategy set");
-                            None
-                        }
-                        Err(e) => {
-                            tracing::warn!(path = %p.display(), error = %e, "failed to resolve strategy profile, continuing without it");
-                            None
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!(path = %p.display(), error = %e, "failed to load profile, continuing without it");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let strategies = parse_strategies(&strategies_csv)?;
 
     let store = if let Some(ref dir) = local_cache_dir {
         tracing::info!(?dir, "using local cache");
@@ -3014,7 +2293,7 @@ async fn walk_forward(
         TelonexStore::try_new(&cfg)?
     };
 
-    let mut wf_cfg = WalkForwardConfig {
+    let wf_cfg = WalkForwardConfig {
         starting_cash_usdc: starting_cash,
         kelly_fraction,
         max_clip_usdc,
@@ -3043,116 +2322,6 @@ async fn walk_forward(
         clip_session_drawdown_hard_pct,
         clip_session_drawdown_min_multiplier,
         daily_loss_cap_pct,
-        br2_disable_internal_model_gates,
-        br2_participation_clip_frac,
-        br2_participation_max_pair_cost,
-        br2_participation_max_orders_per_leg,
-        br2_participation_max_inventory_delta_shares,
-        br2_participation_repair_inventory_delta_shares,
-        br2_participation_refresh_secs,
-        br2_participation_stop_secs_before_close,
-        br2_hedged_base_enabled,
-        br2_hedged_base_max_secs_in,
-        br2_hedged_base_max_pair_cost,
-        br2_hedged_base_min_minority_leg_frac,
-        br2_hedged_base_clip_usdc,
-        br2_hedged_base_max_notional_usdc,
-        br2_late_directional_overlay_frac,
-        br2_min_composite_direction,
-        br2_early_clip_frac,
-        br2_mid_clip_frac,
-        br2_late_clip_frac,
-        br2_late_max_fires,
-        br2_late_confirm_min_model_confidence,
-        br2_late_confirm_max_model_risk,
-        br2_late_confirm_min_model_side_p,
-        br2_late_confirm_min_model_edge,
-        br2_late_confirm_min_book_skew,
-        br2_late_confirm_max_whipsaw_score,
-        br2_late_confirm_min_realized_vol_180s_bps,
-        br2_late_confirm_max_observed_range,
-        br2_recent_regime_gate_enabled,
-        br2_recent_regime_gate_min_edge,
-        br2_recent_regime_gate_late_confirm,
-        br2_recent_regime_gate_high_skew,
-        br2_recent_regime_gate_late_favourite,
-        br2_high_skew_clip_frac,
-        br2_lane_size_late_favourite,
-        br2_lane_size_late_confirm,
-        br2_lane_size_high_skew,
-        br2_regime_gate_enabled,
-        br2_regime_gate_window,
-        br2_regime_gate_threshold,
-        br2_regime_gate_soft_band,
-        br2_regime_gate_lane_floor,
-        br2_regime_gate_whipsaw_weight,
-        br2_high_skew_max_clips,
-        br2_high_skew_max_whipsaw_score,
-        br2_high_skew_min_realized_vol_180s_bps,
-        br2_late_favourite_start_secs,
-        br2_late_favourite_threshold,
-        br2_late_favourite_min_ask,
-        br2_late_favourite_max_ask,
-        br2_late_favourite_clip_frac,
-        br2_late_favourite_high_cert_clip_frac,
-        br2_late_favourite_high_cert_full_clip_edge,
-        br2_late_favourite_fragile_high_cert_ask,
-        br2_late_favourite_fragile_high_cert_max_edge,
-        br2_late_favourite_fragile_high_cert_max_path_efficiency,
-        br2_late_favourite_fragile_high_cert_size_frac,
-        br2_late_favourite_max_clips,
-        br2_late_favourite_min_sustain_secs,
-        br2_late_favourite_sweep_depth,
-        br2_late_favourite_min_model_confidence,
-        br2_late_favourite_min_model_direction_abs,
-        br2_late_favourite_max_model_risk,
-        br2_late_favourite_min_model_side_p,
-        br2_late_favourite_min_model_edge,
-        br2_late_favourite_high_cert_min_model_edge,
-        br2_late_favourite_high_cert_bypass_model_edge,
-        br2_late_favourite_max_whipsaw_score,
-        br2_late_favourite_max_reversal_pressure,
-        br2_late_favourite_min_path_efficiency,
-        br2_late_favourite_min_realized_vol_180s_bps,
-        br2_late_favourite_max_observed_range,
-        br2_late_favourite_range_soft_throttle,
-        br2_late_favourite_range_hard_throttle,
-        br2_late_favourite_range_extra_edge,
-        br2_late_favourite_range_extra_confidence,
-        br2_late_favourite_max_adverse_fast_momentum,
-        br2_late_favourite_max_adverse_broad_momentum,
-        br2_late_favourite_max_entry_pullback,
-        br2_late_favourite_max_avg_entry_drawdown,
-        br2_tail_clip_frac,
-        br2_tail_max_clips,
-        br2_tail_sweep_depth,
-        br2_tail_min_ask,
-        br2_tail_max_ask,
-        br2_tail_min_seconds_to_close,
-        br2_tail_min_favourite_unrealized_edge,
-        br2_tail_min_observed_range,
-        br2_tail_target_favourite_loss_coverage_frac,
-        br2_tail_reversal_coverage_frac,
-        br2_tail_reversal_min_seconds_to_close,
-        br2_tail_reversal_max_seconds_to_close,
-        br2_tail_reversal_min_favourite_ask,
-        br2_tail_extreme_threshold,
-        br2_tail_min_skew_step,
-        br2_tail_budget_favourite_spend_frac,
-        br2_tail_budget_favourite_upside_frac,
-        br2_tail_regime_boost_coverage_frac,
-        br2_tail_regime_boost_budget_spend_frac,
-        br2_tail_regime_boost_budget_upside_frac,
-        br2_tail_regime_boost_min_whipsaw_score,
-        br2_tail_regime_boost_min_reversal_pressure,
-        br2_tail_regime_boost_min_realized_vol_180s_bps,
-        br2_tail_regime_boost_max_path_efficiency,
-        br2_reversal_score_enabled,
-        br2_reversal_score_coeffs_path: br2_reversal_score_coeffs,
-        br2_reversal_score_cov_min,
-        br2_reversal_score_cov_max,
-        br2_reversal_score_size_floor,
-        br2_reversal_score_size_ceiling,
         enforce_model_gate,
         model_gate_min_confidence,
         model_gate_max_risk,
@@ -3190,26 +2359,13 @@ async fn walk_forward(
         decision_log_every_n,
         checkpoint_markets_out: out_markets.clone(),
         checkpoint_summary_out: out_summary.clone(),
-        back_to_explore_policy_scales_jsonl,
         ..WalkForwardConfig::default()
     };
 
-    // Apply profile values last. Profile files are the canonical way to run
-    // named variants; keep ad hoc CLI sweeps profile-free or create a profile.
     let active_strats: Vec<&str> = wf_cfg.strategies.iter().map(|s| s.name()).collect();
-    let profile_log = selected_profile.as_ref().map(|(strategy, profile)| {
-        profile.apply_to_walkforward_config(&mut wf_cfg);
+    let profile_log = profile.as_ref().map(|path| {
         serde_json::json!({
-            "strategy": strategy,
-            "strategy_profile": profile.strategy_name(),
-        })
-    });
-
-    let profile_log = profile_log.or_else(|| {
-        profile.as_ref().map(|path| {
-            serde_json::json!({
-                "path": path
-            })
+            "path": path
         })
     });
 
@@ -3227,10 +2383,6 @@ async fn walk_forward(
         "clip_drawdown_soft_pct": wf_cfg.clip_drawdown_soft_pct,
         "clip_drawdown_hard_pct": wf_cfg.clip_drawdown_hard_pct,
         "daily_loss_cap_pct": wf_cfg.daily_loss_cap_pct,
-        "back_to_explore_policy_scales_jsonl": wf_cfg
-            .back_to_explore_policy_scales_jsonl
-            .as_ref()
-            .map(|path| path.to_string_lossy()),
         "forbid_meta_training": wf_cfg.forbid_meta_training,
     });
     tracing::info!(
@@ -3290,9 +2442,8 @@ async fn walk_forward(
     Ok(())
 }
 
-fn parse_strategies(csv: &str, allow_legacy: bool) -> Result<Vec<StratId>> {
+fn parse_strategies(csv: &str) -> Result<Vec<StratId>> {
     let mut out = Vec::new();
-    let mut legacy: Vec<&str> = Vec::new();
     for token in csv.split(',').map(str::trim) {
         let id = StratId::from_name(token).ok_or_else(|| {
             anyhow!(
@@ -3300,31 +2451,11 @@ fn parse_strategies(csv: &str, allow_legacy: bool) -> Result<Vec<StratId>> {
                 StratId::all_names().join(", ")
             )
         })?;
-        if !allow_legacy && !id.is_active() {
-            legacy.push(token);
-            continue;
-        }
         out.push(id);
     }
 
-    if !allow_legacy && !legacy.is_empty() {
-        let mut active = StratId::active_names();
-        let mut archived = StratId::archived_names();
-        active.sort_unstable();
-        legacy.sort_unstable();
-        archived.sort_unstable();
-        return Err(anyhow!(
-            "legacy strategies disabled in this run: {}. Set --allow-legacy-strategies and rerun, or pass only active strategies: {}. Archived strategies: {}",
-            legacy.join(", "),
-            active.join(", "),
-            archived.join(", ")
-        ));
-    }
-
     if out.is_empty() {
-        return Err(anyhow!(
-            "no strategies specified; either use active strategy IDs or pass --allow-legacy-strategies for archived ones"
-        ));
+        return Err(anyhow!("no strategies specified"));
     }
 
     Ok(out)
@@ -3554,7 +2685,6 @@ async fn run_market_backtest(
 
     let market_close_ns = close_ts_seconds.saturating_mul(1_000_000_000);
     let market_run_mode = mode.as_str();
-    let max_clip_usdc = limits.max_clip_usdc;
     let cfg = RunnerConfig {
         current_btc_net_shares: 0.0,
         current_eth_net_shares: 0.0,
@@ -3614,19 +2744,8 @@ async fn run_market_backtest(
 
     let started = Instant::now();
     let report = match strategy {
-        StrategyKind::PairedMm => {
-            let mut s = PairedMmDense::new(PairedMmDenseConfig {
-                clip_shares: max_clip_usdc / 0.5_f64.max(0.01),
-                ..PairedMmDenseConfig::default()
-            });
-            run_backtest(&events, &spot_history, &trade_history, &mut s, &cfg)?
-        }
-        StrategyKind::BonereaperV2 => {
-            let mut s = BonereaperV2::new(BonereaperV2Config {
-                bankroll_usdc: starting_cash,
-                max_clip_usdc,
-                ..BonereaperV2Config::default()
-            });
+        StrategyKind::Noop => {
+            let mut s = NoopStrategy;
             run_backtest(&events, &spot_history, &trade_history, &mut s, &cfg)?
         }
     };
@@ -3727,16 +2846,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_strategies_defaults_to_active_set_only() {
-        assert!(parse_strategies("back_to_explore,paired_mm", false).is_err());
-        let parsed = parse_strategies("back_to_explore,paired_mm", true).unwrap();
-        assert_eq!(parsed, vec![StratId::BackToExplore, StratId::PairedMm]);
-    }
-
-    #[test]
     fn parse_strategies_rejects_unknown_names() {
-        assert!(parse_strategies("reactive_directional", false).is_err());
-        assert!(parse_strategies("reactive_directional", true).is_err());
+        assert!(parse_strategies("reactive_directional").is_err());
     }
 
     // CONFIG PARITY GATE (deep-review F1). The clap layer and the shell flag

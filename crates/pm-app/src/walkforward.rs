@@ -15,20 +15,14 @@ use pm_model::{
     ModelMarketContext, ModelState, OnlineMetaCalibrator, OnlineMetaCalibratorSnapshot,
 };
 use pm_risk::PortfolioLimits;
-use pm_strategy::{
-    BonereaperV2, ExoFadeStrategy, NoopStrategy, PairedMmDense,
-    back_to_explore::{BackToExploreConfig, BackToExploreTaker},
-    bonereaper_v2::{BonereaperV2Config, BonereaperV2GateStats, ReversalScoreCoeffs},
-    exo_fade::ExoFadeConfig,
-    paired_mm::PairedMmDenseConfig,
-};
+use pm_strategy::{ExoFadeStrategy, NoopStrategy, exo_fade::ExoFadeConfig};
 use pm_telonex_loader::{
     Channel, TelonexStore, load_binance_agg_trades_async, load_book_snapshot_async,
     load_pm_trades_async, resolve_binance_day, resolve_pm_trades_day,
 };
 use pm_alpha::PerpState;
 use pm_types::{MarketId, ReplayEvent, SpotHistory, SpotTick, TradeHistory};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
@@ -45,720 +39,11 @@ const DEFAULT_META_MAX_VALIDATION_SAMPLES: usize = 60_000;
 const DEFAULT_META_MAX_OOS_EVALUATION_SAMPLES: usize = 120_000;
 const DEFAULT_META_MAX_SAMPLES_PER_MARKET: usize = 64;
 
-/// Minimal profile for BonereaperV2. Loaded from TOML via --profile.
-/// Fields are optional so partial profiles can override only the knobs under test.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(default, rename_all = "snake_case")]
-pub struct BonereaperV2Profile {
-    /// Run-level research speed knob. 0 preserves every raw book event; values
-    /// such as 1000 keep one event per second plus first/last event.
-    pub replay_sample_ms: Option<u64>,
-    pub disable_internal_model_gates: Option<bool>,
-    pub participation_clip_frac: Option<f32>,
-    pub participation_max_pair_cost: Option<f32>,
-    pub participation_max_orders_per_leg: Option<usize>,
-    pub participation_max_inventory_delta_shares: Option<f64>,
-    pub participation_repair_inventory_delta_shares: Option<f64>,
-    pub participation_refresh_secs: Option<f32>,
-    pub participation_stop_secs_before_close: Option<f32>,
-    pub hedged_base_enabled: Option<bool>,
-    pub hedged_base_max_secs_in: Option<f32>,
-    pub hedged_base_max_pair_cost: Option<f32>,
-    pub hedged_base_min_minority_leg_frac: Option<f32>,
-    pub hedged_base_clip_usdc: Option<f32>,
-    pub hedged_base_max_notional_usdc: Option<f32>,
-    pub late_directional_overlay_frac: Option<f32>,
-    pub min_composite_direction: Option<f32>,
-    pub late_clip_frac: Option<f32>,
-    pub late_max_fires: Option<usize>,
-    pub late_confirm_min_model_edge: Option<f32>,
-    pub late_confirm_min_realized_vol_180s_bps: Option<f32>,
-    pub late_confirm_max_observed_range: Option<f32>,
-    pub recent_regime_gate_enabled: Option<bool>,
-    pub recent_regime_gate_min_edge: Option<f32>,
-    pub recent_regime_gate_late_confirm: Option<bool>,
-    pub recent_regime_gate_high_skew: Option<bool>,
-    pub recent_regime_gate_late_favourite: Option<bool>,
-    pub high_skew_clip_frac: Option<f32>,
-    pub lane_size_late_favourite: Option<f32>,
-    pub lane_size_late_confirm: Option<f32>,
-    pub lane_size_high_skew: Option<f32>,
-    pub regime_gate_enabled: Option<bool>,
-    pub regime_gate_window: Option<u8>,
-    pub regime_gate_threshold: Option<f32>,
-    pub regime_gate_soft_band: Option<f32>,
-    pub regime_gate_lane_floor: Option<f32>,
-    pub regime_gate_whipsaw_weight: Option<f32>,
-    pub high_skew_max_clips: Option<usize>,
-    pub high_skew_max_whipsaw_score: Option<f32>,
-    pub high_skew_min_realized_vol_180s_bps: Option<f32>,
-    pub late_favourite_start_secs: Option<f32>,
-    pub late_favourite_threshold: Option<f32>,
-    pub late_favourite_min_ask: Option<f32>,
-    pub late_favourite_max_ask: Option<f32>,
-    pub late_favourite_clip_frac: Option<f32>,
-    pub late_favourite_high_cert_clip_frac: Option<f32>,
-    pub late_favourite_high_cert_full_clip_edge: Option<f32>,
-    pub late_favourite_max_clips: Option<usize>,
-    pub late_favourite_sweep_depth: Option<usize>,
-    pub late_favourite_min_model_confidence: Option<f32>,
-    pub late_favourite_max_model_risk: Option<f32>,
-    pub late_favourite_min_model_side_p: Option<f32>,
-    pub late_favourite_min_model_edge: Option<f32>,
-    pub late_favourite_high_cert_min_model_edge: Option<f32>,
-    pub late_favourite_fragile_high_cert_ask: Option<f32>,
-    pub late_favourite_fragile_high_cert_max_edge: Option<f32>,
-    pub late_favourite_fragile_high_cert_max_path_efficiency: Option<f32>,
-    pub late_favourite_fragile_high_cert_size_frac: Option<f32>,
-    pub late_favourite_range_soft_throttle: Option<f32>,
-    pub late_favourite_range_hard_throttle: Option<f32>,
-    pub late_favourite_range_extra_edge: Option<f32>,
-    pub late_favourite_range_extra_confidence: Option<f32>,
-    pub late_favourite_max_whipsaw_score: Option<f32>,
-    pub late_favourite_max_reversal_pressure: Option<f32>,
-    pub late_favourite_min_path_efficiency: Option<f32>,
-    pub late_favourite_min_realized_vol_180s_bps: Option<f32>,
-    pub tail_clip_frac: Option<f32>,
-    pub tail_max_clips: Option<usize>,
-    pub tail_sweep_depth: Option<usize>,
-    pub tail_min_ask: Option<f32>,
-    pub tail_max_ask: Option<f32>,
-    pub tail_min_seconds_to_close: Option<f32>,
-    pub tail_min_favourite_unrealized_edge: Option<f32>,
-    pub tail_extreme_threshold: Option<f32>,
-    pub tail_min_skew_step: Option<f32>,
-    pub tail_target_favourite_loss_coverage_frac: Option<f32>,
-    pub tail_budget_favourite_spend_frac: Option<f32>,
-    pub tail_budget_favourite_upside_frac: Option<f32>,
-    pub tail_reversal_coverage_frac: Option<f32>,
-    pub tail_reversal_min_seconds_to_close: Option<f32>,
-    pub tail_reversal_max_seconds_to_close: Option<f32>,
-    pub tail_reversal_min_favourite_ask: Option<f32>,
-    pub tail_regime_boost_coverage_frac: Option<f32>,
-    pub tail_regime_boost_budget_spend_frac: Option<f32>,
-    pub tail_regime_boost_budget_upside_frac: Option<f32>,
-    pub tail_regime_boost_min_whipsaw_score: Option<f32>,
-    pub tail_regime_boost_min_reversal_pressure: Option<f32>,
-    pub tail_regime_boost_min_realized_vol_180s_bps: Option<f32>,
-    pub tail_regime_boost_max_path_efficiency: Option<f32>,
-    pub model_btc_whipsaw_risk_weight: Option<f32>,
-    pub model_btc_path_inefficiency_risk_weight: Option<f32>,
-    pub model_btc_reversal_pressure_risk_weight: Option<f32>,
-    pub reversal_score_enabled: Option<bool>,
-    pub reversal_score_coeffs_path: Option<PathBuf>,
-    pub reversal_score_cov_min: Option<f32>,
-    pub reversal_score_cov_max: Option<f32>,
-    pub reversal_score_size_floor: Option<f32>,
-    pub reversal_score_size_ceiling: Option<f32>,
-}
-
-impl BonereaperV2Profile {
-    /// Test-only convenience; prod loads profiles via `StrategyProfileFile::load`
-    /// + `selected_strategy_profile`.
-    #[cfg(test)]
-    pub fn load(path: &Path) -> Result<Self> {
-        StrategyProfileFile::load(path)?.into_bonereaper_v2()
-    }
-
-    pub fn apply_to_walkforward_config(&self, cfg: &mut WalkForwardConfig) {
-        macro_rules! apply {
-            ($profile_field:ident, $cfg_field:ident) => {
-                if let Some(value) = self.$profile_field {
-                    cfg.$cfg_field = value;
-                }
-            };
-        }
-
-        apply!(
-            disable_internal_model_gates,
-            br2_disable_internal_model_gates
-        );
-        apply!(replay_sample_ms, replay_sample_ms);
-        apply!(participation_clip_frac, br2_participation_clip_frac);
-        apply!(participation_max_pair_cost, br2_participation_max_pair_cost);
-        apply!(
-            participation_max_orders_per_leg,
-            br2_participation_max_orders_per_leg
-        );
-        apply!(
-            participation_max_inventory_delta_shares,
-            br2_participation_max_inventory_delta_shares
-        );
-        apply!(
-            participation_repair_inventory_delta_shares,
-            br2_participation_repair_inventory_delta_shares
-        );
-        apply!(participation_refresh_secs, br2_participation_refresh_secs);
-        apply!(
-            participation_stop_secs_before_close,
-            br2_participation_stop_secs_before_close
-        );
-        apply!(hedged_base_enabled, br2_hedged_base_enabled);
-        apply!(hedged_base_max_secs_in, br2_hedged_base_max_secs_in);
-        apply!(hedged_base_max_pair_cost, br2_hedged_base_max_pair_cost);
-        apply!(
-            hedged_base_min_minority_leg_frac,
-            br2_hedged_base_min_minority_leg_frac
-        );
-        apply!(hedged_base_clip_usdc, br2_hedged_base_clip_usdc);
-        apply!(
-            hedged_base_max_notional_usdc,
-            br2_hedged_base_max_notional_usdc
-        );
-        apply!(
-            late_directional_overlay_frac,
-            br2_late_directional_overlay_frac
-        );
-        apply!(min_composite_direction, br2_min_composite_direction);
-        apply!(late_clip_frac, br2_late_clip_frac);
-        apply!(late_max_fires, br2_late_max_fires);
-        apply!(late_confirm_min_model_edge, br2_late_confirm_min_model_edge);
-        apply!(
-            late_confirm_min_realized_vol_180s_bps,
-            br2_late_confirm_min_realized_vol_180s_bps
-        );
-        apply!(
-            late_confirm_max_observed_range,
-            br2_late_confirm_max_observed_range
-        );
-        apply!(recent_regime_gate_enabled, br2_recent_regime_gate_enabled);
-        apply!(recent_regime_gate_min_edge, br2_recent_regime_gate_min_edge);
-        apply!(
-            recent_regime_gate_late_confirm,
-            br2_recent_regime_gate_late_confirm
-        );
-        apply!(
-            recent_regime_gate_high_skew,
-            br2_recent_regime_gate_high_skew
-        );
-        apply!(
-            recent_regime_gate_late_favourite,
-            br2_recent_regime_gate_late_favourite
-        );
-        apply!(high_skew_clip_frac, br2_high_skew_clip_frac);
-        apply!(lane_size_late_favourite, br2_lane_size_late_favourite);
-        apply!(lane_size_late_confirm, br2_lane_size_late_confirm);
-        apply!(lane_size_high_skew, br2_lane_size_high_skew);
-        apply!(regime_gate_enabled, br2_regime_gate_enabled);
-        apply!(regime_gate_window, br2_regime_gate_window);
-        apply!(regime_gate_threshold, br2_regime_gate_threshold);
-        apply!(regime_gate_soft_band, br2_regime_gate_soft_band);
-        apply!(regime_gate_lane_floor, br2_regime_gate_lane_floor);
-        apply!(regime_gate_whipsaw_weight, br2_regime_gate_whipsaw_weight);
-        apply!(high_skew_max_clips, br2_high_skew_max_clips);
-        apply!(high_skew_max_whipsaw_score, br2_high_skew_max_whipsaw_score);
-        apply!(
-            high_skew_min_realized_vol_180s_bps,
-            br2_high_skew_min_realized_vol_180s_bps
-        );
-        apply!(late_favourite_start_secs, br2_late_favourite_start_secs);
-        apply!(late_favourite_threshold, br2_late_favourite_threshold);
-        apply!(late_favourite_min_ask, br2_late_favourite_min_ask);
-        apply!(late_favourite_max_ask, br2_late_favourite_max_ask);
-        apply!(late_favourite_clip_frac, br2_late_favourite_clip_frac);
-        apply!(
-            late_favourite_high_cert_clip_frac,
-            br2_late_favourite_high_cert_clip_frac
-        );
-        apply!(
-            late_favourite_high_cert_full_clip_edge,
-            br2_late_favourite_high_cert_full_clip_edge
-        );
-        apply!(late_favourite_max_clips, br2_late_favourite_max_clips);
-        apply!(late_favourite_sweep_depth, br2_late_favourite_sweep_depth);
-        apply!(
-            late_favourite_min_model_confidence,
-            br2_late_favourite_min_model_confidence
-        );
-        apply!(
-            late_favourite_max_model_risk,
-            br2_late_favourite_max_model_risk
-        );
-        apply!(
-            late_favourite_min_model_side_p,
-            br2_late_favourite_min_model_side_p
-        );
-        apply!(
-            late_favourite_min_model_edge,
-            br2_late_favourite_min_model_edge
-        );
-        apply!(
-            late_favourite_high_cert_min_model_edge,
-            br2_late_favourite_high_cert_min_model_edge
-        );
-        apply!(
-            late_favourite_fragile_high_cert_ask,
-            br2_late_favourite_fragile_high_cert_ask
-        );
-        apply!(
-            late_favourite_fragile_high_cert_max_edge,
-            br2_late_favourite_fragile_high_cert_max_edge
-        );
-        apply!(
-            late_favourite_fragile_high_cert_max_path_efficiency,
-            br2_late_favourite_fragile_high_cert_max_path_efficiency
-        );
-        apply!(
-            late_favourite_fragile_high_cert_size_frac,
-            br2_late_favourite_fragile_high_cert_size_frac
-        );
-        apply!(
-            late_favourite_range_soft_throttle,
-            br2_late_favourite_range_soft_throttle
-        );
-        apply!(
-            late_favourite_range_hard_throttle,
-            br2_late_favourite_range_hard_throttle
-        );
-        apply!(
-            late_favourite_range_extra_edge,
-            br2_late_favourite_range_extra_edge
-        );
-        apply!(
-            late_favourite_range_extra_confidence,
-            br2_late_favourite_range_extra_confidence
-        );
-        apply!(
-            late_favourite_max_whipsaw_score,
-            br2_late_favourite_max_whipsaw_score
-        );
-        apply!(
-            late_favourite_max_reversal_pressure,
-            br2_late_favourite_max_reversal_pressure
-        );
-        apply!(
-            late_favourite_min_path_efficiency,
-            br2_late_favourite_min_path_efficiency
-        );
-        apply!(
-            late_favourite_min_realized_vol_180s_bps,
-            br2_late_favourite_min_realized_vol_180s_bps
-        );
-        apply!(tail_clip_frac, br2_tail_clip_frac);
-        apply!(tail_max_clips, br2_tail_max_clips);
-        apply!(tail_sweep_depth, br2_tail_sweep_depth);
-        apply!(tail_min_ask, br2_tail_min_ask);
-        apply!(tail_max_ask, br2_tail_max_ask);
-        apply!(tail_min_seconds_to_close, br2_tail_min_seconds_to_close);
-        apply!(
-            tail_min_favourite_unrealized_edge,
-            br2_tail_min_favourite_unrealized_edge
-        );
-        apply!(tail_extreme_threshold, br2_tail_extreme_threshold);
-        apply!(tail_min_skew_step, br2_tail_min_skew_step);
-        apply!(
-            tail_target_favourite_loss_coverage_frac,
-            br2_tail_target_favourite_loss_coverage_frac
-        );
-        apply!(
-            tail_budget_favourite_spend_frac,
-            br2_tail_budget_favourite_spend_frac
-        );
-        apply!(
-            tail_budget_favourite_upside_frac,
-            br2_tail_budget_favourite_upside_frac
-        );
-        apply!(tail_reversal_coverage_frac, br2_tail_reversal_coverage_frac);
-        apply!(
-            tail_reversal_min_seconds_to_close,
-            br2_tail_reversal_min_seconds_to_close
-        );
-        apply!(
-            tail_reversal_max_seconds_to_close,
-            br2_tail_reversal_max_seconds_to_close
-        );
-        apply!(
-            tail_reversal_min_favourite_ask,
-            br2_tail_reversal_min_favourite_ask
-        );
-        apply!(
-            tail_regime_boost_coverage_frac,
-            br2_tail_regime_boost_coverage_frac
-        );
-        apply!(
-            tail_regime_boost_budget_spend_frac,
-            br2_tail_regime_boost_budget_spend_frac
-        );
-        apply!(
-            tail_regime_boost_budget_upside_frac,
-            br2_tail_regime_boost_budget_upside_frac
-        );
-        apply!(
-            tail_regime_boost_min_whipsaw_score,
-            br2_tail_regime_boost_min_whipsaw_score
-        );
-        apply!(
-            tail_regime_boost_min_reversal_pressure,
-            br2_tail_regime_boost_min_reversal_pressure
-        );
-        apply!(
-            tail_regime_boost_min_realized_vol_180s_bps,
-            br2_tail_regime_boost_min_realized_vol_180s_bps
-        );
-        apply!(
-            tail_regime_boost_max_path_efficiency,
-            br2_tail_regime_boost_max_path_efficiency
-        );
-        apply!(model_btc_whipsaw_risk_weight, model_btc_whipsaw_risk_weight);
-        apply!(
-            model_btc_path_inefficiency_risk_weight,
-            model_btc_path_inefficiency_risk_weight
-        );
-        apply!(
-            model_btc_reversal_pressure_risk_weight,
-            model_btc_reversal_pressure_risk_weight
-        );
-        apply!(reversal_score_enabled, br2_reversal_score_enabled);
-        apply!(reversal_score_cov_min, br2_reversal_score_cov_min);
-        apply!(reversal_score_cov_max, br2_reversal_score_cov_max);
-        apply!(reversal_score_size_floor, br2_reversal_score_size_floor);
-        apply!(reversal_score_size_ceiling, br2_reversal_score_size_ceiling);
-        if let Some(path) = &self.reversal_score_coeffs_path {
-            cfg.br2_reversal_score_coeffs_path = Some(path.clone());
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default, rename_all = "snake_case")]
-pub struct StrategyProfileFile {
-    strategy: Option<StrategyProfileSelection>,
-    bonereaper_v2: Option<BonereaperV2Profile>,
-    back_to_explore: Option<BackToExploreProfile>,
-}
-
-#[derive(Debug, Clone, Serialize, Default, Deserialize)]
-#[serde(default, rename_all = "snake_case")]
-pub struct StrategyProfileSelection {
-    pub name: String,
-}
-
-#[derive(Debug, Clone, Serialize, Default, Deserialize)]
-#[serde(default, rename_all = "snake_case")]
-pub struct BackToExploreProfile {
-    /// Use this as a world-class baseline clip, then applies `max(4.0, clip)` in
-    /// the runner. Keep non-zero so small accounts still receive action.
-    pub base_clip_usdc: Option<f64>,
-    pub max_clip_usdc: Option<f64>,
-    pub min_pair_cost_for_two_sided: Option<f64>,
-    pub pair_clip_multiplier: Option<f64>,
-    pub directional_strength_mult: Option<f64>,
-    pub residual_taper_start_frac: Option<f64>,
-    pub residual_min_clip_multiplier: Option<f64>,
-    pub range_soft_throttle: Option<f32>,
-    pub range_hard_throttle: Option<f32>,
-    pub range_min_clip_multiplier: Option<f64>,
-    pub range_repair_min_clip_multiplier: Option<f64>,
-    pub range_chop_min_range: Option<f32>,
-    pub range_clean_path_efficiency: Option<f32>,
-    pub range_chop_sign_flip_rate: Option<f32>,
-    pub range_reversal_pressure: Option<f32>,
-    pub clean_path_directional_clip_multiplier: Option<f64>,
-    pub reversal_pressure_clip_multiplier: Option<f64>,
-    pub reversal_pressure_directional_min_signal: Option<f64>,
-    pub reversal_pressure_directional_min_edge: Option<f64>,
-    pub reversal_pressure_directional_clip_multiplier: Option<f64>,
-    pub max_residual_shares: Option<f64>,
-    pub min_clip_multiplier_to_emit: Option<f64>,
-    pub refresh_secs: Option<f64>,
-    pub stop_secs_before_close: Option<f32>,
-    pub min_entry_price: Option<f32>,
-    pub max_entry_price: Option<f32>,
-    pub sweep_depth: Option<usize>,
-    pub high_activity_hours: Option<Vec<u8>>,
-    pub base_participation_rate: Option<f64>,
-    pub two_sided_preference: Option<f64>,
-    pub target_risk_per_clip_frac: Option<f64>,
-    pub base_target_net_shares: Option<f64>,
-    pub good_hour_target_net_mult: Option<f64>,
-    /// Optional JSONL of per-market risk scales exported by
-    /// `scripts/bte_cluster_policy_search.py --out-scale-jsonl`.
-    pub policy_scales_jsonl: Option<PathBuf>,
-    pub debug_signals: Option<bool>,
-}
-
-impl BackToExploreProfile {
-    pub fn apply_to_walkforward_config(&self, cfg: &mut WalkForwardConfig) {
-        macro_rules! apply {
-            ($profile_field:ident, $cfg_field:ident) => {
-                if let Some(value) = self.$profile_field {
-                    cfg.$cfg_field = value;
-                }
-            };
-        }
-
-        apply!(base_clip_usdc, back_to_explore_base_clip_usdc);
-        apply!(max_clip_usdc, back_to_explore_max_clip_usdc);
-        apply!(
-            min_pair_cost_for_two_sided,
-            back_to_explore_min_pair_cost_for_two_sided
-        );
-        apply!(pair_clip_multiplier, back_to_explore_pair_clip_multiplier);
-        apply!(
-            directional_strength_mult,
-            back_to_explore_directional_strength_mult
-        );
-        apply!(
-            residual_taper_start_frac,
-            back_to_explore_residual_taper_start_frac
-        );
-        apply!(
-            residual_min_clip_multiplier,
-            back_to_explore_residual_min_clip_multiplier
-        );
-        apply!(range_soft_throttle, back_to_explore_range_soft_throttle);
-        apply!(range_hard_throttle, back_to_explore_range_hard_throttle);
-        apply!(
-            range_min_clip_multiplier,
-            back_to_explore_range_min_clip_multiplier
-        );
-        apply!(
-            range_repair_min_clip_multiplier,
-            back_to_explore_range_repair_min_clip_multiplier
-        );
-        apply!(range_chop_min_range, back_to_explore_range_chop_min_range);
-        apply!(
-            range_clean_path_efficiency,
-            back_to_explore_range_clean_path_efficiency
-        );
-        apply!(
-            range_chop_sign_flip_rate,
-            back_to_explore_range_chop_sign_flip_rate
-        );
-        apply!(
-            range_reversal_pressure,
-            back_to_explore_range_reversal_pressure
-        );
-        apply!(
-            clean_path_directional_clip_multiplier,
-            back_to_explore_clean_path_directional_clip_multiplier
-        );
-        apply!(
-            reversal_pressure_clip_multiplier,
-            back_to_explore_reversal_pressure_clip_multiplier
-        );
-        apply!(
-            reversal_pressure_directional_min_signal,
-            back_to_explore_reversal_pressure_directional_min_signal
-        );
-        apply!(
-            reversal_pressure_directional_min_edge,
-            back_to_explore_reversal_pressure_directional_min_edge
-        );
-        apply!(
-            reversal_pressure_directional_clip_multiplier,
-            back_to_explore_reversal_pressure_directional_clip_multiplier
-        );
-        apply!(max_residual_shares, back_to_explore_max_residual_shares);
-        apply!(
-            min_clip_multiplier_to_emit,
-            back_to_explore_min_clip_multiplier_to_emit
-        );
-        apply!(refresh_secs, back_to_explore_refresh_secs);
-        apply!(
-            stop_secs_before_close,
-            back_to_explore_stop_secs_before_close
-        );
-        apply!(min_entry_price, back_to_explore_min_entry_price);
-        apply!(max_entry_price, back_to_explore_max_entry_price);
-        apply!(sweep_depth, back_to_explore_sweep_depth);
-        if let Some(hours) = &self.high_activity_hours {
-            cfg.back_to_explore_high_activity_hours = hours.clone();
-        }
-        apply!(
-            base_participation_rate,
-            back_to_explore_base_participation_rate
-        );
-        apply!(two_sided_preference, back_to_explore_two_sided_preference);
-        apply!(
-            target_risk_per_clip_frac,
-            back_to_explore_target_risk_per_clip_frac
-        );
-        apply!(
-            base_target_net_shares,
-            back_to_explore_base_target_net_shares
-        );
-        apply!(
-            good_hour_target_net_mult,
-            back_to_explore_good_hour_target_net_mult
-        );
-        if let Some(path) = &self.policy_scales_jsonl {
-            cfg.back_to_explore_policy_scales_jsonl = Some(path.clone());
-        }
-        apply!(debug_signals, back_to_explore_debug_signals);
-    }
-}
-
-impl StrategyProfileFile {
-    pub fn load(path: &Path) -> Result<Self> {
-        let content = std::fs::read_to_string(path)
-            .with_context(|| format!("failed to read profile {}", path.display()))?;
-        let mut file: StrategyProfileFile = toml::from_str(&content)
-            .with_context(|| format!("failed to parse profile {} as TOML", path.display()))?;
-
-        if file.bonereaper_v2.is_none() && file.back_to_explore.is_none() {
-            let fallback: BonereaperV2Profile = toml::from_str(&content).with_context(|| {
-                format!(
-                    "failed to parse legacy profile format {} as TOML",
-                    path.display()
-                )
-            })?;
-            file.strategy = Some(StrategyProfileSelection {
-                name: "bonereaper_v2".to_string(),
-            });
-            file.bonereaper_v2 = Some(fallback);
-        }
-
-        if file.strategy.is_none() {
-            let has_bonereaper_v2 = file.bonereaper_v2.is_some();
-            let has_back_to_explore = file.back_to_explore.is_some();
-            match (has_bonereaper_v2, has_back_to_explore) {
-                (true, false) => {
-                    file.strategy = Some(StrategyProfileSelection {
-                        name: "bonereaper_v2".to_string(),
-                    });
-                }
-                (false, true) => {
-                    file.strategy = Some(StrategyProfileSelection {
-                        name: "back_to_explore".to_string(),
-                    });
-                }
-                (true, true) => {
-                    return Err(anyhow!(
-                        "profile has both [bonereaper_v2] and [back_to_explore] sections but no [strategy].name; set one strategy"
-                    ));
-                }
-                (false, false) => {}
-            }
-        }
-
-        if file.strategy.is_none() {
-            return Err(anyhow!(
-                "profile missing strategy declaration and no strategy section found"
-            ));
-        }
-
-        Ok(file)
-    }
-
-    pub fn strategy_name(&self) -> Option<&str> {
-        self.strategy
-            .as_ref()
-            .map(|strategy| strategy.name.as_str())
-    }
-
-    pub fn selected_strategy_profile(
-        &self,
-        active: &[StratId],
-    ) -> Result<Option<ResolvedStrategyProfile>> {
-        let requested = self
-            .strategy_name()
-            .ok_or_else(|| anyhow!("profile missing [strategy].name"))?
-            .to_ascii_lowercase();
-
-        let resolved = match requested.as_str() {
-            "bonereaper_v2" => {
-                if !active.iter().any(|s| *s == StratId::BonereaperV2) {
-                    return Ok(None);
-                }
-                self.bonereaper_v2
-                    .clone()
-                    .ok_or_else(|| anyhow!("bonereaper_v2 profile missing [bonereaper_v2] block"))?
-                    .into()
-            }
-            "back_to_explore" => {
-                if !active.iter().any(|s| *s == StratId::BackToExplore) {
-                    return Ok(None);
-                }
-                self.back_to_explore
-                    .clone()
-                    .ok_or_else(|| {
-                        anyhow!("back_to_explore profile missing [back_to_explore] block")
-                    })?
-                    .into()
-            }
-            other => {
-                return Err(anyhow!(
-                    "profile strategy '{}' does not match any known strategy (supported: bonereaper_v2, back_to_explore)",
-                    other
-                ));
-            }
-        };
-
-        Ok(Some(resolved))
-    }
-
-    pub fn warn_if_inactive(&self, active: &[StratId]) -> bool {
-        let Some(requested) = self
-            .strategy_name()
-            .map(|strategy| strategy.to_ascii_lowercase())
-        else {
-            return false;
-        };
-        if requested == "bonereaper_v2" {
-            !active.iter().any(|s| *s == StratId::BonereaperV2)
-        } else if requested == "back_to_explore" {
-            !active.iter().any(|s| *s == StratId::BackToExplore)
-        } else {
-            false
-        }
-    }
-
-    #[cfg(test)]
-    pub fn into_bonereaper_v2(self) -> Result<BonereaperV2Profile> {
-        match self.bonereaper_v2 {
-            Some(profile) => Ok(profile),
-            None => Err(anyhow!(
-                "requested strategy profile path is not a bonereaper_v2 profile"
-            )),
-        }
-    }
-}
-
-pub enum ResolvedStrategyProfile {
-    BonereaperV2(BonereaperV2Profile),
-    BackToExplore(BackToExploreProfile),
-}
-
-impl ResolvedStrategyProfile {
-    pub fn strategy_id(&self) -> StratId {
-        match self {
-            Self::BonereaperV2(_) => StratId::BonereaperV2,
-            Self::BackToExplore(_) => StratId::BackToExplore,
-        }
-    }
-
-    pub fn strategy_name(&self) -> &'static str {
-        self.strategy_id().name()
-    }
-
-    pub fn apply_to_walkforward_config(&self, cfg: &mut WalkForwardConfig) {
-        match self {
-            Self::BonereaperV2(profile) => profile.apply_to_walkforward_config(cfg),
-            Self::BackToExplore(profile) => profile.apply_to_walkforward_config(cfg),
-        }
-    }
-}
-
-impl From<BonereaperV2Profile> for ResolvedStrategyProfile {
-    fn from(profile: BonereaperV2Profile) -> Self {
-        Self::BonereaperV2(profile)
-    }
-}
-
-impl From<BackToExploreProfile> for ResolvedStrategyProfile {
-    fn from(profile: BackToExploreProfile) -> Self {
-        Self::BackToExplore(profile)
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
 pub enum StratId {
     ExoFade,
     MayJuneFade,
-    PairedMm,
-    BonereaperV2,
-    BackToExplore,
+    Noop,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
@@ -777,32 +62,15 @@ impl VolatilityBand {
 }
 
 impl StratId {
-    pub const ACTIVE: [Self; 3] = [
-        Self::ExoFade,
-        Self::MayJuneFade,
-        Self::BonereaperV2,
-    ];
+    pub const ACTIVE: [Self; 3] = [Self::ExoFade, Self::MayJuneFade, Self::Noop];
 
-    // Rejected by the strategy hunt (VERIFY: back_to_explore -$85, paired_mm
-    // -$277; docs/research/strategy-hunt/07-strategy-forward-plan.md).
-    // Runnable only with --allow-legacy-strategies.
-    pub const ARCHIVED: [Self; 2] = [Self::BackToExplore, Self::PairedMm];
-
-    pub const ALL: [Self; 5] = [
-        Self::ExoFade,
-        Self::MayJuneFade,
-        Self::PairedMm,
-        Self::BackToExplore,
-        Self::BonereaperV2,
-    ];
+    pub const ALL: [Self; 3] = [Self::ExoFade, Self::MayJuneFade, Self::Noop];
 
     pub fn from_name(value: &str) -> Option<Self> {
         match value {
             "exo_fade" => Some(Self::ExoFade),
             "mayjune_fade" => Some(Self::MayJuneFade),
-            "paired_mm" => Some(Self::PairedMm),
-            "bonereaper_v2" => Some(Self::BonereaperV2),
-            "back_to_explore" => Some(Self::BackToExplore),
+            "noop" => Some(Self::Noop),
             _ => None,
         }
     }
@@ -811,26 +79,12 @@ impl StratId {
         match self {
             StratId::ExoFade => "exo_fade",
             StratId::MayJuneFade => "mayjune_fade",
-            StratId::PairedMm => "paired_mm",
-            StratId::BonereaperV2 => "bonereaper_v2",
-            StratId::BackToExplore => "back_to_explore",
+            StratId::Noop => "noop",
         }
-    }
-
-    pub fn active_names() -> Vec<&'static str> {
-        Self::ACTIVE.iter().map(|strat| strat.name()).collect()
-    }
-
-    pub fn archived_names() -> Vec<&'static str> {
-        Self::ARCHIVED.iter().map(|strat| strat.name()).collect()
     }
 
     pub fn all_names() -> Vec<&'static str> {
         Self::ALL.iter().map(|strat| strat.name()).collect()
-    }
-
-    pub fn is_active(self) -> bool {
-        Self::ACTIVE.iter().any(|id| *id == self)
     }
 }
 
@@ -905,154 +159,6 @@ pub struct WalkForwardConfig {
     pub loss_streak_cooldown_markets: usize,
     /// PnL threshold used to classify a traded market as losing.
     pub loss_streak_loss_threshold_usdc: f64,
-    pub br2_disable_internal_model_gates: bool,
-    pub br2_participation_clip_frac: f32,
-    pub br2_participation_max_pair_cost: f32,
-    pub br2_participation_max_orders_per_leg: usize,
-    pub br2_participation_max_inventory_delta_shares: f64,
-    pub br2_participation_repair_inventory_delta_shares: f64,
-    pub br2_participation_refresh_secs: f32,
-    pub br2_participation_stop_secs_before_close: f32,
-    pub br2_hedged_base_enabled: bool,
-    pub br2_hedged_base_max_secs_in: f32,
-    pub br2_hedged_base_max_pair_cost: f32,
-    pub br2_hedged_base_min_minority_leg_frac: f32,
-    pub br2_hedged_base_clip_usdc: f32,
-    pub br2_hedged_base_max_notional_usdc: f32,
-    pub br2_late_directional_overlay_frac: f32,
-    pub br2_min_composite_direction: f32,
-    pub br2_early_clip_frac: f32,
-    pub br2_mid_clip_frac: f32,
-    pub br2_late_clip_frac: f32,
-    pub br2_late_max_fires: usize,
-    pub br2_late_confirm_min_model_confidence: f32,
-    pub br2_late_confirm_max_model_risk: f32,
-    pub br2_late_confirm_min_model_side_p: f32,
-    pub br2_late_confirm_min_model_edge: f32,
-    pub br2_late_confirm_min_book_skew: f32,
-    pub br2_late_confirm_max_whipsaw_score: f32,
-    pub br2_late_confirm_min_realized_vol_180s_bps: f32,
-    pub br2_late_confirm_max_observed_range: f32,
-    pub br2_recent_regime_gate_enabled: bool,
-    pub br2_recent_regime_gate_min_edge: f32,
-    pub br2_recent_regime_gate_late_confirm: bool,
-    pub br2_recent_regime_gate_high_skew: bool,
-    pub br2_recent_regime_gate_late_favourite: bool,
-    pub br2_high_skew_clip_frac: f32,
-    pub br2_lane_size_late_favourite: f32,
-    pub br2_lane_size_late_confirm: f32,
-    pub br2_lane_size_high_skew: f32,
-    pub br2_regime_gate_enabled: bool,
-    pub br2_regime_gate_window: u8,
-    pub br2_regime_gate_threshold: f32,
-    pub br2_regime_gate_soft_band: f32,
-    pub br2_regime_gate_lane_floor: f32,
-    pub br2_regime_gate_whipsaw_weight: f32,
-    pub br2_high_skew_max_clips: usize,
-    pub br2_high_skew_max_whipsaw_score: f32,
-    pub br2_high_skew_min_realized_vol_180s_bps: f32,
-    pub br2_late_favourite_start_secs: f32,
-    pub br2_late_favourite_threshold: f32,
-    pub br2_late_favourite_min_ask: f32,
-    pub br2_late_favourite_max_ask: f32,
-    pub br2_late_favourite_clip_frac: f32,
-    pub br2_late_favourite_high_cert_clip_frac: f32,
-    pub br2_late_favourite_high_cert_full_clip_edge: f32,
-    pub br2_late_favourite_fragile_high_cert_ask: f32,
-    pub br2_late_favourite_fragile_high_cert_max_edge: f32,
-    pub br2_late_favourite_fragile_high_cert_max_path_efficiency: f32,
-    pub br2_late_favourite_fragile_high_cert_size_frac: f32,
-    pub br2_late_favourite_max_clips: usize,
-    pub br2_late_favourite_min_sustain_secs: f32,
-    pub br2_late_favourite_sweep_depth: usize,
-    pub br2_late_favourite_min_model_confidence: f32,
-    pub br2_late_favourite_min_model_direction_abs: f32,
-    pub br2_late_favourite_max_model_risk: f32,
-    pub br2_late_favourite_min_model_side_p: f32,
-    pub br2_late_favourite_min_model_edge: f32,
-    pub br2_late_favourite_high_cert_min_model_edge: f32,
-    pub br2_late_favourite_high_cert_bypass_model_edge: bool,
-    pub br2_late_favourite_max_whipsaw_score: f32,
-    pub br2_late_favourite_max_reversal_pressure: f32,
-    pub br2_late_favourite_min_path_efficiency: f32,
-    pub br2_late_favourite_min_realized_vol_180s_bps: f32,
-    pub br2_late_favourite_max_observed_range: f32,
-    pub br2_late_favourite_range_soft_throttle: f32,
-    pub br2_late_favourite_range_hard_throttle: f32,
-    pub br2_late_favourite_range_extra_edge: f32,
-    pub br2_late_favourite_range_extra_confidence: f32,
-    pub br2_late_favourite_max_adverse_fast_momentum: f32,
-    pub br2_late_favourite_max_adverse_broad_momentum: f32,
-    pub br2_late_favourite_max_entry_pullback: f32,
-    pub br2_late_favourite_max_avg_entry_drawdown: f32,
-    pub br2_tail_clip_frac: f32,
-    pub br2_tail_max_clips: usize,
-    pub br2_tail_sweep_depth: usize,
-    pub br2_tail_min_ask: f32,
-    pub br2_tail_max_ask: f32,
-    pub br2_tail_min_seconds_to_close: f32,
-    pub br2_tail_min_favourite_unrealized_edge: f32,
-    pub br2_tail_min_observed_range: f32,
-    pub br2_tail_target_favourite_loss_coverage_frac: f32,
-    pub br2_tail_reversal_coverage_frac: f32,
-    pub br2_tail_reversal_min_seconds_to_close: f32,
-    pub br2_tail_reversal_max_seconds_to_close: f32,
-    pub br2_tail_reversal_min_favourite_ask: f32,
-    pub br2_tail_extreme_threshold: f32,
-    pub br2_tail_min_skew_step: f32,
-    pub br2_tail_budget_favourite_spend_frac: f32,
-    pub br2_tail_budget_favourite_upside_frac: f32,
-    pub br2_tail_regime_boost_coverage_frac: f32,
-    pub br2_tail_regime_boost_budget_spend_frac: f32,
-    pub br2_tail_regime_boost_budget_upside_frac: f32,
-    pub br2_tail_regime_boost_min_whipsaw_score: f32,
-    pub br2_tail_regime_boost_min_reversal_pressure: f32,
-    pub br2_tail_regime_boost_min_realized_vol_180s_bps: f32,
-    pub br2_tail_regime_boost_max_path_efficiency: f32,
-    pub back_to_explore_base_clip_usdc: f64,
-    pub back_to_explore_max_clip_usdc: f64,
-    pub back_to_explore_min_pair_cost_for_two_sided: f64,
-    pub back_to_explore_pair_clip_multiplier: f64,
-    pub back_to_explore_directional_strength_mult: f64,
-    pub back_to_explore_residual_taper_start_frac: f64,
-    pub back_to_explore_residual_min_clip_multiplier: f64,
-    pub back_to_explore_range_soft_throttle: f32,
-    pub back_to_explore_range_hard_throttle: f32,
-    pub back_to_explore_range_min_clip_multiplier: f64,
-    pub back_to_explore_range_repair_min_clip_multiplier: f64,
-    pub back_to_explore_range_chop_min_range: f32,
-    pub back_to_explore_range_clean_path_efficiency: f32,
-    pub back_to_explore_range_chop_sign_flip_rate: f32,
-    pub back_to_explore_range_reversal_pressure: f32,
-    pub back_to_explore_clean_path_directional_clip_multiplier: f64,
-    pub back_to_explore_reversal_pressure_clip_multiplier: f64,
-    pub back_to_explore_reversal_pressure_directional_min_signal: f64,
-    pub back_to_explore_reversal_pressure_directional_min_edge: f64,
-    pub back_to_explore_reversal_pressure_directional_clip_multiplier: f64,
-    pub back_to_explore_max_residual_shares: f64,
-    pub back_to_explore_min_clip_multiplier_to_emit: f64,
-    pub back_to_explore_refresh_secs: f64,
-    pub back_to_explore_stop_secs_before_close: f32,
-    pub back_to_explore_min_entry_price: f32,
-    pub back_to_explore_max_entry_price: f32,
-    pub back_to_explore_sweep_depth: usize,
-    pub back_to_explore_high_activity_hours: Vec<u8>,
-    pub back_to_explore_base_participation_rate: f64,
-    pub back_to_explore_two_sided_preference: f64,
-    pub back_to_explore_target_risk_per_clip_frac: f64,
-    pub back_to_explore_base_target_net_shares: f64,
-    pub back_to_explore_good_hour_target_net_mult: f64,
-    pub back_to_explore_policy_scales_jsonl: Option<PathBuf>,
-    pub back_to_explore_debug_signals: bool,
-    /// Phase-3 reversal-risk score modulators. OFF by default; inert defaults
-    /// keep orders byte-identical to baseline.
-    pub br2_reversal_score_enabled: bool,
-    /// Path to the Phase-2 logistic coefficients JSON. None => score path off.
-    pub br2_reversal_score_coeffs_path: Option<PathBuf>,
-    pub br2_reversal_score_cov_min: f32,
-    pub br2_reversal_score_cov_max: f32,
-    pub br2_reversal_score_size_floor: f32,
-    pub br2_reversal_score_size_ceiling: f32,
     pub enforce_model_gate: bool,
     pub model_gate_min_confidence: f32,
     pub model_gate_max_risk: f32,
@@ -1160,151 +266,6 @@ impl Default for WalkForwardConfig {
             loss_streak_cooldown_after: 0,
             loss_streak_cooldown_markets: 0,
             loss_streak_loss_threshold_usdc: 0.0,
-            br2_disable_internal_model_gates: false,
-            br2_participation_clip_frac: 0.0,
-            br2_participation_max_pair_cost: 0.99,
-            br2_participation_max_orders_per_leg: 500,
-            br2_participation_max_inventory_delta_shares: 25.0,
-            br2_participation_repair_inventory_delta_shares: 5.0,
-            br2_participation_refresh_secs: 0.50,
-            br2_participation_stop_secs_before_close: 20.0,
-            br2_hedged_base_enabled: false,
-            br2_hedged_base_max_secs_in: 240.0,
-            br2_hedged_base_max_pair_cost: 0.98,
-            br2_hedged_base_min_minority_leg_frac: 0.20,
-            br2_hedged_base_clip_usdc: 5.0,
-            br2_hedged_base_max_notional_usdc: 0.0,
-            br2_late_directional_overlay_frac: 1e9,
-            br2_min_composite_direction: 0.10,
-            br2_early_clip_frac: 0.00,
-            br2_mid_clip_frac: 0.00,
-            br2_late_clip_frac: 1.0,
-            br2_late_max_fires: 3,
-            br2_late_confirm_min_model_confidence: 0.58,
-            br2_late_confirm_max_model_risk: 0.80,
-            br2_late_confirm_min_model_side_p: 0.58,
-            br2_late_confirm_min_model_edge: 0.02,
-            br2_late_confirm_min_book_skew: 0.06,
-            br2_late_confirm_max_whipsaw_score: 0.85,
-            br2_late_confirm_min_realized_vol_180s_bps: 0.0,
-            br2_late_confirm_max_observed_range: 1.0,
-            br2_recent_regime_gate_enabled: false,
-            br2_recent_regime_gate_min_edge: 0.08,
-            br2_recent_regime_gate_late_confirm: true,
-            br2_recent_regime_gate_high_skew: true,
-            br2_recent_regime_gate_late_favourite: true,
-            br2_high_skew_clip_frac: 0.60,
-            br2_lane_size_late_favourite: 1.0,
-            br2_lane_size_late_confirm: 1.0,
-            br2_lane_size_high_skew: 1.0,
-            br2_regime_gate_enabled: false,
-            br2_regime_gate_window: 3,
-            br2_regime_gate_threshold: 0.50,
-            br2_regime_gate_soft_band: 0.0,
-            br2_regime_gate_lane_floor: 0.0,
-            br2_regime_gate_whipsaw_weight: 0.0,
-            br2_high_skew_max_clips: 5,
-            br2_high_skew_max_whipsaw_score: 0.75,
-            br2_high_skew_min_realized_vol_180s_bps: 0.0,
-            br2_late_favourite_start_secs: 180.0,
-            br2_late_favourite_threshold: 0.22,
-            br2_late_favourite_min_ask: 0.70,
-            br2_late_favourite_max_ask: 0.97,
-            br2_late_favourite_clip_frac: 1.00,
-            br2_late_favourite_high_cert_clip_frac: 1.00,
-            br2_late_favourite_high_cert_full_clip_edge: 0.04,
-            br2_late_favourite_fragile_high_cert_ask: 0.923,
-            br2_late_favourite_fragile_high_cert_max_edge: 0.005,
-            br2_late_favourite_fragile_high_cert_max_path_efficiency: 0.50,
-            br2_late_favourite_fragile_high_cert_size_frac: 0.50,
-            br2_late_favourite_max_clips: 12,
-            br2_late_favourite_min_sustain_secs: 0.0,
-            br2_late_favourite_sweep_depth: 7,
-            br2_late_favourite_min_model_confidence: 0.68,
-            br2_late_favourite_min_model_direction_abs: 0.0,
-            br2_late_favourite_max_model_risk: 0.72,
-            br2_late_favourite_min_model_side_p: 0.62,
-            br2_late_favourite_min_model_edge: 0.03,
-            br2_late_favourite_high_cert_min_model_edge: 0.02,
-            br2_late_favourite_high_cert_bypass_model_edge: false,
-            br2_late_favourite_max_whipsaw_score: 0.75,
-            br2_late_favourite_max_reversal_pressure: 1.0,
-            br2_late_favourite_min_path_efficiency: 0.0,
-            br2_late_favourite_min_realized_vol_180s_bps: 0.0,
-            br2_late_favourite_max_observed_range: 1.0,
-            br2_late_favourite_range_soft_throttle: 0.78,
-            br2_late_favourite_range_hard_throttle: 0.98,
-            br2_late_favourite_range_extra_edge: 0.03,
-            br2_late_favourite_range_extra_confidence: 0.08,
-            br2_late_favourite_max_adverse_fast_momentum: 1.0,
-            br2_late_favourite_max_adverse_broad_momentum: 1.0,
-            br2_late_favourite_max_entry_pullback: 1.0,
-            br2_late_favourite_max_avg_entry_drawdown: 1.0,
-            br2_tail_clip_frac: 0.10,
-            br2_tail_max_clips: 3,
-            br2_tail_sweep_depth: 3,
-            br2_tail_min_ask: 0.01,
-            br2_tail_max_ask: 0.10,
-            br2_tail_min_seconds_to_close: 10.0,
-            br2_tail_min_favourite_unrealized_edge: 0.0,
-            br2_tail_min_observed_range: 0.0,
-            br2_tail_target_favourite_loss_coverage_frac: 0.50,
-            br2_tail_reversal_coverage_frac: 0.00,
-            br2_tail_reversal_min_seconds_to_close: 10.0,
-            br2_tail_reversal_max_seconds_to_close: 35.0,
-            br2_tail_reversal_min_favourite_ask: 0.895,
-            br2_tail_extreme_threshold: 0.30,
-            br2_tail_min_skew_step: 0.02,
-            br2_tail_budget_favourite_spend_frac: 0.20,
-            br2_tail_budget_favourite_upside_frac: 0.25,
-            br2_tail_regime_boost_coverage_frac: 0.0,
-            br2_tail_regime_boost_budget_spend_frac: 0.0,
-            br2_tail_regime_boost_budget_upside_frac: 0.0,
-            br2_tail_regime_boost_min_whipsaw_score: 1.0,
-            br2_tail_regime_boost_min_reversal_pressure: 1.0,
-            br2_tail_regime_boost_min_realized_vol_180s_bps: 1.0e9,
-            br2_tail_regime_boost_max_path_efficiency: -1.0,
-            back_to_explore_base_clip_usdc: 7.24,
-            back_to_explore_max_clip_usdc: 200.0,
-            back_to_explore_min_pair_cost_for_two_sided: 0.96,
-            back_to_explore_pair_clip_multiplier: 0.95,
-            back_to_explore_directional_strength_mult: 1.6,
-            back_to_explore_residual_taper_start_frac: 0.55,
-            back_to_explore_residual_min_clip_multiplier: 0.35,
-            back_to_explore_range_soft_throttle: 1.0,
-            back_to_explore_range_hard_throttle: 1.0,
-            back_to_explore_range_min_clip_multiplier: 1.0,
-            back_to_explore_range_repair_min_clip_multiplier: 1.0,
-            back_to_explore_range_chop_min_range: 1.0,
-            back_to_explore_range_clean_path_efficiency: 1.0,
-            back_to_explore_range_chop_sign_flip_rate: 1.0,
-            back_to_explore_range_reversal_pressure: 1.0,
-            back_to_explore_clean_path_directional_clip_multiplier: 1.0,
-            back_to_explore_reversal_pressure_clip_multiplier: 1.0,
-            back_to_explore_reversal_pressure_directional_min_signal: 1.05,
-            back_to_explore_reversal_pressure_directional_min_edge: 0.01,
-            back_to_explore_reversal_pressure_directional_clip_multiplier: 0.85,
-            back_to_explore_max_residual_shares: 120.0,
-            back_to_explore_min_clip_multiplier_to_emit: 0.18,
-            back_to_explore_refresh_secs: 2.8,
-            back_to_explore_stop_secs_before_close: 4.0,
-            back_to_explore_min_entry_price: 0.02,
-            back_to_explore_max_entry_price: 0.99,
-            back_to_explore_sweep_depth: 6,
-            back_to_explore_high_activity_hours: vec![14, 15, 16, 17, 18, 19],
-            back_to_explore_base_participation_rate: 0.90,
-            back_to_explore_two_sided_preference: 3.5,
-            back_to_explore_target_risk_per_clip_frac: 0.0025,
-            back_to_explore_base_target_net_shares: 6.0,
-            back_to_explore_good_hour_target_net_mult: 3.0,
-            back_to_explore_policy_scales_jsonl: None,
-            back_to_explore_debug_signals: false,
-            br2_reversal_score_enabled: false,
-            br2_reversal_score_coeffs_path: None,
-            br2_reversal_score_cov_min: f32::NAN,
-            br2_reversal_score_cov_max: f32::NAN,
-            br2_reversal_score_size_floor: 1.0,
-            br2_reversal_score_size_ceiling: 1.0,
             enforce_model_gate: true,
             model_gate_min_confidence: 0.68,
             model_gate_max_risk: 0.72,
@@ -1336,61 +297,6 @@ impl Default for WalkForwardConfig {
             decision_log_every_n: 1,
             checkpoint_markets_out: None,
             checkpoint_summary_out: None,
-        }
-    }
-}
-
-impl WalkForwardConfig {
-    fn build_back_to_explore_config(
-        &self,
-        clip: f64,
-        market_window_ns: i64,
-        external_risk_multiplier: f64,
-    ) -> BackToExploreConfig {
-        let base_clip_usdc = (clip.max(self.back_to_explore_base_clip_usdc).max(4.0))
-            .min(self.back_to_explore_max_clip_usdc);
-        BackToExploreConfig {
-            base_clip_usdc,
-            max_clip_usdc: self.back_to_explore_max_clip_usdc,
-            min_pair_cost_for_two_sided: self.back_to_explore_min_pair_cost_for_two_sided,
-            pair_clip_multiplier: self.back_to_explore_pair_clip_multiplier,
-            directional_strength_mult: self.back_to_explore_directional_strength_mult,
-            residual_taper_start_frac: self.back_to_explore_residual_taper_start_frac,
-            residual_min_clip_multiplier: self.back_to_explore_residual_min_clip_multiplier,
-            range_soft_throttle: self.back_to_explore_range_soft_throttle,
-            range_hard_throttle: self.back_to_explore_range_hard_throttle,
-            range_min_clip_multiplier: self.back_to_explore_range_min_clip_multiplier,
-            range_repair_min_clip_multiplier: self.back_to_explore_range_repair_min_clip_multiplier,
-            range_chop_min_range: self.back_to_explore_range_chop_min_range,
-            range_clean_path_efficiency: self.back_to_explore_range_clean_path_efficiency,
-            range_chop_sign_flip_rate: self.back_to_explore_range_chop_sign_flip_rate,
-            range_reversal_pressure: self.back_to_explore_range_reversal_pressure,
-            clean_path_directional_clip_multiplier: self
-                .back_to_explore_clean_path_directional_clip_multiplier,
-            reversal_pressure_clip_multiplier: self
-                .back_to_explore_reversal_pressure_clip_multiplier,
-            reversal_pressure_directional_min_signal: self
-                .back_to_explore_reversal_pressure_directional_min_signal,
-            reversal_pressure_directional_min_edge: self
-                .back_to_explore_reversal_pressure_directional_min_edge,
-            reversal_pressure_directional_clip_multiplier: self
-                .back_to_explore_reversal_pressure_directional_clip_multiplier,
-            max_residual_shares: self.back_to_explore_max_residual_shares,
-            min_clip_multiplier_to_emit: self.back_to_explore_min_clip_multiplier_to_emit,
-            refresh_secs: self.back_to_explore_refresh_secs,
-            stop_secs_before_close: self.back_to_explore_stop_secs_before_close,
-            min_entry_price: self.back_to_explore_min_entry_price,
-            max_entry_price: self.back_to_explore_max_entry_price,
-            sweep_depth: self.back_to_explore_sweep_depth,
-            market_window_ns,
-            high_activity_hours: self.back_to_explore_high_activity_hours.clone(),
-            base_participation_rate: self.back_to_explore_base_participation_rate,
-            two_sided_preference: self.back_to_explore_two_sided_preference,
-            target_risk_per_clip_frac: self.back_to_explore_target_risk_per_clip_frac,
-            base_target_net_shares: self.back_to_explore_base_target_net_shares,
-            good_hour_target_net_mult: self.back_to_explore_good_hour_target_net_mult,
-            external_risk_multiplier,
-            debug_signals: self.back_to_explore_debug_signals,
         }
     }
 }
@@ -1435,8 +341,6 @@ pub struct StrategyMarketResult {
     /// Empty if `fills_count == 0`. Use sparingly for large runs (per-market
     /// rows can grow large).
     pub fills_detail: Vec<crate::runner::Fill>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bonereaper_v2_gate_stats: Option<BonereaperV2GateStats>,
     #[serde(skip_serializing)]
     pub model_training_samples: Vec<MetaTrainingSample>,
 }
@@ -1475,51 +379,6 @@ pub(crate) fn market_open_ns(m: &MarketHandle) -> i64 {
 
 pub(crate) fn market_close_ns(m: &MarketHandle) -> i64 {
     market_close_ts(m).saturating_mul(1_000_000_000)
-}
-
-type BtePolicyScaleMap = HashMap<(String, i64), f64>;
-
-#[derive(Debug, Deserialize)]
-struct BtePolicyScaleRow {
-    slug: String,
-    close_ts: i64,
-    scale: f64,
-}
-
-fn load_bte_policy_scales(path: &Path) -> Result<BtePolicyScaleMap> {
-    let file = File::open(path)
-        .with_context(|| format!("failed to open BTE policy scale file {}", path.display()))?;
-    let mut out = HashMap::new();
-    for (line_idx, line) in BufReader::new(file).lines().enumerate() {
-        let line = line.with_context(|| {
-            format!(
-                "failed to read line {} from BTE policy scale file {}",
-                line_idx + 1,
-                path.display()
-            )
-        })?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let row: BtePolicyScaleRow = serde_json::from_str(&line).with_context(|| {
-            format!(
-                "failed to parse line {} from BTE policy scale file {}",
-                line_idx + 1,
-                path.display()
-            )
-        })?;
-        out.insert((row.slug, row.close_ts), row.scale.clamp(0.0, 3.0));
-    }
-    Ok(out)
-}
-
-fn bte_policy_scale_for(scales: Option<&BtePolicyScaleMap>, market: &MarketHandle) -> f64 {
-    scales
-        .and_then(|map| {
-            map.get(&(market.slug.clone(), market_close_ts(market)))
-                .copied()
-        })
-        .unwrap_or(1.0)
 }
 
 pub(crate) fn outcome_label_resolved_yes(outcome: &str) -> Option<bool> {
@@ -1745,254 +604,6 @@ impl From<&WalkForwardConfig> for SharedRunConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct BonereaperV2SummaryConfig {
-    pub disable_internal_model_gates: bool,
-    pub participation_clip_frac: f32,
-    pub participation_max_pair_cost: f32,
-    pub participation_max_orders_per_leg: usize,
-    pub participation_max_inventory_delta_shares: f64,
-    pub participation_repair_inventory_delta_shares: f64,
-    pub participation_refresh_secs: f32,
-    pub participation_stop_secs_before_close: f32,
-    pub hedged_base_enabled: bool,
-    pub hedged_base_max_secs_in: f32,
-    pub hedged_base_max_pair_cost: f32,
-    pub hedged_base_min_minority_leg_frac: f32,
-    pub hedged_base_clip_usdc: f32,
-    pub hedged_base_max_notional_usdc: f32,
-    pub late_directional_overlay_frac: f32,
-    pub min_composite_direction: f32,
-    pub early_clip_frac: f32,
-    pub mid_clip_frac: f32,
-    pub late_clip_frac: f32,
-    pub late_max_fires: usize,
-    pub late_confirm_min_model_confidence: f32,
-    pub late_confirm_max_model_risk: f32,
-    pub late_confirm_min_model_side_p: f32,
-    pub late_confirm_min_model_edge: f32,
-    pub late_confirm_min_book_skew: f32,
-    pub late_confirm_max_whipsaw_score: f32,
-    pub late_confirm_min_realized_vol_180s_bps: f32,
-    pub late_confirm_max_observed_range: f32,
-    pub recent_regime_gate_enabled: bool,
-    pub recent_regime_gate_min_edge: f32,
-    pub recent_regime_gate_late_confirm: bool,
-    pub recent_regime_gate_high_skew: bool,
-    pub recent_regime_gate_late_favourite: bool,
-    pub high_skew_clip_frac: f32,
-    pub lane_size_late_favourite: f32,
-    pub lane_size_late_confirm: f32,
-    pub lane_size_high_skew: f32,
-    pub regime_gate_enabled: bool,
-    pub regime_gate_window: u8,
-    pub regime_gate_threshold: f32,
-    pub regime_gate_soft_band: f32,
-    pub regime_gate_lane_floor: f32,
-    pub regime_gate_whipsaw_weight: f32,
-    pub high_skew_max_clips: usize,
-    pub high_skew_max_whipsaw_score: f32,
-    pub high_skew_min_realized_vol_180s_bps: f32,
-    pub late_favourite_start_secs: f32,
-    pub late_favourite_threshold: f32,
-    pub late_favourite_min_ask: f32,
-    pub late_favourite_max_ask: f32,
-    pub late_favourite_clip_frac: f32,
-    pub late_favourite_high_cert_clip_frac: f32,
-    pub late_favourite_high_cert_full_clip_edge: f32,
-    pub late_favourite_fragile_high_cert_ask: f32,
-    pub late_favourite_fragile_high_cert_max_edge: f32,
-    pub late_favourite_fragile_high_cert_max_path_efficiency: f32,
-    pub late_favourite_fragile_high_cert_size_frac: f32,
-    pub late_favourite_max_clips: usize,
-    pub late_favourite_min_sustain_secs: f32,
-    pub late_favourite_sweep_depth: usize,
-    pub late_favourite_min_model_confidence: f32,
-    pub late_favourite_min_model_direction_abs: f32,
-    pub late_favourite_max_model_risk: f32,
-    pub late_favourite_min_model_side_p: f32,
-    pub late_favourite_min_model_edge: f32,
-    pub late_favourite_high_cert_min_model_edge: f32,
-    pub late_favourite_high_cert_bypass_model_edge: bool,
-    pub late_favourite_max_whipsaw_score: f32,
-    pub late_favourite_max_reversal_pressure: f32,
-    pub late_favourite_min_path_efficiency: f32,
-    pub late_favourite_min_realized_vol_180s_bps: f32,
-    pub late_favourite_max_observed_range: f32,
-    pub late_favourite_range_soft_throttle: f32,
-    pub late_favourite_range_hard_throttle: f32,
-    pub late_favourite_range_extra_edge: f32,
-    pub late_favourite_range_extra_confidence: f32,
-    pub late_favourite_max_adverse_fast_momentum: f32,
-    pub late_favourite_max_adverse_broad_momentum: f32,
-    pub late_favourite_max_entry_pullback: f32,
-    pub late_favourite_max_avg_entry_drawdown: f32,
-    pub tail_clip_frac: f32,
-    pub tail_max_clips: usize,
-    pub tail_sweep_depth: usize,
-    pub tail_min_ask: f32,
-    pub tail_max_ask: f32,
-    pub tail_min_seconds_to_close: f32,
-    pub tail_min_favourite_unrealized_edge: f32,
-    pub tail_min_observed_range: f32,
-    pub tail_target_favourite_loss_coverage_frac: f32,
-    pub tail_reversal_coverage_frac: f32,
-    pub tail_reversal_min_seconds_to_close: f32,
-    pub tail_reversal_max_seconds_to_close: f32,
-    pub tail_reversal_min_favourite_ask: f32,
-    pub tail_extreme_threshold: f32,
-    pub tail_min_skew_step: f32,
-    pub tail_budget_favourite_spend_frac: f32,
-    pub tail_budget_favourite_upside_frac: f32,
-    pub tail_regime_boost_coverage_frac: f32,
-    pub tail_regime_boost_budget_spend_frac: f32,
-    pub tail_regime_boost_budget_upside_frac: f32,
-    pub tail_regime_boost_min_whipsaw_score: f32,
-    pub tail_regime_boost_min_reversal_pressure: f32,
-    pub tail_regime_boost_min_realized_vol_180s_bps: f32,
-    pub tail_regime_boost_max_path_efficiency: f32,
-    pub reversal_score_enabled: bool,
-    pub reversal_score_cov_min: f32,
-    pub reversal_score_cov_max: f32,
-    pub reversal_score_size_floor: f32,
-    pub reversal_score_size_ceiling: f32,
-    pub reversal_score_coeffs_path: Option<String>,
-}
-
-impl From<&WalkForwardConfig> for BonereaperV2SummaryConfig {
-    fn from(cfg: &WalkForwardConfig) -> Self {
-        Self {
-            disable_internal_model_gates: cfg.br2_disable_internal_model_gates,
-            participation_clip_frac: cfg.br2_participation_clip_frac,
-            participation_max_pair_cost: cfg.br2_participation_max_pair_cost,
-            participation_max_orders_per_leg: cfg.br2_participation_max_orders_per_leg,
-            participation_max_inventory_delta_shares: cfg
-                .br2_participation_max_inventory_delta_shares,
-            participation_repair_inventory_delta_shares: cfg
-                .br2_participation_repair_inventory_delta_shares,
-            participation_refresh_secs: cfg.br2_participation_refresh_secs,
-            participation_stop_secs_before_close: cfg.br2_participation_stop_secs_before_close,
-            hedged_base_enabled: cfg.br2_hedged_base_enabled,
-            hedged_base_max_secs_in: cfg.br2_hedged_base_max_secs_in,
-            hedged_base_max_pair_cost: cfg.br2_hedged_base_max_pair_cost,
-            hedged_base_min_minority_leg_frac: cfg.br2_hedged_base_min_minority_leg_frac,
-            hedged_base_clip_usdc: cfg.br2_hedged_base_clip_usdc,
-            hedged_base_max_notional_usdc: cfg.br2_hedged_base_max_notional_usdc,
-            late_directional_overlay_frac: cfg.br2_late_directional_overlay_frac,
-            min_composite_direction: cfg.br2_min_composite_direction,
-            early_clip_frac: cfg.br2_early_clip_frac,
-            mid_clip_frac: cfg.br2_mid_clip_frac,
-            late_clip_frac: cfg.br2_late_clip_frac,
-            late_max_fires: cfg.br2_late_max_fires,
-            late_confirm_min_model_confidence: cfg.br2_late_confirm_min_model_confidence,
-            late_confirm_max_model_risk: cfg.br2_late_confirm_max_model_risk,
-            late_confirm_min_model_side_p: cfg.br2_late_confirm_min_model_side_p,
-            late_confirm_min_model_edge: cfg.br2_late_confirm_min_model_edge,
-            late_confirm_min_book_skew: cfg.br2_late_confirm_min_book_skew,
-            late_confirm_max_whipsaw_score: cfg.br2_late_confirm_max_whipsaw_score,
-            late_confirm_min_realized_vol_180s_bps: cfg.br2_late_confirm_min_realized_vol_180s_bps,
-            late_confirm_max_observed_range: cfg.br2_late_confirm_max_observed_range,
-            recent_regime_gate_enabled: cfg.br2_recent_regime_gate_enabled,
-            recent_regime_gate_min_edge: cfg.br2_recent_regime_gate_min_edge,
-            recent_regime_gate_late_confirm: cfg.br2_recent_regime_gate_late_confirm,
-            recent_regime_gate_high_skew: cfg.br2_recent_regime_gate_high_skew,
-            recent_regime_gate_late_favourite: cfg.br2_recent_regime_gate_late_favourite,
-            high_skew_clip_frac: cfg.br2_high_skew_clip_frac,
-            lane_size_late_favourite: cfg.br2_lane_size_late_favourite,
-            lane_size_late_confirm: cfg.br2_lane_size_late_confirm,
-            lane_size_high_skew: cfg.br2_lane_size_high_skew,
-            regime_gate_enabled: cfg.br2_regime_gate_enabled,
-            regime_gate_window: cfg.br2_regime_gate_window,
-            regime_gate_threshold: cfg.br2_regime_gate_threshold,
-            regime_gate_soft_band: cfg.br2_regime_gate_soft_band,
-            regime_gate_lane_floor: cfg.br2_regime_gate_lane_floor,
-            regime_gate_whipsaw_weight: cfg.br2_regime_gate_whipsaw_weight,
-            high_skew_max_clips: cfg.br2_high_skew_max_clips,
-            high_skew_max_whipsaw_score: cfg.br2_high_skew_max_whipsaw_score,
-            high_skew_min_realized_vol_180s_bps: cfg.br2_high_skew_min_realized_vol_180s_bps,
-            late_favourite_start_secs: cfg.br2_late_favourite_start_secs,
-            late_favourite_threshold: cfg.br2_late_favourite_threshold,
-            late_favourite_min_ask: cfg.br2_late_favourite_min_ask,
-            late_favourite_max_ask: cfg.br2_late_favourite_max_ask,
-            late_favourite_clip_frac: cfg.br2_late_favourite_clip_frac,
-            late_favourite_high_cert_clip_frac: cfg.br2_late_favourite_high_cert_clip_frac,
-            late_favourite_high_cert_full_clip_edge: cfg
-                .br2_late_favourite_high_cert_full_clip_edge,
-            late_favourite_fragile_high_cert_ask: cfg.br2_late_favourite_fragile_high_cert_ask,
-            late_favourite_fragile_high_cert_max_edge: cfg
-                .br2_late_favourite_fragile_high_cert_max_edge,
-            late_favourite_fragile_high_cert_max_path_efficiency: cfg
-                .br2_late_favourite_fragile_high_cert_max_path_efficiency,
-            late_favourite_fragile_high_cert_size_frac: cfg
-                .br2_late_favourite_fragile_high_cert_size_frac,
-            late_favourite_max_clips: cfg.br2_late_favourite_max_clips,
-            late_favourite_min_sustain_secs: cfg.br2_late_favourite_min_sustain_secs,
-            late_favourite_sweep_depth: cfg.br2_late_favourite_sweep_depth,
-            late_favourite_min_model_confidence: cfg.br2_late_favourite_min_model_confidence,
-            late_favourite_min_model_direction_abs: cfg.br2_late_favourite_min_model_direction_abs,
-            late_favourite_max_model_risk: cfg.br2_late_favourite_max_model_risk,
-            late_favourite_min_model_side_p: cfg.br2_late_favourite_min_model_side_p,
-            late_favourite_min_model_edge: cfg.br2_late_favourite_min_model_edge,
-            late_favourite_high_cert_min_model_edge: cfg
-                .br2_late_favourite_high_cert_min_model_edge,
-            late_favourite_high_cert_bypass_model_edge: cfg
-                .br2_late_favourite_high_cert_bypass_model_edge,
-            late_favourite_max_whipsaw_score: cfg.br2_late_favourite_max_whipsaw_score,
-            late_favourite_max_reversal_pressure: cfg.br2_late_favourite_max_reversal_pressure,
-            late_favourite_min_path_efficiency: cfg.br2_late_favourite_min_path_efficiency,
-            late_favourite_min_realized_vol_180s_bps: cfg
-                .br2_late_favourite_min_realized_vol_180s_bps,
-            late_favourite_max_observed_range: cfg.br2_late_favourite_max_observed_range,
-            late_favourite_range_soft_throttle: cfg.br2_late_favourite_range_soft_throttle,
-            late_favourite_range_hard_throttle: cfg.br2_late_favourite_range_hard_throttle,
-            late_favourite_range_extra_edge: cfg.br2_late_favourite_range_extra_edge,
-            late_favourite_range_extra_confidence: cfg.br2_late_favourite_range_extra_confidence,
-            late_favourite_max_adverse_fast_momentum: cfg
-                .br2_late_favourite_max_adverse_fast_momentum,
-            late_favourite_max_adverse_broad_momentum: cfg
-                .br2_late_favourite_max_adverse_broad_momentum,
-            late_favourite_max_entry_pullback: cfg.br2_late_favourite_max_entry_pullback,
-            late_favourite_max_avg_entry_drawdown: cfg.br2_late_favourite_max_avg_entry_drawdown,
-            tail_clip_frac: cfg.br2_tail_clip_frac,
-            tail_max_clips: cfg.br2_tail_max_clips,
-            tail_sweep_depth: cfg.br2_tail_sweep_depth,
-            tail_min_ask: cfg.br2_tail_min_ask,
-            tail_max_ask: cfg.br2_tail_max_ask,
-            tail_min_seconds_to_close: cfg.br2_tail_min_seconds_to_close,
-            tail_min_favourite_unrealized_edge: cfg.br2_tail_min_favourite_unrealized_edge,
-            tail_min_observed_range: cfg.br2_tail_min_observed_range,
-            tail_target_favourite_loss_coverage_frac: cfg
-                .br2_tail_target_favourite_loss_coverage_frac,
-            tail_reversal_coverage_frac: cfg.br2_tail_reversal_coverage_frac,
-            tail_reversal_min_seconds_to_close: cfg.br2_tail_reversal_min_seconds_to_close,
-            tail_reversal_max_seconds_to_close: cfg.br2_tail_reversal_max_seconds_to_close,
-            tail_reversal_min_favourite_ask: cfg.br2_tail_reversal_min_favourite_ask,
-            tail_extreme_threshold: cfg.br2_tail_extreme_threshold,
-            tail_min_skew_step: cfg.br2_tail_min_skew_step,
-            tail_budget_favourite_spend_frac: cfg.br2_tail_budget_favourite_spend_frac,
-            tail_budget_favourite_upside_frac: cfg.br2_tail_budget_favourite_upside_frac,
-            tail_regime_boost_coverage_frac: cfg.br2_tail_regime_boost_coverage_frac,
-            tail_regime_boost_budget_spend_frac: cfg.br2_tail_regime_boost_budget_spend_frac,
-            tail_regime_boost_budget_upside_frac: cfg.br2_tail_regime_boost_budget_upside_frac,
-            tail_regime_boost_min_whipsaw_score: cfg.br2_tail_regime_boost_min_whipsaw_score,
-            tail_regime_boost_min_reversal_pressure: cfg
-                .br2_tail_regime_boost_min_reversal_pressure,
-            tail_regime_boost_min_realized_vol_180s_bps: cfg
-                .br2_tail_regime_boost_min_realized_vol_180s_bps,
-            tail_regime_boost_max_path_efficiency: cfg.br2_tail_regime_boost_max_path_efficiency,
-            reversal_score_enabled: cfg.br2_reversal_score_enabled,
-            reversal_score_cov_min: cfg.br2_reversal_score_cov_min,
-            reversal_score_cov_max: cfg.br2_reversal_score_cov_max,
-            reversal_score_size_floor: cfg.br2_reversal_score_size_floor,
-            reversal_score_size_ceiling: cfg.br2_reversal_score_size_ceiling,
-            reversal_score_coeffs_path: cfg
-                .br2_reversal_score_coeffs_path
-                .as_ref()
-                .map(|path| path.to_string_lossy().to_string()),
-        }
-    }
-}
-
 fn spot_symbol_mode(configured: &str) -> &'static str {
     if configured.is_empty() {
         "disabled"
@@ -2058,96 +669,6 @@ pub struct StrategyRunConfig {
     pub strategy: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config: Option<Value>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct BackToExploreSummaryConfig {
-    pub base_clip_usdc: f64,
-    pub max_clip_usdc: f64,
-    pub min_pair_cost_for_two_sided: f64,
-    pub pair_clip_multiplier: f64,
-    pub directional_strength_mult: f64,
-    pub residual_taper_start_frac: f64,
-    pub residual_min_clip_multiplier: f64,
-    pub range_soft_throttle: f32,
-    pub range_hard_throttle: f32,
-    pub range_min_clip_multiplier: f64,
-    pub range_repair_min_clip_multiplier: f64,
-    pub range_chop_min_range: f32,
-    pub range_clean_path_efficiency: f32,
-    pub range_chop_sign_flip_rate: f32,
-    pub range_reversal_pressure: f32,
-    pub clean_path_directional_clip_multiplier: f64,
-    pub reversal_pressure_clip_multiplier: f64,
-    pub reversal_pressure_directional_min_signal: f64,
-    pub reversal_pressure_directional_min_edge: f64,
-    pub reversal_pressure_directional_clip_multiplier: f64,
-    pub max_residual_shares: f64,
-    pub min_clip_multiplier_to_emit: f64,
-    pub refresh_secs: f64,
-    pub stop_secs_before_close: f32,
-    pub min_entry_price: f32,
-    pub max_entry_price: f32,
-    pub sweep_depth: usize,
-    pub high_activity_hours: Vec<u8>,
-    pub base_participation_rate: f64,
-    pub two_sided_preference: f64,
-    pub target_risk_per_clip_frac: f64,
-    pub base_target_net_shares: f64,
-    pub good_hour_target_net_mult: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub policy_scales_jsonl: Option<String>,
-    pub debug_signals: bool,
-}
-
-impl From<&WalkForwardConfig> for BackToExploreSummaryConfig {
-    fn from(cfg: &WalkForwardConfig) -> Self {
-        Self {
-            base_clip_usdc: cfg.back_to_explore_base_clip_usdc,
-            max_clip_usdc: cfg.back_to_explore_max_clip_usdc,
-            min_pair_cost_for_two_sided: cfg.back_to_explore_min_pair_cost_for_two_sided,
-            pair_clip_multiplier: cfg.back_to_explore_pair_clip_multiplier,
-            directional_strength_mult: cfg.back_to_explore_directional_strength_mult,
-            residual_taper_start_frac: cfg.back_to_explore_residual_taper_start_frac,
-            residual_min_clip_multiplier: cfg.back_to_explore_residual_min_clip_multiplier,
-            range_soft_throttle: cfg.back_to_explore_range_soft_throttle,
-            range_hard_throttle: cfg.back_to_explore_range_hard_throttle,
-            range_min_clip_multiplier: cfg.back_to_explore_range_min_clip_multiplier,
-            range_repair_min_clip_multiplier: cfg.back_to_explore_range_repair_min_clip_multiplier,
-            range_chop_min_range: cfg.back_to_explore_range_chop_min_range,
-            range_clean_path_efficiency: cfg.back_to_explore_range_clean_path_efficiency,
-            range_chop_sign_flip_rate: cfg.back_to_explore_range_chop_sign_flip_rate,
-            range_reversal_pressure: cfg.back_to_explore_range_reversal_pressure,
-            clean_path_directional_clip_multiplier: cfg
-                .back_to_explore_clean_path_directional_clip_multiplier,
-            reversal_pressure_clip_multiplier: cfg
-                .back_to_explore_reversal_pressure_clip_multiplier,
-            reversal_pressure_directional_min_signal: cfg
-                .back_to_explore_reversal_pressure_directional_min_signal,
-            reversal_pressure_directional_min_edge: cfg
-                .back_to_explore_reversal_pressure_directional_min_edge,
-            reversal_pressure_directional_clip_multiplier: cfg
-                .back_to_explore_reversal_pressure_directional_clip_multiplier,
-            max_residual_shares: cfg.back_to_explore_max_residual_shares,
-            min_clip_multiplier_to_emit: cfg.back_to_explore_min_clip_multiplier_to_emit,
-            refresh_secs: cfg.back_to_explore_refresh_secs,
-            stop_secs_before_close: cfg.back_to_explore_stop_secs_before_close,
-            min_entry_price: cfg.back_to_explore_min_entry_price,
-            max_entry_price: cfg.back_to_explore_max_entry_price,
-            sweep_depth: cfg.back_to_explore_sweep_depth,
-            high_activity_hours: cfg.back_to_explore_high_activity_hours.clone(),
-            base_participation_rate: cfg.back_to_explore_base_participation_rate,
-            two_sided_preference: cfg.back_to_explore_two_sided_preference,
-            target_risk_per_clip_frac: cfg.back_to_explore_target_risk_per_clip_frac,
-            base_target_net_shares: cfg.back_to_explore_base_target_net_shares,
-            good_hour_target_net_mult: cfg.back_to_explore_good_hour_target_net_mult,
-            policy_scales_jsonl: cfg
-                .back_to_explore_policy_scales_jsonl
-                .as_ref()
-                .map(|path| path.to_string_lossy().to_string()),
-            debug_signals: cfg.back_to_explore_debug_signals,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2571,8 +1092,6 @@ pub struct StrategyAggregate {
     pub sharpe_ratio: f64,
     pub by_fill_tag: HashMap<String, FillTagAggregate>,
     pub model_fill_quality: ModelFillQualitySummary,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bonereaper_v2_gate_stats: Option<BonereaperV2GateStats>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -4290,12 +2809,6 @@ async fn run_markets(
     let store_inner = store.store();
     let cfg_arc = Arc::new(cfg.clone());
     let perp = perp.clone();
-    let bte_policy_scales = cfg
-        .back_to_explore_policy_scales_jsonl
-        .as_deref()
-        .map(load_bte_policy_scales)
-        .transpose()?
-        .map(Arc::new);
 
     // Phase 1: bounded async I/O — only load raw data + build runner config.
     // No strategy execution here.
@@ -4425,32 +2938,8 @@ async fn run_markets(
     if cfg.portfolio_mode {
         loaded.sort_by_key(|(_, _, _, _, _, idx)| *idx);
 
-        // Cross-market ladder exposure tracking (for BackToExplore etc.)
-        // We maintain committed net per asset from markets that have already resolved.
-        // When starting a new market we pass the current ladder state so the strategy
-        // can see exposure across other simultaneous windows.
-        let mut asset_net: std::collections::HashMap<String, f64> =
-            std::collections::HashMap::new();
-
-        // Must stay strictly serial — each market's starting equity depends on previous.
+        // Must stay strictly serial: each market's starting equity depends on previous.
         for (m, events_for_run, spot, trades, runner_cfg, idx) in loaded {
-            let asset = if m.slug.starts_with("btc-updown-") || m.slug.starts_with("bitcoin-") {
-                "btc"
-            } else if m.slug.starts_with("eth-updown-") || m.slug.starts_with("ethereum-") {
-                "eth"
-            } else {
-                "other"
-            };
-
-            let btc_net = *asset_net.get("btc").unwrap_or(&0.0);
-            let eth_net = *asset_net.get("eth").unwrap_or(&0.0);
-
-            // Create a per-market runner config with the current ladder state injected.
-            let mut market_runner_cfg = runner_cfg.clone();
-            market_runner_cfg.current_btc_net_shares = btc_net;
-            market_runner_cfg.current_eth_net_shares = eth_net;
-            let bte_policy_scale = bte_policy_scale_for(bte_policy_scales.as_deref(), &m);
-
             let mut per_strategy = HashMap::new();
             for &strat in &cfg.strategies {
                 match run_one_strategy(
@@ -4460,14 +2949,9 @@ async fn run_markets(
                     &events_for_run,
                     &spot,
                     &trades,
-                    &market_runner_cfg,
+                    &runner_cfg,
                     cfg.starting_cash_usdc,
                     cfg.max_clip_usdc,
-                    if strat == StratId::BackToExplore {
-                        bte_policy_scale
-                    } else {
-                        1.0
-                    },
                     perp.clone(),
                 ) {
                     Ok(mut r) => {
@@ -4485,20 +2969,6 @@ async fn run_markets(
             let volatility_band =
                 volatility_band(volatility_range, cfg.volatility_regime_threshold);
             let close_ts = market_close_ts(&m);
-
-            // Update committed ladder exposure from this market's fills (for future markets).
-            if let Some(r) = per_strategy.get("back_to_explore") {
-                let mut delta = 0.0;
-                for fill in &r.fills_detail {
-                    let signed = match fill.side.as_str() {
-                        "BuyYes" | "SellNo" => fill.shares,
-                        "BuyNo" | "SellYes" => -fill.shares,
-                        _ => 0.0,
-                    };
-                    delta += signed;
-                }
-                *asset_net.entry(asset.to_string()).or_insert(0.0) += delta;
-            }
 
             results.push(MarketResult {
                 asset_id: m.asset_id,
@@ -4519,7 +2989,6 @@ async fn run_markets(
             .into_par_iter()
             .map(|(m, events_for_run, spot, trades, runner_cfg, idx)| {
                 let mut per_strategy = HashMap::new();
-                let bte_policy_scale = bte_policy_scale_for(bte_policy_scales.as_deref(), &m);
                 for &strat in &cfg.strategies {
                     match run_one_strategy(
                         strat,
@@ -4531,11 +3000,6 @@ async fn run_markets(
                         &runner_cfg,
                         cfg.starting_cash_usdc,
                         cfg.max_clip_usdc,
-                        if strat == StratId::BackToExplore {
-                            bte_policy_scale
-                        } else {
-                            1.0
-                        },
                         perp.clone(),
                     ) {
                         Ok(mut r) => {
@@ -4583,10 +3047,9 @@ fn run_one_strategy(
     runner_cfg: &RunnerConfig,
     bankroll: f64,
     clip: f64,
-    bte_external_risk_multiplier: f64,
     perp: Option<Arc<PerpState>>,
 ) -> Result<StrategyMarketResult> {
-    let (report, bonereaper_v2_gate_stats) = match strat {
+    let report = match strat {
         StratId::ExoFade | StratId::MayJuneFade => {
             let slug = market_slug.to_ascii_lowercase();
             let token = if slug.starts_with("eth-updown-") {
@@ -4615,194 +3078,11 @@ fn run_one_strategy(
             if let Some(p) = perp {
                 s = s.with_perp(p);
             }
-            (
-                run_backtest(events, spot, trades, &mut s, runner_cfg)?,
-                None,
-            )
+            run_backtest(events, spot, trades, &mut s, runner_cfg)?
         }
-        StratId::PairedMm => {
-            let mut s = PairedMmDense::new(PairedMmDenseConfig {
-                clip_shares: (clip * 0.3 / 5.0).max(0.05), // scale with clip
-                max_rungs_per_leg: 3,
-                max_entry_pair_cost: 1.05,
-                max_leg_imbalance_shares: 0.6,
-                min_refresh_ns: 2_000_000_000,
-                ..PairedMmDenseConfig::default()
-            });
-            (
-                run_backtest(events, spot, trades, &mut s, runner_cfg)?,
-                None,
-            )
-        }
-        StratId::BonereaperV2 => {
-            let reversal_score_coeffs = match &cfg.br2_reversal_score_coeffs_path {
-                Some(path) => {
-                    let content = std::fs::read_to_string(path).with_context(|| {
-                        format!("failed to read reversal-score coeffs {}", path.display())
-                    })?;
-                    let coeffs: ReversalScoreCoeffs =
-                        serde_json::from_str(&content).with_context(|| {
-                            format!(
-                                "failed to parse reversal-score coeffs {} as JSON",
-                                path.display()
-                            )
-                        })?;
-                    Some(coeffs)
-                }
-                None => None,
-            };
-            let mut s = BonereaperV2::new(BonereaperV2Config {
-                bankroll_usdc: bankroll,
-                max_clip_usdc: clip,
-                disable_internal_model_gates: cfg.br2_disable_internal_model_gates,
-                participation_clip_frac: cfg.br2_participation_clip_frac,
-                participation_max_pair_cost: cfg.br2_participation_max_pair_cost,
-                participation_max_orders_per_leg: cfg.br2_participation_max_orders_per_leg,
-                participation_max_inventory_delta_shares: cfg
-                    .br2_participation_max_inventory_delta_shares,
-                participation_repair_inventory_delta_shares: cfg
-                    .br2_participation_repair_inventory_delta_shares,
-                participation_refresh_secs: cfg.br2_participation_refresh_secs,
-                participation_stop_secs_before_close: cfg.br2_participation_stop_secs_before_close,
-                hedged_base_enabled: cfg.br2_hedged_base_enabled,
-                hedged_base_max_secs_in: cfg.br2_hedged_base_max_secs_in,
-                hedged_base_max_pair_cost: cfg.br2_hedged_base_max_pair_cost,
-                hedged_base_min_minority_leg_frac: cfg.br2_hedged_base_min_minority_leg_frac,
-                hedged_base_clip_usdc: cfg.br2_hedged_base_clip_usdc,
-                hedged_base_max_notional_usdc: cfg.br2_hedged_base_max_notional_usdc,
-                late_directional_overlay_frac: cfg.br2_late_directional_overlay_frac,
-                min_composite_direction: cfg.br2_min_composite_direction,
-                early_clip_frac: cfg.br2_early_clip_frac,
-                mid_clip_frac: cfg.br2_mid_clip_frac,
-                late_clip_frac: cfg.br2_late_clip_frac,
-                late_max_fires: cfg.br2_late_max_fires,
-                late_confirm_min_model_confidence: cfg.br2_late_confirm_min_model_confidence,
-                late_confirm_max_model_risk: cfg.br2_late_confirm_max_model_risk,
-                late_confirm_min_model_side_p: cfg.br2_late_confirm_min_model_side_p,
-                late_confirm_min_model_edge: cfg.br2_late_confirm_min_model_edge,
-                late_confirm_min_book_skew: cfg.br2_late_confirm_min_book_skew,
-                late_confirm_max_whipsaw_score: cfg.br2_late_confirm_max_whipsaw_score,
-                late_confirm_min_realized_vol_180s_bps: cfg
-                    .br2_late_confirm_min_realized_vol_180s_bps,
-                late_confirm_max_observed_range: cfg.br2_late_confirm_max_observed_range,
-                recent_regime_gate_enabled: cfg.br2_recent_regime_gate_enabled,
-                recent_regime_gate_min_edge: cfg.br2_recent_regime_gate_min_edge,
-                recent_regime_gate_late_confirm: cfg.br2_recent_regime_gate_late_confirm,
-                recent_regime_gate_high_skew: cfg.br2_recent_regime_gate_high_skew,
-                recent_regime_gate_late_favourite: cfg.br2_recent_regime_gate_late_favourite,
-                high_skew_clip_frac: cfg.br2_high_skew_clip_frac,
-                lane_size_late_favourite: cfg.br2_lane_size_late_favourite,
-                lane_size_late_confirm: cfg.br2_lane_size_late_confirm,
-                lane_size_high_skew: cfg.br2_lane_size_high_skew,
-                regime_gate_enabled: cfg.br2_regime_gate_enabled,
-                regime_gate_window: cfg.br2_regime_gate_window,
-                regime_gate_threshold: cfg.br2_regime_gate_threshold,
-                regime_gate_soft_band: cfg.br2_regime_gate_soft_band,
-                regime_gate_lane_floor: cfg.br2_regime_gate_lane_floor,
-                regime_gate_whipsaw_weight: cfg.br2_regime_gate_whipsaw_weight,
-                high_skew_max_clips: cfg.br2_high_skew_max_clips,
-                high_skew_max_whipsaw_score: cfg.br2_high_skew_max_whipsaw_score,
-                high_skew_min_realized_vol_180s_bps: cfg.br2_high_skew_min_realized_vol_180s_bps,
-                late_favourite_start_secs: cfg.br2_late_favourite_start_secs,
-                late_favourite_threshold: cfg.br2_late_favourite_threshold,
-                late_favourite_min_ask: cfg.br2_late_favourite_min_ask,
-                late_favourite_max_ask: cfg.br2_late_favourite_max_ask,
-                late_favourite_clip_frac: cfg.br2_late_favourite_clip_frac,
-                late_favourite_high_cert_clip_frac: cfg.br2_late_favourite_high_cert_clip_frac,
-                late_favourite_high_cert_full_clip_edge: cfg
-                    .br2_late_favourite_high_cert_full_clip_edge,
-                late_favourite_fragile_high_cert_ask: cfg.br2_late_favourite_fragile_high_cert_ask,
-                late_favourite_fragile_high_cert_max_edge: cfg
-                    .br2_late_favourite_fragile_high_cert_max_edge,
-                late_favourite_fragile_high_cert_max_path_efficiency: cfg
-                    .br2_late_favourite_fragile_high_cert_max_path_efficiency,
-                late_favourite_fragile_high_cert_size_frac: cfg
-                    .br2_late_favourite_fragile_high_cert_size_frac,
-                late_favourite_max_clips: cfg.br2_late_favourite_max_clips,
-                late_favourite_min_sustain_secs: cfg.br2_late_favourite_min_sustain_secs,
-                late_favourite_sweep_depth: cfg.br2_late_favourite_sweep_depth,
-                late_favourite_min_model_confidence: cfg.br2_late_favourite_min_model_confidence,
-                late_favourite_min_model_direction_abs: cfg
-                    .br2_late_favourite_min_model_direction_abs,
-                late_favourite_max_model_risk: cfg.br2_late_favourite_max_model_risk,
-                late_favourite_min_model_side_p: cfg.br2_late_favourite_min_model_side_p,
-                late_favourite_min_model_edge: cfg.br2_late_favourite_min_model_edge,
-                late_favourite_high_cert_min_model_edge: cfg
-                    .br2_late_favourite_high_cert_min_model_edge,
-                late_favourite_high_cert_bypass_model_edge: cfg
-                    .br2_late_favourite_high_cert_bypass_model_edge,
-                late_favourite_max_whipsaw_score: cfg.br2_late_favourite_max_whipsaw_score,
-                late_favourite_max_reversal_pressure: cfg.br2_late_favourite_max_reversal_pressure,
-                late_favourite_min_path_efficiency: cfg.br2_late_favourite_min_path_efficiency,
-                late_favourite_min_realized_vol_180s_bps: cfg
-                    .br2_late_favourite_min_realized_vol_180s_bps,
-                late_favourite_max_observed_range: cfg.br2_late_favourite_max_observed_range,
-                late_favourite_range_soft_throttle: cfg.br2_late_favourite_range_soft_throttle,
-                late_favourite_range_hard_throttle: cfg.br2_late_favourite_range_hard_throttle,
-                late_favourite_range_extra_edge: cfg.br2_late_favourite_range_extra_edge,
-                late_favourite_range_extra_confidence: cfg
-                    .br2_late_favourite_range_extra_confidence,
-                late_favourite_max_adverse_fast_momentum: cfg
-                    .br2_late_favourite_max_adverse_fast_momentum,
-                late_favourite_max_adverse_broad_momentum: cfg
-                    .br2_late_favourite_max_adverse_broad_momentum,
-                late_favourite_max_entry_pullback: cfg.br2_late_favourite_max_entry_pullback,
-                late_favourite_max_avg_entry_drawdown: cfg
-                    .br2_late_favourite_max_avg_entry_drawdown,
-                tail_clip_frac: cfg.br2_tail_clip_frac,
-                tail_max_clips: cfg.br2_tail_max_clips,
-                tail_sweep_depth: cfg.br2_tail_sweep_depth,
-                tail_min_ask: cfg.br2_tail_min_ask,
-                tail_max_ask: cfg.br2_tail_max_ask,
-                tail_min_seconds_to_close: cfg.br2_tail_min_seconds_to_close,
-                tail_min_favourite_unrealized_edge: cfg.br2_tail_min_favourite_unrealized_edge,
-                tail_min_observed_range: cfg.br2_tail_min_observed_range,
-                tail_target_favourite_loss_coverage_frac: cfg
-                    .br2_tail_target_favourite_loss_coverage_frac,
-                tail_reversal_coverage_frac: cfg.br2_tail_reversal_coverage_frac,
-                tail_reversal_min_seconds_to_close: cfg.br2_tail_reversal_min_seconds_to_close,
-                tail_reversal_max_seconds_to_close: cfg.br2_tail_reversal_max_seconds_to_close,
-                tail_reversal_min_favourite_ask: cfg.br2_tail_reversal_min_favourite_ask,
-                tail_extreme_threshold: cfg.br2_tail_extreme_threshold,
-                tail_min_skew_step: cfg.br2_tail_min_skew_step,
-                tail_budget_favourite_spend_frac: cfg.br2_tail_budget_favourite_spend_frac,
-                tail_budget_favourite_upside_frac: cfg.br2_tail_budget_favourite_upside_frac,
-                tail_regime_boost_coverage_frac: cfg.br2_tail_regime_boost_coverage_frac,
-                tail_regime_boost_budget_spend_frac: cfg.br2_tail_regime_boost_budget_spend_frac,
-                tail_regime_boost_budget_upside_frac: cfg.br2_tail_regime_boost_budget_upside_frac,
-                tail_regime_boost_min_whipsaw_score: cfg.br2_tail_regime_boost_min_whipsaw_score,
-                tail_regime_boost_min_reversal_pressure: cfg
-                    .br2_tail_regime_boost_min_reversal_pressure,
-                tail_regime_boost_min_realized_vol_180s_bps: cfg
-                    .br2_tail_regime_boost_min_realized_vol_180s_bps,
-                tail_regime_boost_max_path_efficiency: cfg
-                    .br2_tail_regime_boost_max_path_efficiency,
-                reversal_score_enabled: cfg.br2_reversal_score_enabled,
-                reversal_score_coeffs,
-                reversal_score_cov_min: cfg.br2_reversal_score_cov_min,
-                reversal_score_cov_max: cfg.br2_reversal_score_cov_max,
-                reversal_score_size_floor: cfg.br2_reversal_score_size_floor,
-                reversal_score_size_ceiling: cfg.br2_reversal_score_size_ceiling,
-                ..BonereaperV2Config::default()
-            });
-            let report = run_backtest(events, spot, trades, &mut s, runner_cfg)?;
-            (report, Some(s.gate_stats()))
-        }
-        StratId::BackToExplore => {
-            let market_window_ns = runner_cfg
-                .market_close_ns
-                .saturating_sub(runner_cfg.market_open_ns)
-                .max(1);
-            let bte_cfg = cfg.build_back_to_explore_config(
-                clip,
-                market_window_ns,
-                bte_external_risk_multiplier,
-            );
-            let mut s = BackToExploreTaker::new(bte_cfg);
-            (
-                run_backtest(events, spot, trades, &mut s, runner_cfg)?,
-                None,
-            )
+        StratId::Noop => {
+            let mut s = NoopStrategy;
+            run_backtest(events, spot, trades, &mut s, runner_cfg)?
         }
     };
     let filled_notional_usdc = report.filled_notional_usdc;
@@ -4851,7 +3131,6 @@ fn run_one_strategy(
         clip_used_usdc: clip,
         yes_resolved: report.yes_resolved,
         fills_detail: report.fills,
-        bonereaper_v2_gate_stats,
         model_training_samples: report.model_training_samples,
     })
 }
@@ -4870,11 +3149,6 @@ async fn run_portfolio(
 ) -> Result<(Vec<MarketResult>, WalkForwardSummary)> {
     let store_inner = store.store();
     let empty_spot = Arc::new(SpotHistory::default());
-    let bte_policy_scales = cfg
-        .back_to_explore_policy_scales_jsonl
-        .as_deref()
-        .map(load_bte_policy_scales)
-        .transpose()?;
     let mut equity_by_strategy: HashMap<&'static str, f64> = cfg
         .strategies
         .iter()
@@ -4956,7 +3230,6 @@ async fn run_portfolio(
 
         let mut per_strategy = HashMap::new();
         let mut captured_meta_sample_for_market = false;
-        let bte_policy_scale = bte_policy_scale_for(bte_policy_scales.as_ref(), m);
         for &strat in &cfg.strategies {
             let bankroll = *equity_by_strategy
                 .get(strat.name())
@@ -5091,11 +3364,6 @@ async fn run_portfolio(
                 &runner_cfg,
                 bankroll,
                 clip,
-                if strat == StratId::BackToExplore {
-                    bte_policy_scale
-                } else {
-                    1.0
-                },
                 perp.clone(),
             ) {
                 Ok(mut r) => {
@@ -5331,7 +3599,6 @@ fn aggregate_for_strategy(records: &[&StrategyMarketResult]) -> StrategyAggregat
     let mut total_orders_rejected_model_gate_edge = 0usize;
     let mut tag_fills: HashMap<String, FillTagAccumulator> = HashMap::new();
     let mut model_fill_quality = ModelFillQualityAccumulator::default();
-    let mut bonereaper_v2_gate_stats: Option<BonereaperV2GateStats> = None;
     let first_start_equity = records
         .first()
         .map(|r| r.start_equity_usdc)
@@ -5372,11 +3639,6 @@ fn aggregate_for_strategy(records: &[&StrategyMarketResult]) -> StrategyAggregat
             model_fill_quality.push_fill(fill, r.yes_resolved);
         }
         model_fill_quality.push_market_majority(r);
-        if let Some(stats) = r.bonereaper_v2_gate_stats {
-            bonereaper_v2_gate_stats
-                .get_or_insert_with(BonereaperV2GateStats::default)
-                .add_assign(stats);
-        }
         last_end_equity = r.end_equity_usdc;
         min_end_equity = min_end_equity.min(r.end_equity_usdc);
         max_end_equity = max_end_equity.max(r.end_equity_usdc);
@@ -5479,7 +3741,6 @@ fn aggregate_for_strategy(records: &[&StrategyMarketResult]) -> StrategyAggregat
         },
         by_fill_tag,
         model_fill_quality: model_fill_quality.into_summary(),
-        bonereaper_v2_gate_stats,
     }
 }
 
@@ -5560,20 +3821,9 @@ fn aggregate(results: &[MarketResult], strategies: &[StratId]) -> WalkForwardSum
 fn summary_run_config(cfg: &WalkForwardConfig) -> SummaryRunConfig {
     let mut strategies = Vec::with_capacity(cfg.strategies.len());
     for strat in &cfg.strategies {
-        let config = match strat {
-            StratId::BonereaperV2 => Some(
-                serde_json::to_value(BonereaperV2SummaryConfig::from(cfg))
-                    .expect("serialize bonereaper_v2 summary config"),
-            ),
-            StratId::BackToExplore => Some(
-                serde_json::to_value(BackToExploreSummaryConfig::from(cfg))
-                    .expect("serialize back_to_explore summary config"),
-            ),
-            _ => None,
-        };
         strategies.push(StrategyRunConfig {
             strategy: strat.name(),
-            config,
+            config: None,
         });
     }
     SummaryRunConfig {
@@ -5776,146 +4026,9 @@ mod tests {
     }
 
     #[test]
-    fn profile_loads_nested_bonereaper_v2_section_without_zeroing_missing_fields() {
-        let root = unique_tmp_dir("pm-profile-test");
-        std::fs::create_dir_all(&root).expect("create profile temp dir");
-        let path = root.join("leader.toml");
-        std::fs::write(
-            &path,
-            r#"
-[strategy]
-name = "bonereaper_v2"
-
-[bonereaper_v2]
-replay_sample_ms = 1000
-late_confirm_min_model_edge = 0.025
-late_favourite_max_clips = 8
-late_favourite_min_model_edge = 0.035
-late_favourite_high_cert_full_clip_edge = 0.045
-late_favourite_high_cert_min_model_edge = 0.015
-tail_budget_favourite_spend_frac = 0.20
-model_btc_whipsaw_risk_weight = 0.31
-"#,
-        )
-        .expect("write profile");
-
-        let profile = BonereaperV2Profile::load(&path).expect("load nested profile");
-        let mut cfg = WalkForwardConfig::default();
-        cfg.br2_late_favourite_min_ask = 0.77;
-        profile.apply_to_walkforward_config(&mut cfg);
-        let _ = std::fs::remove_dir_all(&root);
-
-        assert_eq!(cfg.br2_late_favourite_max_clips, 8);
-        assert_eq!(cfg.replay_sample_ms, 1000);
-        assert!((cfg.br2_late_confirm_min_model_edge - 0.025).abs() < f32::EPSILON);
-        assert!((cfg.br2_late_favourite_min_model_edge - 0.035).abs() < f32::EPSILON);
-        assert!((cfg.br2_late_favourite_high_cert_full_clip_edge - 0.045).abs() < f32::EPSILON);
-        assert!((cfg.br2_late_favourite_high_cert_min_model_edge - 0.015).abs() < f32::EPSILON);
-        assert!((cfg.br2_tail_budget_favourite_spend_frac - 0.20).abs() < f32::EPSILON);
-        assert!((cfg.model_btc_whipsaw_risk_weight - 0.31).abs() < f32::EPSILON);
-        assert!((cfg.br2_late_favourite_min_ask - 0.77).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn profile_load_resolves_strategy_to_back_to_explore() {
-        let root = unique_tmp_dir("pm-profile-test-bte");
-        std::fs::create_dir_all(&root).expect("create profile temp dir");
-        let path = root.join("back_to_explore.toml");
-        std::fs::write(
-            &path,
-            r#"
-[strategy]
-name = "back_to_explore"
-
-[back_to_explore]
-base_clip_usdc = 9.0
-max_clip_usdc = 88.0
-refresh_secs = 1.5
-high_activity_hours = [10, 11]
-range_soft_throttle = 0.65
-range_hard_throttle = 0.95
-range_min_clip_multiplier = 0.20
-range_repair_min_clip_multiplier = 0.70
-range_chop_min_range = 0.20
-range_clean_path_efficiency = 0.78
-clean_path_directional_clip_multiplier = 1.25
-reversal_pressure_clip_multiplier = 0.0
-policy_scales_jsonl = "data/runs/regime_clusters/bte_scales.jsonl"
-debug_signals = true
-"#,
-        )
-        .expect("write profile");
-
-        let file = StrategyProfileFile::load(&path).expect("load profile");
-        assert_eq!(file.strategy_name(), Some("back_to_explore"));
-
-        let inactive = file
-            .selected_strategy_profile(&[StratId::BonereaperV2])
-            .expect("selected strategy should be parsed");
-        assert!(inactive.is_none());
-
-        let resolved = file
-            .selected_strategy_profile(&[StratId::BackToExplore])
-            .expect("selected strategy should resolve")
-            .expect("strategy selected");
-        assert_eq!(resolved.strategy_name(), "back_to_explore");
-        let mut cfg = WalkForwardConfig::default();
-        resolved.apply_to_walkforward_config(&mut cfg);
-        assert!((cfg.back_to_explore_base_clip_usdc - 9.0).abs() < f64::EPSILON);
-        assert!((cfg.back_to_explore_max_clip_usdc - 88.0).abs() < f64::EPSILON);
-        assert!((cfg.back_to_explore_refresh_secs - 1.5).abs() < f64::EPSILON);
-        assert_eq!(cfg.back_to_explore_high_activity_hours, vec![10, 11]);
-        assert!((cfg.back_to_explore_range_soft_throttle - 0.65).abs() < f32::EPSILON);
-        assert!((cfg.back_to_explore_range_hard_throttle - 0.95).abs() < f32::EPSILON);
-        assert!((cfg.back_to_explore_range_min_clip_multiplier - 0.20).abs() < f64::EPSILON);
-        assert!((cfg.back_to_explore_range_repair_min_clip_multiplier - 0.70).abs() < f64::EPSILON);
-        assert!((cfg.back_to_explore_range_chop_min_range - 0.20).abs() < f32::EPSILON);
-        assert!((cfg.back_to_explore_range_clean_path_efficiency - 0.78).abs() < f32::EPSILON);
-        assert!(
-            (cfg.back_to_explore_clean_path_directional_clip_multiplier - 1.25).abs()
-                < f64::EPSILON
-        );
-        assert!((cfg.back_to_explore_reversal_pressure_clip_multiplier - 0.0).abs() < f64::EPSILON);
-        assert_eq!(
-            cfg.back_to_explore_policy_scales_jsonl.as_deref(),
-            Some(Path::new("data/runs/regime_clusters/bte_scales.jsonl"))
-        );
-        assert!(cfg.back_to_explore_debug_signals);
-
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn back_to_explore_config_uses_walkforward_fields_and_run_clip_floor() {
-        let mut cfg = WalkForwardConfig::default();
-        cfg.back_to_explore_base_clip_usdc = 15.0;
-        cfg.back_to_explore_max_clip_usdc = 20.0;
-        cfg.back_to_explore_base_participation_rate = 0.77;
-        cfg.back_to_explore_range_soft_throttle = 0.64;
-        cfg.back_to_explore_range_min_clip_multiplier = 0.25;
-        cfg.back_to_explore_range_repair_min_clip_multiplier = 0.75;
-        cfg.back_to_explore_range_chop_min_range = 0.22;
-        cfg.back_to_explore_clean_path_directional_clip_multiplier = 1.20;
-        cfg.back_to_explore_reversal_pressure_clip_multiplier = 0.15;
-
-        let bte_cfg = cfg.build_back_to_explore_config(6.0, 123_456_789, 0.25);
-
-        assert!((bte_cfg.base_clip_usdc - 15.0).abs() < f64::EPSILON);
-        assert!((bte_cfg.market_window_ns - 123_456_789) == 0);
-        assert!((bte_cfg.base_participation_rate - 0.77).abs() < f64::EPSILON);
-        assert!((bte_cfg.range_soft_throttle - 0.64).abs() < f32::EPSILON);
-        assert!((bte_cfg.range_min_clip_multiplier - 0.25).abs() < f64::EPSILON);
-        assert!((bte_cfg.range_repair_min_clip_multiplier - 0.75).abs() < f64::EPSILON);
-        assert!((bte_cfg.range_chop_min_range - 0.22).abs() < f32::EPSILON);
-        assert!((bte_cfg.clean_path_directional_clip_multiplier - 1.20).abs() < f64::EPSILON);
-        assert!((bte_cfg.reversal_pressure_clip_multiplier - 0.15).abs() < f64::EPSILON);
-        assert!((bte_cfg.external_risk_multiplier - 0.25).abs() < f64::EPSILON);
-    }
-
-    #[test]
     fn summary_run_config_keeps_archived_knobs_out_of_shared_config() {
         let mut cfg = WalkForwardConfig::default();
-        cfg.strategies = vec![StratId::BackToExplore];
+        cfg.strategies = vec![StratId::ExoFade];
 
         let value = serde_json::to_value(summary_run_config(&cfg)).unwrap();
         let shared = value.get("shared").expect("shared config missing");
@@ -5949,29 +4062,8 @@ debug_signals = true
                 .get("model_spot_reversal_pressure_risk_weight")
                 .is_some()
         );
-        assert_eq!(strategies[0].get("strategy").unwrap(), "back_to_explore");
-        assert!(strategies[0].get("config").is_some());
-    }
-
-    #[test]
-    fn hedged_first_profile_enables_arb_base_and_overlay_cap() {
-        // The shipped profile must parse and turn the hedge-first lane on while
-        // capping the directional overlay. Resolve the path relative to the
-        // workspace root (CARGO_MANIFEST_DIR points at crates/pm-app).
-        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let path = manifest
-            .join("../../configs/archive/2026-06-02/bonereaper_v2_hedged_first.toml")
-            .canonicalize()
-            .expect("resolve hedged-first profile path");
-
-        let profile = BonereaperV2Profile::load(&path).expect("load hedged-first profile");
-        let mut cfg = WalkForwardConfig::default();
-        profile.apply_to_walkforward_config(&mut cfg);
-
-        assert!(cfg.br2_hedged_base_enabled);
-        assert!((cfg.br2_hedged_base_max_notional_usdc - 40.0).abs() < f32::EPSILON);
-        assert!((cfg.br2_hedged_base_max_pair_cost - 0.98).abs() < f32::EPSILON);
-        assert!((cfg.br2_late_directional_overlay_frac - 0.064).abs() < f32::EPSILON);
+        assert_eq!(strategies[0].get("strategy").unwrap(), "exo_fade");
+        assert!(strategies[0].get("config").is_none());
     }
 
     #[test]
@@ -6022,7 +4114,7 @@ debug_signals = true
     fn aggregate_handles_per_strategy_metrics() {
         let mut result_reactive = HashMap::new();
         result_reactive.insert(
-            StratId::BackToExplore.name(),
+            StratId::ExoFade.name(),
             StrategyMarketResult {
                 orders_submitted: 10,
                 orders_filled: 6,
@@ -6048,14 +4140,13 @@ debug_signals = true
                 clip_used_usdc: 2.0,
                 yes_resolved: true,
                 fills_detail: vec![],
-                bonereaper_v2_gate_stats: None,
                 model_training_samples: vec![],
             },
         );
 
-        let mut result_bonereaper = HashMap::new();
-        result_bonereaper.insert(
-            StratId::BonereaperV2.name(),
+        let mut result_noop = HashMap::new();
+        result_noop.insert(
+            StratId::Noop.name(),
             StrategyMarketResult {
                 orders_submitted: 3,
                 orders_filled: 1,
@@ -6081,14 +4172,13 @@ debug_signals = true
                 clip_used_usdc: 1.5,
                 yes_resolved: false,
                 fills_detail: vec![],
-                bonereaper_v2_gate_stats: None,
                 model_training_samples: vec![],
             },
         );
 
         let mut result_no_order = HashMap::new();
         result_no_order.insert(
-            StratId::PairedMm.name(),
+            StratId::Noop.name(),
             StrategyMarketResult {
                 orders_submitted: 0,
                 orders_filled: 0,
@@ -6114,7 +4204,6 @@ debug_signals = true
                 clip_used_usdc: 3.0,
                 yes_resolved: true,
                 fills_detail: vec![],
-                bonereaper_v2_gate_stats: None,
                 model_training_samples: vec![],
             },
         );
@@ -6136,7 +4225,7 @@ debug_signals = true
                 outcome_label: "No".to_string(),
                 volatility_range: 0.20,
                 volatility_band: VolatilityBand::High,
-                per_strategy: result_bonereaper,
+                per_strategy: result_noop,
             },
             MarketResult {
                 asset_id: "3".to_string(),
@@ -6149,21 +4238,14 @@ debug_signals = true
             },
         ];
 
-        let summary = aggregate(
-            &results,
-            &[
-                StratId::BackToExplore,
-                StratId::BonereaperV2,
-                StratId::PairedMm,
-            ],
-        );
+        let summary = aggregate(&results, &[StratId::ExoFade, StratId::Noop]);
         assert_eq!(summary.markets_attempted, 3);
         assert_eq!(summary.markets_succeeded, 3);
 
         let reactive = summary
             .per_strategy
-            .get(StratId::BackToExplore.name())
-            .expect("back_to_explore missing");
+            .get(StratId::ExoFade.name())
+            .expect("exo_fade missing");
         assert_eq!(reactive.markets_with_orders, 1);
         assert_eq!(reactive.total_orders_filled, 6);
         assert_eq!(reactive.total_orders_filled_taker, 4);
@@ -6175,31 +4257,30 @@ debug_signals = true
         assert_eq!(reactive.worst_market_pnl, 4.0);
         assert!((reactive.hit_rate - 1.0).abs() < f64::EPSILON);
 
-        let paired = summary
+        let no_order = summary
             .per_strategy
-            .get(StratId::PairedMm.name())
-            .expect("paired missing");
-        assert_eq!(paired.markets_with_orders, 0);
-        assert_eq!(paired.total_orders_filled, 0);
-        assert_eq!(paired.total_pnl_usdc, 0.0);
+            .get(StratId::Noop.name())
+            .expect("noop missing");
+        assert_eq!(no_order.markets_with_orders, 1);
+        assert_eq!(no_order.total_orders_filled, 1);
 
         let low = summary
             .by_volatility_band
             .get(&VolatilityBand::Low)
             .expect("low band missing");
-        let low_back_to_explore = low
-            .get(StratId::BackToExplore.name())
-            .expect("low back_to_explore missing");
-        assert_eq!(low_back_to_explore.total_pnl_usdc, 4.0);
+        let low_reactive = low
+            .get(StratId::ExoFade.name())
+            .expect("low exo_fade missing");
+        assert_eq!(low_reactive.total_pnl_usdc, 4.0);
 
         let high = summary
             .by_volatility_band
             .get(&VolatilityBand::High)
             .expect("high band missing");
-        let high_bonereaper_v2 = high
-            .get(StratId::BonereaperV2.name())
-            .expect("high bonereaper_v2 missing");
-        assert_eq!(high_bonereaper_v2.total_pnl_usdc, -2.0);
+        let high_noop = high
+            .get(StratId::Noop.name())
+            .expect("high noop missing");
+        assert_eq!(high_noop.total_pnl_usdc, -2.0);
         assert_eq!(reactive.sharpe_ratio, 0.0);
     }
 
@@ -6286,7 +4367,6 @@ debug_signals = true
             clip_used_usdc: filled_notional_usdc,
             yes_resolved,
             fills_detail,
-            bonereaper_v2_gate_stats: None,
             model_training_samples: vec![],
         }
     }
@@ -6523,7 +4603,7 @@ debug_signals = true
         cfg.spot_symbol = "auto".into();
         assert!(resolve_perp_symbol(&cfg).is_none());
 
-        cfg.strategies = vec![StratId::BonereaperV2];
+        cfg.strategies = vec![StratId::Noop];
         cfg.spot_symbol = "BTCUSDT".into();
         assert!(resolve_perp_symbol(&cfg).is_none());
     }

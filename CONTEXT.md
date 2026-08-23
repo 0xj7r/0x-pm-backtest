@@ -29,10 +29,8 @@ Decision logic that must match live is pure functions in `pm-alpha::decide` (SSO
 
 | Name | Type | Status |
 |---|---|---|
-| `exo_fade` | Exogenous fade + timed exit | **canonical** — quant reference impl |
-| `back_to_explore` | Two-sided ladder taker | legacy paired-maker |
-| `paired_mm` | Sub-parity quoting | research |
-| `bonereaper_v2` | Late favourite lanes | research |
+| `exo_fade` | Exogenous fade + timed exit | canonical reference; scheduled for removal in Plan 2 |
+| `noop` | Emits no orders | baseline |
 
 ## Quant signals (SSOT)
 

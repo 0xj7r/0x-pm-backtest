@@ -469,7 +469,7 @@ Cross-check by parallel agents: code review, trade decomposition, harness backte
 | `exo_fade_equivalence` (44 scenarios) | **0 mismatches — GATE B PASS** |
 | `frozen_fade_decide_config` | Ungated (gates off) — matches live shadow |
 | Harness parity gap | `from_harness` leaves `min_entry_sigma_bps=0`, `skip_saturday=false` — **PR2** |
-| `configs/thesis_a_btc5m.toml` | Fixed: `kelly_sizing=false` (was true, contradicted H7) |
+| `configs/thesis_a_btc5m.toml` (deleted in the 2026-08-23 configs purge) | Fixed: `kelly_sizing=false` (was true, contradicted H7) |
 
 ### VERIFY backtest matrix (`scripts/thesis_gate_sweep.sh`)
 

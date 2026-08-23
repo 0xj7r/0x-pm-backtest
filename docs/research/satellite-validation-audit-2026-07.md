@@ -421,12 +421,13 @@ with t > 2.
    from full-history fills; the May section then shows BR2-only at -$18.81 and
    `expanded_high_flip` flipping sign. The Routing Hypothesis section partly
    acknowledges this; the directional-satellite doc cites only the favourable half.
-5. **Retraction propagation.** The 2026-07-01 retraction banners (satellite doc,
-   handoff) are correct but the downstream artifacts they motivated
-   (`configs/exo_fade_chop_router.toml`, `configs/mayjune_btc5m.toml` regime flags,
-   `scripts/score_regime_gate_sweep.py`) still exist without banners; the mayjune
-   profile encodes the opposite gate polarity from what prod briefly ran, which the
-   handoff itself flagged as unreconciled.
+5. **Retraction propagation (resolved 2026-08-23).** The 2026-07-01 retraction
+   banners (satellite doc, handoff) were correct but the downstream artifacts
+   they motivated (`configs/exo_fade_chop_router.toml`, `configs/mayjune_btc5m.toml`
+   regime flags, `scripts/score_regime_gate_sweep.py`) persisted without banners
+   until the 2026-08-23 framework reset deleted the entire `configs/` directory
+   (inert under the profile-removal) and the regime-gate sweep script; the
+   unreconciled mayjune gate-polarity question is now moot.
 6. **F6 naming collision** (protocol regime-gate F6 vs autoloop aggressor-flow F6),
    plus any "calm-day floor" narrative that still lists F6 or a whale mirror as
    components: the repo evidence says F6 is dead and the roller is unmeasured.

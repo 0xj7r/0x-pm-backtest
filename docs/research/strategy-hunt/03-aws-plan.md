@@ -117,7 +117,8 @@ AWS_PROFILE=visumlabs aws s3 ls s3://pm-research-backtest-prod/results/$RUN_ID/ 
 ### 2. W3 — Champion bonereaper @ $1K (frozen meta, proven knobs)
 
 Reuses the completed May-28 training run. No retrain. Matches
-[`configs/bonereaper_v2_favourite_062901.command.txt`](../../../configs/bonereaper_v2_favourite_062901.command.txt)
+`configs/bonereaper_v2_favourite_062901.command.txt` (deleted in the
+2026-08-23 configs purge; bonereaper_v2 is a removed legacy strategy)
 (+899% on prior full history).
 
 ```bash

@@ -1,6 +1,8 @@
 # AWS backtest runbook
 
 > NOTE 2026-08-23: ops mechanics remain useful, but this predates the truthful-latency standard and references retired strategy profiles. All new runs use 750/1250ms accounting; see docs/superpowers/specs/2026-08-23-framework-reset-design.md.
+>
+> UPDATE 2026-08-23: the `configs/` directory, `scripts/pipeline/ec2/launch_ec2_portfolio_grid.sh`, and the `bonereaper_v2` strategy referenced throughout this doc were deleted in the framework reset's configs purge. Every `configs/...` path and `launch_ec2_portfolio_grid.sh` command below is historical record only and will not run as written.
 
 This repo should treat local runs as smoke tests only. Full training, sizing
 grids, and long walk-forward runs belong on AWS against S3 data.

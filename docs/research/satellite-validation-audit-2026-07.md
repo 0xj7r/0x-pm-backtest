@@ -134,7 +134,7 @@ latency). Selected and evaluated on the same 6 days.
 **Outcome.** OOS Jun 20-30 the gates blocked 99% of entries (10 entries in 10 days)
 while the ungated stream was green every day (`docs/PROD.md` §2 history; retraction
 banners on the handoff and on `docs/directional_satellite_candidates.md`). Removed
-from prod 2026-07-01. June backfill (`docs/june-2026-backfill-results.md`) confirms
+from prod 2026-07-01. June backfill (`docs/archive/2026-07/june-2026-backfill-results.md`) confirms
 the ungated frozen config made +$17,689 fee-net over the same month.
 
 **Verdict.** REJECTED-BY-EVIDENCE. Kept here because it is the cautionary template:

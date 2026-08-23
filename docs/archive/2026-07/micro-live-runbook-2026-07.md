@@ -6,7 +6,7 @@ here is armed until the user explicitly authorizes it.
 
 ## Preconditions (all must hold before presenting the go-decision)
 
-1. v1 gate verdict written into docs/stability-gate-preregistration-2026-07.md
+1. v1 gate verdict written into docs/archive/2026-07/stability-gate-preregistration-2026-07.md
    (pass -> frozen config gains the gate; fail -> ungated stays). This fixes
    WHICH config goes live. Do not proceed without a written verdict.
 2. 48h combined paper soak of the exact live stack (winning config + consensus

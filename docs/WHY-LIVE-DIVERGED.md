@@ -74,7 +74,7 @@ ITS reading. Three consequences, all measured:
 2. **Observer-dependent sides.** Near the strike, observer A's excursion can
    cross UP's threshold while observer B's crosses DOWN's. Measured directly:
    two IDENTICAL engines on the SAME box picked opposite sides on 42% of
-   early entries (docs/decision-stability-2026-07.md). This is not a bug in
+   early entries (docs/archive/2026-07/decision-stability-2026-07.md). This is not a bug in
    either process; it is what a threshold rule does to noisy inputs.
 3. **Adverse selection on phantoms.** When the excursion was an artifact, the
    engine bought the side the phantom move favored; the market had not
@@ -145,7 +145,7 @@ single-sourced and runs in CI (crates/pm-alpha/src/equivalence.rs).
 ## Promotion runbook (exact steps, when the gate verdict passes)
 
 1. Confirm verdict: 4/4 criteria in
-   docs/stability-gate-preregistration-2026-07.md against the soak week's
+   docs/archive/2026-07/stability-gate-preregistration-2026-07.md against the soak week's
    `twin_agreement.jsonl` + `realization.jsonl`.
 2. Config change (one commit, main):
    add `--min-secs-from-open 15` and `--max-p-side 0.85` to

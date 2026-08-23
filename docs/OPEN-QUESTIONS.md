@@ -9,7 +9,7 @@ doc-triage banners elsewhere point back here rather than duplicating the detail.
 `min_entry_ask 0.45` blocks entries that buy the cheap underdog (ask 0.30-0.45, the side the
 market prices as unlikely while the model says otherwise). On June 13-30 backtest data
 (truthful 1250ms latency, fee-net, $50 clips), adding that gate alone turns the bare config's
-+$1,957 into -$149, a -$2,106 swing (`docs/deployed-config-negative-2026-07.md`). The gate was
++$1,957 into -$149, a -$2,106 swing (`docs/archive/2026-07/deployed-config-negative-2026-07.md`). The gate was
 added on a theory that these trades lose live even though they win in backtest, but neither
 live stream running at the time (shadow-final, fast_live) ever took them, so the theory was
 never tested against data.
@@ -23,13 +23,13 @@ further live data will accrue from it.
 **What would answer it:** the Jul 1-12 shadow logs surviving in
 `s3://pm-research-data-prod/shadow/pm-alpha/dublin/` may contain enough of the no-gate stream's
 live outcomes to compare against the matched-config replay described in
-`docs/deployed-config-negative-2026-07.md`. Pull that data and run the comparison before
+`docs/archive/2026-07/deployed-config-negative-2026-07.md`. Pull that data and run the comparison before
 deciding whether to drop `min_entry_ask` in any future deployment.
 
 ## 2. v1 stability-gate verdict (never rendered)
 
 The v1 stability gate (`min_secs_from_open=15`, `max_p_side=0.85`) was pre-registered in
-`docs/stability-gate-preregistration-2026-07.md` with four frozen pass criteria, to be judged
+`docs/archive/2026-07/stability-gate-preregistration-2026-07.md` with four frozen pass criteria, to be judged
 on `twin_agreement_report.jsonl` and `realization.jsonl` after 7 non-Saturday soak days:
 
 1. Twin agreement on the gated subset >= 75% (week aggregate), at least 12 points above the

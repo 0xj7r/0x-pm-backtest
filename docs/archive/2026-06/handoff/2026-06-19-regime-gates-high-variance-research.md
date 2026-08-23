@@ -1,4 +1,6 @@
 > **SUPERSEDED 2026-07-01.** The regime gates this handoff deployed (skip_calm, skip_expanded_mixed) were overfit on 6 days of live tape and blocked 99% of entries out-of-sample Jun 20-30; they were removed from prod. The prod config and deploy reference is now docs/PROD.md. Historical record below; do not copy-paste its command lines.
+>
+> ARCHIVED 2026-08-23. The base-gate config blocks in sections 2 and 10 (min_entry_ask 0.45, open_fav, skip_spot_misalign) were later measured backtest-NEGATIVE (-$459 June, docs/archive/2026-07/deployed-config-negative-2026-07.md). Do not copy any command line from this file.
 
 # Agent Handoff: Regime Gates + High-Variance Strategy Research
 
@@ -234,7 +236,7 @@ User explicitly deferred 0.65–0.75 fav sleeve. Touch band showed ~74% hit in a
 2. **`pm-strategy::regime::MarketRegimeCluster`** (8 fill-time clusters) — used by BTE/BR2
 3. **Daily spot labels** (`scripts/research/june_regime_compare.py`) — `directional_trend`, `chop_whipsaw`, `high_vol`
 
-v1 alpha regime puts ~80% in `expanded_mixed` (`docs/alpha-roadmap.md`) — too coarse for routing.
+v1 alpha regime puts ~80% in `expanded_mixed` (`docs/archive/2026-07/alpha-roadmap.md`) — too coarse for routing.
 
 ### 6.2 Validated strategies (strategy hunt)
 

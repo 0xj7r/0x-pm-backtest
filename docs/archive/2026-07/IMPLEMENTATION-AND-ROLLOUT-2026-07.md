@@ -23,7 +23,7 @@ out-of-sample evidence. Real money does not move until the gates in section 5 pa
 
 1. **The engine's math was fine.** Canonical replay of June 13-30 (fees, latency,
    official resolution outcomes): +$17,689 at $50 clips, all 15 trading days green,
-   robust to parameter perturbation (docs/june-2026-backfill-results.md,
+   robust to parameter perturbation (docs/archive/2026-07/june-2026-backfill-results.md,
    docs/data-validation-and-chop-sweep-2026-07.md).
 2. **The process was not.** A reimplemented live binary wrong-sided 61% of trades; a
    win-streak automation doubled clips into a whipsaw; the ledger reported +$278 on a
@@ -36,7 +36,7 @@ out-of-sample evidence. Real money does not move until the gates in section 5 pa
    near the strike, the highest-conviction early entries are feed artifacts: live
    they hit 39.6% while paying maximum fees. Measured live realization Jun 16-18 was
    0.34 vs the 0.82 break-even; on calm days it was 0.8-1.1
-   (docs/live-divergence-analysis-2026-07.md, docs/decision-stability-2026-07.md).
+   (docs/archive/2026-07/live-divergence-analysis-2026-07.md, docs/archive/2026-07/decision-stability-2026-07.md).
 4. **Bad windows cannot be predicted, only survived and filtered.** Regime gates were
    tried twice and failed twice (the June version blocked 99% of entries out of
    sample). P&L circuit breakers destroy the recoveries. Protection must come from
@@ -102,7 +102,7 @@ out-of-sample evidence. Real money does not move until the gates in section 5 pa
   with a path (docs/research/satellite-validation-audit-2026-07.md).
 - Stability gate PRE-REGISTERED before OOS data: `min_secs_from_open=15` +
   `max_p_side=0.85`, four fixed pass criteria, no threshold iteration on the same
-  week (docs/stability-gate-preregistration-2026-07.md).
+  week (docs/archive/2026-07/stability-gate-preregistration-2026-07.md).
 
 ### 3.6 Data
 

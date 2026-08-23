@@ -142,13 +142,13 @@ git commit -m "rescue: telonex direct ingest + ec2 launcher + api notes from cro
 ```bash
 git show d92d08dc | head -120   # past-close resolution-marking idea (patch targets a deleted file; take the idea only)
 ```
-Also skim `docs/deployed-config-negative-2026-07.md` (section "The experiment") and `docs/stability-gate-preregistration-2026-07.md` (the four frozen criteria).
+Also skim `docs/archive/2026-07/deployed-config-negative-2026-07.md` (section "The experiment") and `docs/archive/2026-07/stability-gate-preregistration-2026-07.md` (the four frozen criteria).
 
 - [ ] **Step 2: Create the doc**
 
 Content must cover, in this order, with dates and numbers taken from the named source docs:
-1. **Cheap-underdog realization (never answered).** min_entry_ask 0.45 was backtest-negative (-$2,106 swing, docs/deployed-config-negative-2026-07.md); the shadow-recommended stream was deployed 2026-07-09 to measure live realization of cheap fades; repo froze 2026-07-10; Dublin box since terminated. Partial evidence may exist in s3://pm-research-data-prod/shadow/pm-alpha/dublin/ (Jul 1-12).
-2. **v1 stability-gate verdict (never rendered).** Four frozen criteria in docs/stability-gate-preregistration-2026-07.md; judgment was due ~Jul 16 after the soak reset; never judged.
+1. **Cheap-underdog realization (never answered).** min_entry_ask 0.45 was backtest-negative (-$2,106 swing, docs/archive/2026-07/deployed-config-negative-2026-07.md); the shadow-recommended stream was deployed 2026-07-09 to measure live realization of cheap fades; repo froze 2026-07-10; Dublin box since terminated. Partial evidence may exist in s3://pm-research-data-prod/shadow/pm-alpha/dublin/ (Jul 1-12).
+2. **v1 stability-gate verdict (never rendered).** Four frozen criteria in docs/archive/2026-07/stability-gate-preregistration-2026-07.md; judgment was due ~Jul 16 after the soak reset; never judged.
 3. **Past-close resolution marking (idea from d92d08dc).** Entries whose timed exit lands after market close should be marked to resolution rather than exited at a stale quote; the original patch targeted `crates/pm-app/src/shadow.rs` which no longer exists; re-evaluate against pm-backtest in Plan 2.
 4. **Both-sides hold / sell-loser (queued idea).** When sequential fades hold both sides below combined cost 1, test selling the losing leg on re-reversal vs redeeming at zero (from memory note both-sides-hold-sell-loser-idea).
 

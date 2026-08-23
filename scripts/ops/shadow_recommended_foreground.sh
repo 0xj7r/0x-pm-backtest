@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Foreground launcher for the RECOMMENDED-config shadow stream (no min_entry_ask).
 # Mirrors shadow_final_foreground.sh but sources shadow_recommended_flags.sh and
-# writes to its own out dir. Paper/log-only. See docs/deployed-config-negative-2026-07.md.
+# writes to its own out dir. Paper/log-only. See docs/archive/2026-07/deployed-config-negative-2026-07.md.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

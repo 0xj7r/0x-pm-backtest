@@ -1,5 +1,7 @@
 # AWS backtest runbook
 
+> NOTE 2026-08-23: ops mechanics remain useful, but this predates the truthful-latency standard and references retired strategy profiles. All new runs use 750/1250ms accounting; see docs/superpowers/specs/2026-08-23-framework-reset-design.md.
+
 This repo should treat local runs as smoke tests only. Full training, sizing
 grids, and long walk-forward runs belong on AWS against S3 data.
 

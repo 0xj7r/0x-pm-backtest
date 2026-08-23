@@ -1,5 +1,7 @@
 # June 2026 backfill: canonical harness verdict
 
+> ARCHIVED 2026-08-23. All figures here are 250ms-latency upper bounds. Truthful-latency June is +$2,506 at 1250ms; see docs/latency-truth-2026-07.md before quoting anything from this file.
+
 **Date:** 2026-07-01
 **Data:** Telonex books/trades re-ingested Jun 18-30 (fresh markets parquet; the
 prior gap was a stale local parquet, not missing data at Telonex). Raw days

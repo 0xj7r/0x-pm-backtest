@@ -8,7 +8,7 @@ accounting) per market, and reports:
   - $50 at-touch P&L of the live-decided set vs the replay-decided set
     (realization ratio; break-even 0.82 per docs/drawdown-sizing-2026-07.md)
   - the same split by entry-second bucket (<15s vs >=15s from window open),
-    the candidate gate from docs/live-divergence-analysis-2026-07.md
+    the candidate gate from docs/archive/2026-07/live-divergence-analysis-2026-07.md
 
 Usage:
   python3 scripts/ops/soak_realization_report.py --date 2026-07-02 \

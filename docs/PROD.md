@@ -5,8 +5,8 @@ production. If another doc disagrees with this one, this one wins.
 
 Why live results can diverge from backtests, and every counter-measure:
 docs/WHY-LIVE-DIVERGED.md. Rollout state and plan:
-docs/IMPLEMENTATION-AND-ROLLOUT-2026-07.md. Pending gate (judged ~Jul 9-10):
-docs/stability-gate-preregistration-2026-07.md.
+docs/archive/2026-07/IMPLEMENTATION-AND-ROLLOUT-2026-07.md. Pending gate (judged ~Jul 9-10):
+docs/archive/2026-07/stability-gate-preregistration-2026-07.md.
 
 **Standing policy (from the decision-stability finding):** backtest P&L is an
 upper bound realized only by decisions that are stable across observers. Any

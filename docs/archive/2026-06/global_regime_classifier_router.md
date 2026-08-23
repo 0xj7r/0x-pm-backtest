@@ -1,5 +1,7 @@
 # Global Regime Classifier Router
 
+> ARCHIVED 2026-08-23, UNVALIDATED. Fill-derived clusters, synthetic sizing, never engine-replayed; polarity flips by period. A design sketch, not a result.
+
 This is the working design for moving away from global strategy knobs toward
 regime-aware strategy routing.
 

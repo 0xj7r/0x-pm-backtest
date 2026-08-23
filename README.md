@@ -18,7 +18,7 @@ crates/
 ├── pm-alpha/             # belief (BSM digital), vol, fee curve, ExoState features, equivalence machinery
 ├── pm-strategy/          # Strategy trait + exo_fade (Plan 2 extraction reference) + NoopStrategy
 ├── pm-shadow/            # live-twin log-only engine (JSONL stream, executor tail seam)
-└── pm-app/               # CLI: discover-day | walk-forward | shadow | paper | live | equivalence
+└── pm-app/               # CLI: discover-day | walk-forward | shadow | paper | live
 ```
 
 ## Quickstart
@@ -63,7 +63,9 @@ a new pm-backtest crate). Once that extraction's pinned-tape regression
 passes, exo_fade is deleted too. **Zero deployable strategies is the
 intended end state of this reset**: writing a new one is Plan 2+ work,
 starting from a framework that cannot report the kind of numbers that
-misled the June 2026 live cycle.
+misled the June 2026 live cycle. The equivalence gate that proves backtest
+and live construct byte-identical decision inputs for exo_fade is a separate
+binary, not a CLI subcommand: `cargo run -q -p pm-app --bin exo_fade_equivalence`.
 
 For the reasoning behind the reset, see
 [docs/deep-review-2026-07-10.md](docs/deep-review-2026-07-10.md). For what

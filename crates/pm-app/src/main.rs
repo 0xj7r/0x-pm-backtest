@@ -673,8 +673,9 @@ enum Cmd {
         /// JSONL of `MarketHandle` rows from `discover-day`.
         #[arg(long)]
         markets: PathBuf,
-        /// Optional strategy profile (TOML). Profile values override CLI/default
-        /// values for the fields present in the profile.
+        /// Accepted for backward compatibility only. Profile-driven strategy
+        /// overrides were removed along with the legacy strategies that used
+        /// them; passing this flag applies nothing to the run.
         #[arg(long)]
         profile: Option<PathBuf>,
         /// Chronological offset for smoke/diagnostic slices.
@@ -2216,6 +2217,14 @@ async fn walk_forward(
     out_markets: Option<PathBuf>,
     out_summary: Option<PathBuf>,
 ) -> Result<()> {
+    if let Some(path) = &profile {
+        tracing::warn!(
+            path = %path.display(),
+            "--profile is accepted for backward compatibility only and is NOT applied; \
+             profile-driven strategy overrides were removed along with the legacy strategies"
+        );
+    }
+
     let file = std::fs::File::open(&markets_path)
         .with_context(|| format!("open markets file {}", markets_path.display()))?;
     let mut markets: Vec<discovery::MarketHandle> = Vec::new();

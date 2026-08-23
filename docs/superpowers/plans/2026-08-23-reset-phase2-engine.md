@@ -252,7 +252,7 @@ fn late_wick_flips_snapshot_but_not_twap() {
 }
 ```
 
-- [ ] **Step 2:** Implement. Engine behavior: when `--use-outcome-label` supplies a label, the label wins (historical truth) but the engine ALSO computes the era-model outcome and the scorecard reports the disagreement rate per era (a free model-quality diagnostic). When labels are absent, the era model resolves. Fill model consults `venue_taker_delay_ms` for the era-appropriate venue delay added to configured latency (a `--venue-delay-override-ms` escape hatch for research, watermarked like fantasy if below the era-true value).
+- [ ] **Step 2:** Implement. Engine behavior: when `--use-outcome-label` supplies a label, the label wins (historical truth) but the engine ALSO computes the era-model outcome and the scorecard reports the disagreement rate per era (a free model-quality diagnostic). When labels are absent, the era model resolves. `--latency-ms` remains the TOTAL modeled chain latency (unchanged semantics; the golden hash must not move). `venue_taker_delay_ms` feeds validation and reporting instead: a run whose total latency is below the era's venue delay is rejected like a sub-750 fantasy run (same `--fantasy` escape + watermark), and the summary reports the era's venue delay alongside the configured total.
 
 - [ ] **Step 3: Strike-basis refusal (constraint 8).** The resolved config carries `spot_source` and `strike_source`; validation rejects a mismatch (e.g. binance spot belief with official/chainlink strikes) with an error naming docs/PROD.md's basis doctrine, unless `--allow-mixed-basis` (research escape hatch, watermarked in the summary like FANTASY). Failing test first:
 

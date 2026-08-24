@@ -35,13 +35,19 @@ fn decide_construction_parity() {
     eprintln!("side-pick coverage         : Yes={} No={}", t.yes_picks(), t.no_picks());
     eprintln!("actions: Enter={} Skip={} Rearm={}", t.enters(), t.skips(), t.rearms());
     if t.mismatches == 0 {
-        eprintln!("VERDICT: backtest-construction == live-construction. PARITY: PASS.");
+        eprintln!(
+            "VERDICT: backtest-construction == reference live-construction pattern \
+             (fixture). PARITY: PASS."
+        );
     } else {
         eprintln!("DIVERGENCES (first {}):", t.first_diffs.len());
         for d in &t.first_diffs {
             eprintln!("  {d}");
         }
-        eprintln!("VERDICT: backtest-construction != live-construction. PARITY: FAIL.");
+        eprintln!(
+            "VERDICT: backtest-construction != reference live-construction pattern \
+             (fixture). PARITY: FAIL."
+        );
     }
 
     // The load-bearing assertions: real coverage of the gates the test claims to
@@ -56,8 +62,8 @@ fn decide_construction_parity() {
     assert!(t.saturday_skips > 0, "skip_saturday never exercised");
     assert_eq!(
         t.mismatches, 0,
-        "PARITY FAIL: backtest and live construction paths produced divergent decide_entry \
-         decisions. First divergences:\n{}",
+        "PARITY FAIL: the backtest and reference live-construction paths produced \
+         divergent decide_entry decisions. First divergences:\n{}",
         t.first_diffs.join("\n")
     );
 }

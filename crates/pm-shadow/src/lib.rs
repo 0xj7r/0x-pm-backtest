@@ -75,6 +75,9 @@ pub struct ShadowArgs {
     /// (spot/perp/book/oi/funding), floored by 20ms spacing;
     /// `decide_interval_ms` becomes the fallback heartbeat. Default off.
     pub decide_on_event: bool,
+    /// How long an entry may wait for its fill confirmation from live
+    /// execution before the engine stops blocking the market on it.
+    pub commit_timeout_ms: u64,
 }
 
 /// Engine defaults for the live twin.
@@ -97,6 +100,7 @@ pub fn default_shadow_args(out_dir: PathBuf) -> ShadowArgs {
         ewma_halflife_s: 600.0,
         decide_interval_ms: 1000,
         decide_on_event: false,
+        commit_timeout_ms: 5_000,
     }
 }
 
@@ -471,8 +475,10 @@ pub struct MarketWindow {
     /// a market is the strategy's decision, not the twin's.
     pub n_clips: u32,
     /// An entry decided but not yet confirmed filled by live execution
-    /// (`defer_entry_commit`); `commit_entry` clears or keeps it.
-    pub pending_commit: bool,
+    /// (`defer_entry_commit`). Blocks further passes on this market so one
+    /// order cannot be submitted twice; see [`PendingCommit`] for how it is
+    /// released, including on a confirmation that never arrives.
+    pub pending_commit: PendingCommit,
     /// Belief-dwell telemetry: last tick when sign(p_exo - 0.5) flipped (or
     /// first belief). Logged on would_enter; NOT a decision input.
     pub belief_flip_ns: Option<i64>,
@@ -489,6 +495,26 @@ pub struct MarketWindow {
     /// Decide passes this market has been handed to the strategy. Feeds
     /// `Ctx::events_seen`, which is per-market in the backtest runner too.
     pub events_seen: u64,
+}
+
+/// Whether a market has an entry in flight with live execution.
+///
+/// The in-flight state is a LOCK: while it is held the market takes no further
+/// passes, so a lost confirmation would strand the market for the rest of its
+/// window and the twin would quietly stop being a twin of anything. It
+/// therefore carries a deadline, and expiry is a loud, recoverable event
+/// rather than a silent one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingCommit {
+    /// No entry in flight; the market decides normally.
+    None,
+    /// An entry was submitted at most `deadline_ns` ago and is awaiting its
+    /// fill confirmation.
+    InFlight { deadline_ns: i64 },
+    /// The deadline passed with no confirmation. The market is decidable
+    /// again; a confirmation arriving now is logged and dropped, never applied,
+    /// because the engine has already moved on without it.
+    Expired,
 }
 
 /// Rolling per-venue price prints on the local receipt clock, plus
@@ -642,6 +668,44 @@ struct SummaryStats {
 /// An executable entry derived from a `WouldEnter` decision: the engine's
 /// decision plus the venue token to buy. Live execution consumes these over a
 /// channel; the decision itself (slug/side/p_exo/touch_price) is produced by the
+/// The price a strategy's entry is actually marketable at, bounded the way
+/// `pm_backtest::fills::order_request_notional_usdc` bounds it so the twin and
+/// the backtest cannot price the same order differently.
+///
+/// `OrderRequest::limit_price` is quoted in YES terms and the NO leg inverts
+/// it, with the same `clamp(0.0, 1.0)` and the same `0 < px < 1` predicate as
+/// the backtest. Anything outside that range (including a non-finite value)
+/// falls back to the touch, and `on_reject` is called with the offending value
+/// so the caller can say so. A market order is marketable at the touch by
+/// definition.
+///
+/// KNOWN DIVERGENCE from the backtest, deliberate: on the NO leg the backtest
+/// falls back to `1 - yes_bid`, because a `ReplayEvent` carries only the YES
+/// ladder and the NO price has to be implied from it. The twin falls back to
+/// the real NO book's ask, which is what an executor would actually pay. The
+/// twin is the truthful side here; they agree whenever the strategy supplies a
+/// valid limit, which is the case that matters for a limit order.
+pub fn bounded_entry_limit(
+    limit_price: Option<f32>,
+    side: Side,
+    touch_price: f64,
+    on_reject: impl FnOnce(f32),
+) -> f64 {
+    let Some(lp) = limit_price else {
+        return touch_price;
+    };
+    let px = match side {
+        Side::Up => lp as f64,
+        Side::Down => (1.0 - lp as f64).clamp(0.0, 1.0),
+    };
+    if px > 0.0 && px < 1.0 {
+        px
+    } else {
+        on_reject(lp);
+        touch_price
+    }
+}
+
 /// The belief on the entered side: `p_exo` is always P(up), so a Down entry
 /// reads the complement. Entry telemetry only; the strategy decides the side.
 pub fn p_side_for_entry(p_exo: f64, side: &str) -> f64 {
@@ -729,6 +793,10 @@ pub struct ShadowConfig {
     pub latency_probe_ms: u64,
     pub perp_price_weight: f64,
     pub vol_estimator: VolEstimator,
+    /// How long an entry may sit in flight with live execution before the
+    /// engine gives up waiting and lets the market decide again. Engine-side:
+    /// it bounds a liveness hazard in the exec seam, not a trading rule.
+    pub commit_timeout_ms: u64,
 }
 
 /// Build `ShadowConfig` from CLI/runtime args.
@@ -745,6 +813,7 @@ pub fn shadow_config_from_args(args: &ShadowArgs) -> ShadowConfig {
             },
             _ => VolEstimator::Realized,
         },
+        commit_timeout_ms: args.commit_timeout_ms,
     }
 }
 
@@ -1000,7 +1069,7 @@ impl ShadowCore {
         }
     }
 
-    /// Apply a deferred entry commit after live execution fills (keep pending
+    /// Apply a deferred entry commit after live execution fills (keep the lock
     /// on a miss so the next fill attempt still commits).
     ///
     /// Only the engine's own bookkeeping is deferred. The strategy has already
@@ -1011,12 +1080,39 @@ impl ShadowCore {
         let Some(m) = self.markets.get_mut(slug) else {
             return;
         };
-        if !m.pending_commit || !filled {
-            return;
+        match m.pending_commit {
+            PendingCommit::InFlight { .. } => {
+                if !filled {
+                    return;
+                }
+                m.pending_commit = PendingCommit::None;
+                m.n_clips = m.n_clips.saturating_add(1);
+                m.entered = true;
+            }
+            PendingCommit::Expired => {
+                // The engine stopped waiting and released the market. Applying
+                // this now would book an entry the stream has already decided
+                // it never took.
+                tracing::warn!(
+                    slug = %slug,
+                    filled,
+                    "shadow dropped a commit that arrived after its timeout"
+                );
+                m.pending_commit = PendingCommit::None;
+            }
+            PendingCommit::None => {}
         }
-        m.pending_commit = false;
-        m.n_clips = m.n_clips.saturating_add(1);
-        m.entered = true;
+    }
+
+    /// Release an in-flight entry whose submission could not be delivered.
+    /// Called when the intent channel refuses the send: no executor will ever
+    /// confirm it, so waiting out the deadline would only delay the market.
+    pub fn abandon_pending_commit(&mut self, slug: &str) {
+        if let Some(m) = self.markets.get_mut(slug) {
+            if matches!(m.pending_commit, PendingCommit::InFlight { .. }) {
+                m.pending_commit = PendingCommit::None;
+            }
+        }
     }
 
     fn basis_mom_60s_bps(perp: Option<&PerpState>, spot: &SpotHistory, now_ns: i64) -> f64 {
@@ -1233,8 +1329,24 @@ impl ShadowCore {
             // opens inside the last 90s, because an entry it cannot probe and
             // measure before close is a record with nothing behind it.
             let deadline_ns = close_ns - STOP_BEFORE_CLOSE_S * 1_000_000_000;
-            if now_ns < open_ns || now_ns >= deadline_ns || m.pending_commit {
+            if now_ns < open_ns || now_ns >= deadline_ns {
                 continue;
+            }
+            // An entry in flight blocks the market so one order is not
+            // submitted twice, but only until its deadline: a confirmation
+            // that never arrives must not strand the market for the rest of
+            // its window and silently stop the stream.
+            if let PendingCommit::InFlight { deadline_ns } = m.pending_commit {
+                if now_ns < deadline_ns {
+                    continue;
+                }
+                tracing::error!(
+                    slug = %m.slug,
+                    timeout_ms = self.cfg.commit_timeout_ms,
+                    "shadow entry commit timed out with no fill confirmation; \
+                     releasing the market so the stream resumes"
+                );
+                m.pending_commit = PendingCommit::Expired;
             }
             // The strike must share the belief state's price basis: gamma's
             // openPrice is a BTC/USD-index level ~14bps off Binance BTC/USDT
@@ -1284,6 +1396,15 @@ impl ShadowCore {
             };
 
             let (bids, asks) = up_book.tape_levels();
+            // With both sides quoted this is the backtest loader's midpoint.
+            // One-sided (no YES bid) the loader falls back to `yes_ask`; the
+            // twin averages in `1 - down_ask`, the implied YES bid from the
+            // real NO book, which the loader does not have. The better number,
+            // but it means a one-sided event carries a `yes_mid` that is not
+            // derivable from its own `yes_bid`/`yes_ask`: a strategy that
+            // recomputes the mid rather than reading `yes_mid` will disagree
+            // with the twin here and agree in the backtest. A quoted 5m YES
+            // book effectively always has a bid, so this is a corner.
             let yes_mid = up_book
                 .mid()
                 .unwrap_or((up_ask.price + (1.0 - down_ask.price)) / 2.0);
@@ -1340,16 +1461,31 @@ impl ShadowCore {
                     Side::Up => up_ask,
                     Side::Down => down_ask,
                 };
+                if !(req.shares.is_finite() && req.shares > 0.0) {
+                    tracing::warn!(
+                        slug = %m.slug,
+                        tag = req.tag,
+                        shares = req.shares,
+                        "shadow rejected an order with non-positive or non-finite \
+                         shares; there is nothing to buy"
+                    );
+                    continue;
+                }
                 let p_side = p_side_for_entry(ev.p, side.as_str());
                 let edge = p_side - touch.price;
-                // `limit_price` is quoted in YES terms; the NO leg inverts it.
-                // A market order is marketable at the touch by definition.
-                let marketable_limit = match (req.limit_price, side) {
-                    (Some(lp), Side::Up) => lp as f64,
-                    (Some(lp), Side::Down) => 1.0 - lp as f64,
-                    (None, _) => touch.price,
-                };
-                let target_notional = req.shares * touch.price;
+                let marketable_limit = bounded_entry_limit(req.limit_price, side, touch.price, |lp| {
+                    tracing::warn!(
+                        slug = %m.slug,
+                        tag = req.tag,
+                        limit_price = lp,
+                        "shadow rejected an out-of-range limit price and priced at \
+                         the touch instead (matching the backtest's fallback)"
+                    );
+                });
+                // Same formula as the backtest's `order_request_notional_usdc`:
+                // the price actually used, times shares. See that function for
+                // the one place the two still differ (the NO-leg fallback).
+                let target_notional = req.shares * marketable_limit;
                 clip_index = clip_index.saturating_add(1);
                 took_entry = true;
 
@@ -1477,7 +1613,10 @@ impl ShadowCore {
             }
             if took_entry {
                 if defer_entry_commit {
-                    m.pending_commit = true;
+                    m.pending_commit = PendingCommit::InFlight {
+                        deadline_ns: now_ns
+                            + self.cfg.commit_timeout_ms as i64 * 1_000_000,
+                    };
                 } else {
                     m.n_clips = clip_index;
                     m.entered = true;
@@ -1997,6 +2136,11 @@ pub async fn run_shadow_with_sink(
                 // The decision is the engine's UNCHANGED WouldEnter; only the
                 // venue token is attached. No-op when no sink is attached.
                 if let Some(tx) = &intent_tx {
+                    // Markets whose intent could not be delivered: no executor
+                    // will ever confirm them, so their in-flight lock is
+                    // released here rather than waiting out the deadline.
+                    let mut undelivered: Vec<String> = Vec::new();
+                    {
                     let core = core.lock().expect("shadow core poisoned");
                     for event in &events {
                         if let LogEvent::WouldEnter {
@@ -2020,7 +2164,7 @@ pub async fn run_shadow_with_sink(
                                 } else {
                                     m.down_token.clone()
                                 };
-                                let _ = tx.send(ExecIntent {
+                                let sent = tx.send(ExecIntent {
                                     slug: slug.clone(),
                                     side: (*side).to_string(),
                                     token_id,
@@ -2039,7 +2183,23 @@ pub async fn run_shadow_with_sink(
                                     up_index_set: m.up_index_set,
                                     down_index_set: m.down_index_set,
                                 });
+                                if let Err(e) = sent {
+                                    tracing::error!(
+                                        slug = %slug,
+                                        error = %e,
+                                        "shadow could not deliver an exec intent; \
+                                         the executor channel is closed"
+                                    );
+                                    undelivered.push(slug.clone());
+                                }
                             }
+                        }
+                    }
+                    }
+                    if !undelivered.is_empty() {
+                        let mut core = core.lock().expect("shadow core poisoned");
+                        for slug in &undelivered {
+                            core.abandon_pending_commit(slug);
                         }
                     }
                 }
@@ -2300,8 +2460,9 @@ mod bootstrap {
             assert_eq!(advance_cursor(&[(1_000, 1.0), (5_000, 1.0)], 900), 5_000);
             // Out-of-order rows still advance by the max, not the last.
             assert_eq!(advance_cursor(&[(5_000, 1.0), (1_000, 1.0)], 900), 5_000);
-            // A page whose rows all failed to parse leaves the cursor put, so
-            // `warm_spot_1s` breaks instead of refetching the same window.
+            // Defensive: `warm_spot_1s` breaks on an empty page before it gets
+            // here (the non-advancing page is caught by `last_close <= start`),
+            // but the cursor must not invent a position it was never given.
             assert_eq!(advance_cursor(&[], 900), 900);
         }
     }
@@ -2310,7 +2471,7 @@ mod bootstrap {
 /// Live data feeds. Read-only consumers of public endpoints: the only
 /// outbound payloads are websocket subscriptions and pings.
 mod feeds {
-    use super::{MarketId, MarketWindow, ShadowCore, now_unix_ms};
+    use super::{MarketId, MarketWindow, PendingCommit, ShadowCore, now_unix_ms};
     use anyhow::{Context, Result};
     use futures::{SinkExt, StreamExt};
     use serde_json::Value;
@@ -2955,7 +3116,7 @@ mod feeds {
             gamma_strike,
             entered: false,
             n_clips: 0,
-            pending_commit: false,
+            pending_commit: PendingCommit::None,
             belief_flip_ns: None,
             belief_up: None,
             // Overwritten with a real id by `ShadowCore::upsert_market`.
@@ -3242,10 +3403,17 @@ mod tests {
             })
         }
         fn buy_no_limited(limit_price: f32) -> Box<dyn Strategy + Send> {
+            Self::limited(StratSide::BuyNo, 100.0, Some(limit_price))
+        }
+        fn limited(
+            side: StratSide,
+            shares: f64,
+            limit_price: Option<f32>,
+        ) -> Box<dyn Strategy + Send> {
             Box::new(Self {
-                side: StratSide::BuyNo,
-                shares: 100.0,
-                limit_price: Some(limit_price),
+                side,
+                shares,
+                limit_price,
                 once: true,
                 seen: HashSet::new(),
             })
@@ -3331,6 +3499,7 @@ mod tests {
         assert_eq!(args.vol_estimator, "realized");
         assert_eq!(args.decide_interval_ms, 1000);
         assert!(!args.decide_on_event);
+        assert_eq!(args.commit_timeout_ms, 5_000);
         // The config the engine actually runs is these values and nothing
         // else: no threshold, no gate, no clip size to drift against a
         // strategy's own config.
@@ -3341,6 +3510,7 @@ mod tests {
         assert_eq!(
             keys,
             [
+                "commit_timeout_ms",
                 "exit_after_s",
                 "latency_probe_ms",
                 "perp_price_weight",
@@ -3455,6 +3625,7 @@ mod tests {
             latency_probe_ms: 150,
             perp_price_weight: 0.0,
             vol_estimator: VolEstimator::Realized,
+            commit_timeout_ms: 5_000,
         }
     }
 
@@ -3506,7 +3677,7 @@ mod tests {
             gamma_strike: strike,
             entered: false,
             n_clips: 0,
-            pending_commit: false,
+            pending_commit: PendingCommit::None,
             belief_flip_ns: None,
             belief_up: None,
             id: MarketId(0),
@@ -3739,6 +3910,92 @@ mod tests {
         assert_eq!(core.markets["btc-updown-5m-1800"].n_clips, 3);
     }
 
+    /// The one field of a `WouldEnter` a given test cares about, pulled out so
+    /// the assertions below read as claims rather than as pattern matches.
+    fn entry_fields(event: &LogEvent) -> (f64, f64, f64) {
+        match event {
+            LogEvent::WouldEnter {
+                marketable_limit_price,
+                target_notional,
+                touch_price,
+                ..
+            } => (*marketable_limit_price, *target_notional, *touch_price),
+            other => panic!("expected WouldEnter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bounded_entry_limit_matches_the_backtest_bounds() {
+        let mut rejected = Vec::new();
+        let mut bound = |lp: Option<f32>, side: Side| {
+            bounded_entry_limit(lp, side, 0.55, |bad| rejected.push(bad))
+        };
+        // In range: used as given, NO inverted.
+        assert!((bound(Some(0.40), Side::Up) - 0.40).abs() < 1e-6);
+        assert!((bound(Some(0.40), Side::Down) - 0.60).abs() < 1e-6);
+        // A market order is marketable at the touch.
+        assert_eq!(bound(None, Side::Up), 0.55);
+        // Out of range, both boundaries and both signs: fall back to the touch,
+        // exactly as fills.rs::order_request_notional_usdc does.
+        for bad in [0.0f32, 1.0, 5.0, -1.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(bound(Some(bad), Side::Up), 0.55, "yes limit {bad}");
+            assert_eq!(bound(Some(bad), Side::Down), 0.55, "no limit {bad}");
+        }
+        assert_eq!(rejected.len(), 12, "every rejection must be reportable");
+    }
+
+    #[test]
+    fn a_valid_limit_prices_the_notional_the_way_the_backtest_does() {
+        let mut core = core_with_spot_strike_driven_by(
+            99_000.0,
+            StubEntry::limited(StratSide::BuyYes, 100.0, Some(0.40)),
+        );
+        core.upsert_market(market(None));
+        set_books(&mut core, 0.50, 0.50);
+        let events = core.decide(1900 * NS, false);
+        let (limit, notional, touch) = entry_fields(&events[0]);
+        assert!((limit - 0.40).abs() < 1e-6);
+        // The backtest spends limit * shares, not touch * shares.
+        assert!((notional - 40.0).abs() < 1e-4, "got {notional}");
+        assert_eq!(touch, 0.50);
+    }
+
+    #[test]
+    fn out_of_range_limits_fall_back_to_the_touch_instead_of_reaching_the_executor() {
+        // The pre-fix behaviour forwarded 5.0 (or a negative NO price) straight
+        // into ExecIntent while the backtest priced the same order at the touch.
+        for bad in [5.0f32, -1.0, 0.0, 1.0, f32::NAN] {
+            let mut core = core_with_spot_strike_driven_by(
+                99_000.0,
+                StubEntry::limited(StratSide::BuyYes, 100.0, Some(bad)),
+            );
+            core.upsert_market(market(None));
+            set_books(&mut core, 0.50, 0.50);
+            let events = core.decide(1900 * NS, false);
+            assert_eq!(events.len(), 1, "limit {bad} must still enter at the touch");
+            let (limit, notional, touch) = entry_fields(&events[0]);
+            assert_eq!(limit, touch, "limit {bad} must be priced at the touch");
+            assert!((notional - 50.0).abs() < 1e-4, "limit {bad} notional {notional}");
+        }
+    }
+
+    #[test]
+    fn non_positive_or_non_finite_shares_are_rejected() {
+        for bad in [0.0f64, -25.0, f64::NAN, f64::INFINITY] {
+            let mut core = core_with_spot_strike_driven_by(
+                99_000.0,
+                StubEntry::limited(StratSide::BuyYes, bad, None),
+            );
+            core.upsert_market(market(None));
+            set_books(&mut core, 0.50, 0.50);
+            assert!(
+                core.decide(1900 * NS, false).is_empty(),
+                "shares {bad} must not produce an entry"
+            );
+            assert_eq!(core.stats.entries_total, 0);
+        }
+    }
+
     #[test]
     fn deferred_commit_holds_the_market_until_the_fill_confirms() {
         let mut core =
@@ -3747,15 +4004,142 @@ mod tests {
         set_books(&mut core, 0.50, 0.50);
         assert_eq!(core.decide(1900 * NS, true).len(), 1);
         let m = &core.markets["btc-updown-5m-1800"];
-        assert!(m.pending_commit && !m.entered && m.n_clips == 0);
+        assert!(matches!(m.pending_commit, PendingCommit::InFlight { .. }));
+        assert!(!m.entered && m.n_clips == 0);
         // A pending entry blocks further passes even for an eager strategy.
         assert!(core.decide(1901 * NS, true).is_empty());
         // A miss keeps the commit pending for the next submit attempt.
         core.commit_entry("btc-updown-5m-1800", false);
-        assert!(core.markets["btc-updown-5m-1800"].pending_commit);
+        assert!(matches!(
+            core.markets["btc-updown-5m-1800"].pending_commit,
+            PendingCommit::InFlight { .. }
+        ));
         core.commit_entry("btc-updown-5m-1800", true);
         let m = &core.markets["btc-updown-5m-1800"];
-        assert!(!m.pending_commit && m.entered && m.n_clips == 1);
+        assert_eq!(m.pending_commit, PendingCommit::None);
+        assert!(m.entered && m.n_clips == 1);
+        // The confirmation is applied once, not once per delivery.
+        core.commit_entry("btc-updown-5m-1800", true);
+        assert_eq!(core.markets["btc-updown-5m-1800"].n_clips, 1);
+    }
+
+    #[test]
+    fn an_unconfirmed_commit_expires_and_releases_the_market() {
+        // Without a deadline this market would stop producing records for the
+        // rest of its window the moment one confirmation went missing.
+        let mut core = core_with_spot_strike_driven_by(99_000.0, StubEntry::buy_yes());
+        core.upsert_market(market(None));
+        set_books(&mut core, 0.50, 0.50);
+        assert_eq!(core.decide(1900 * NS, true).len(), 1);
+        // Still inside the 5s timeout: blocked.
+        assert!(core.decide(1904 * NS, true).is_empty());
+        assert!(matches!(
+            core.markets["btc-updown-5m-1800"].pending_commit,
+            PendingCommit::InFlight { .. }
+        ));
+        // Past it: released, and the pass runs (this strategy has nothing more
+        // to say, so it emits nothing).
+        assert!(core.decide(1906 * NS, true).is_empty());
+        assert_eq!(
+            core.markets["btc-updown-5m-1800"].pending_commit,
+            PendingCommit::Expired
+        );
+    }
+
+    #[test]
+    fn a_commit_arriving_after_the_timeout_is_dropped() {
+        let mut core = core_with_spot_strike_driven_by(99_000.0, StubEntry::buy_yes());
+        core.upsert_market(market(None));
+        set_books(&mut core, 0.50, 0.50);
+        core.decide(1900 * NS, true);
+        core.decide(1906 * NS, true); // expires the lock
+        core.commit_entry("btc-updown-5m-1800", true);
+        let m = &core.markets["btc-updown-5m-1800"];
+        // Booking it now would record an entry the stream already moved past.
+        assert!(!m.entered && m.n_clips == 0);
+        assert_eq!(m.pending_commit, PendingCommit::None);
+    }
+
+    #[test]
+    fn an_undeliverable_intent_releases_the_market_immediately() {
+        // The channel is closed: no executor will ever confirm, so waiting out
+        // the deadline would only delay the market for nothing.
+        let mut core =
+            core_with_spot_strike_driven_by(99_000.0, StubEntry::buy_yes_every_pass());
+        core.upsert_market(market(None));
+        set_books(&mut core, 0.50, 0.50);
+        assert_eq!(core.decide(1900 * NS, true).len(), 1);
+        core.abandon_pending_commit("btc-updown-5m-1800");
+        assert_eq!(
+            core.markets["btc-updown-5m-1800"].pending_commit,
+            PendingCommit::None
+        );
+        assert_eq!(core.decide(1901 * NS, true).len(), 1, "market decides again");
+    }
+
+    #[test]
+    fn hold_to_redemption_emits_no_would_exit_and_settles_the_ladder() {
+        // exit_after_s = 0 is what `default_shadow_args` and shadow_flags.sh
+        // actually ship, so this is the twin's real operating mode.
+        let mut core = core_with_spot_strike(99_000.0);
+        core.cfg.exit_after_s = 0;
+        assert!(
+            core.cfg.exit_after_s == 0,
+            "the ExecIntent's hold_to_redemption flag reads exactly this"
+        );
+        core.upsert_market(market(None));
+        core.apply_book_snapshot(
+            "up-tok",
+            &[(0.48, 60.0)],
+            &[(0.50, 50.0), (0.52, 200.0)],
+            Some(1_899_000),
+            1_899_040,
+        );
+        core.apply_book_snapshot(
+            "down-tok",
+            &[(0.40, 60.0)],
+            &[(0.50, 70.0)],
+            Some(1_899_000),
+            1_899_040,
+        );
+        let entry_ns = 1900 * NS;
+        assert_eq!(core.decide(entry_ns, false).len(), 1);
+
+        // The probe still runs: the laddered fill is what settles later.
+        let probe = core.poll_due(entry_ns + 150_000_000);
+        let (avg, shares) = match &probe[0] {
+            LogEvent::QuoteProbe { ladder_avg_price, ladder_shares, .. } => {
+                (ladder_avg_price.unwrap(), ladder_shares.unwrap())
+            }
+            other => panic!("expected QuoteProbe, got {other:?}"),
+        };
+
+        // No WouldExit is ever emitted, at any point up to and past close.
+        for t in [entry_ns + 30 * NS, entry_ns + 120 * NS, 2100 * NS, 2200 * NS] {
+            assert!(
+                !core
+                    .poll_due(t)
+                    .iter()
+                    .any(|e| matches!(e, LogEvent::WouldExit { .. } | LogEvent::PassiveExit { .. })),
+                "hold mode must not emit an exit at {t}"
+            );
+        }
+
+        // The whole laddered position settles at resolution, unsold in full.
+        let due = core.resolutions_due(2116 * NS);
+        assert_eq!(due.len(), 1);
+        match core.apply_resolution(due[0].entry_id, true, 2200 * NS).unwrap() {
+            LogEvent::Resolution { ladder_settle_pnl_usd, settle_pnl_per_share, won, .. } => {
+                assert!(won);
+                let want = shares * (1.0 - avg);
+                assert!(
+                    (ladder_settle_pnl_usd.unwrap() - want).abs() < 1e-9,
+                    "nothing was sold, so every share settles"
+                );
+                assert!((settle_pnl_per_share - (1.0 - 0.50)).abs() < 1e-12);
+            }
+            other => panic!("expected Resolution, got {other:?}"),
+        }
     }
 
     #[test]

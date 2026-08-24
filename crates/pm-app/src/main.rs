@@ -90,6 +90,11 @@ enum Cmd {
         /// heartbeat.
         #[arg(long)]
         decide_on_event: bool,
+        /// How long an entry may wait for its fill confirmation from live
+        /// execution before the engine releases the market and logs an error.
+        /// Log-only runs never arm it (nothing defers a commit).
+        #[arg(long, default_value = "5000")]
+        commit_timeout_ms: u64,
     },
     /// pm-alpha exogenous edge hunt: replay markets through the pm-alpha
     /// validation harness (latency-modeled, cost-aware, leakage-free belief).
@@ -815,6 +820,7 @@ fn shadow_args_from_cmd(cmd: Cmd) -> Option<shadow::ShadowArgs> {
         ewma_halflife_s,
         decide_interval_ms,
         decide_on_event,
+        commit_timeout_ms,
     } = cmd
     else {
         return None;
@@ -831,6 +837,7 @@ fn shadow_args_from_cmd(cmd: Cmd) -> Option<shadow::ShadowArgs> {
         ewma_halflife_s,
         decide_interval_ms,
         decide_on_event,
+        commit_timeout_ms,
     })
 }
 

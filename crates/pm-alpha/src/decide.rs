@@ -1361,6 +1361,88 @@ mod tests {
         assert_eq!(frozen_fade_decide_config(50.0).canon(), expected);
     }
 
+    /// Aligned mode's `align_min_mid` floor. This gate had no behavior test
+    /// anywhere after the shadow's lane tests were retired with the fade: the
+    /// only other Aligned-mode tests cover canon rendering and the dir head.
+    #[test]
+    fn aligned_mode_requires_the_entered_side_to_clear_align_min_mid() {
+        let mut cfg = live_cfg();
+        cfg.entry_mode = EntryMode::Aligned;
+        cfg.align_min_mid = 0.85;
+        let now = FRI();
+        let decide_at_mid = |mid: f64| {
+            let mut inp = up_inputs();
+            inp.mid = mid;
+            decide_entry(
+                &inp,
+                now,
+                open_of(now),
+                close_of(now),
+                &fresh_state(),
+                session_none().as_ref(),
+                &cfg,
+            )
+            .0
+        };
+
+        // Below the floor: the favourite is not favourite enough.
+        assert_eq!(decide_at_mid(0.71).action, EntryAction::Skip);
+        assert_eq!(decide_at_mid(0.8499).action, EntryAction::Skip);
+        // At and above it: the gate lets the entry through.
+        let dec = decide_at_mid(0.90);
+        assert_eq!(dec.action, EntryAction::Enter);
+        assert_eq!(dec.side, Side::Yes);
+        // Fade mode ignores the floor entirely, so the same low mid enters.
+        let mut fade = cfg;
+        fade.entry_mode = EntryMode::Fade;
+        let mut inp = up_inputs();
+        inp.mid = 0.71;
+        let (dec, _) = decide_entry(
+            &inp,
+            now,
+            open_of(now),
+            close_of(now),
+            &fresh_state(),
+            session_none().as_ref(),
+            &fade,
+        );
+        assert_eq!(dec.action, EntryAction::Enter);
+    }
+
+    #[test]
+    fn aligned_min_mid_reads_the_no_side_as_one_minus_mid() {
+        let mut cfg = live_cfg();
+        cfg.entry_mode = EntryMode::Aligned;
+        cfg.align_min_mid = 0.85;
+        let now = FRI();
+        // Down belief: the No leg is the favourite, so the gate must look at
+        // 1 - mid, not mid.
+        let mut inp = up_inputs();
+        inp.p_exo = 0.10;
+        inp.yes_ask = 0.70;
+        inp.no_buy = 0.72;
+        let decide_at_mid = |mid: f64| {
+            let mut inp = inp;
+            inp.mid = mid;
+            decide_entry(
+                &inp,
+                now,
+                open_of(now),
+                close_of(now),
+                &fresh_state(),
+                session_none().as_ref(),
+                &cfg,
+            )
+            .0
+        };
+        // mid 0.29 -> No-side mid 0.71, below the floor.
+        assert_eq!(decide_at_mid(0.29).action, EntryAction::Skip);
+        // mid 0.10 -> No-side mid 0.90, clears it.
+        let dec = decide_at_mid(0.10);
+        assert_eq!(dec.action, EntryAction::Enter);
+        assert_eq!(dec.side, Side::No);
+    }
+
     #[test]
     fn canon_is_valid_json_and_aligned_mode_renders() {
         let mut cfg = frozen_fade_decide_config(50.0);

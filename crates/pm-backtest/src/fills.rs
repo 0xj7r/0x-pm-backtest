@@ -719,6 +719,15 @@ pub(crate) fn write_decision_rows_parquet(path: &Path, rows: &[DecisionLogRow]) 
     Ok(())
 }
 
+/// Notional a request would spend: the price actually used, times shares.
+///
+/// The bounds here (`0 < px < 1`, the NO leg's `clamp(0.0, 1.0)`, the fallback
+/// to a book price when a limit is out of range) are mirrored by the live twin
+/// in `pm_shadow::bounded_entry_limit`, so the same strategy order cannot be
+/// priced one way in the backtest and another way live. One difference is
+/// deliberate and documented at both sites: the NO-leg fallback below implies
+/// the NO price from `1 - yes_bid`, because a `ReplayEvent` carries only the
+/// YES ladder, where the twin uses the real NO book's ask.
 pub(crate) fn order_request_notional_usdc(req: OrderRequest, event: &ReplayEvent) -> Option<f64> {
     match req.side {
         Side::BuyYes => {

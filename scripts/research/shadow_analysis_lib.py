@@ -83,7 +83,12 @@ def pair_entries(entries: list[dict], resolutions: list[dict]) -> list[dict]:
             pnl = float(res.get("ladder_settle_pnl_usd") or 0)
             if pnl == 0 and res.get("won") is not None:
                 touch = float(ent.get("touch_price") or 0.5)
-                clip = float(ent.get("target_notional") or CLIP_USD)
+                # `or` would turn a genuine 0.0 notional into CLIP_USD.
+                # Since the reset, target_notional is shares * price, so
+                # zero is a real value (a strategy that sized to nothing)
+                # and papering over it with a plausible $50 would hide it.
+                _tn = ent.get("target_notional")
+                clip = float(CLIP_USD if _tn is None else _tn)
                 pnl = (clip / touch * (1.0 - touch)) if res.get("won") else -clip
             row = {
                 "ts_utc": ent["ts_utc"],

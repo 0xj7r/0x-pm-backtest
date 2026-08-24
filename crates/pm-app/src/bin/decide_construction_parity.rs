@@ -43,11 +43,15 @@ fn main() {
     if t.mismatches == 0 {
         println!();
         println!(
-            "VERDICT: backtest-construction == live-construction across all {} compared",
+            "VERDICT: backtest-construction == reference live-construction pattern \
+             (fixture) across all {} compared",
             t.compared
         );
         println!("scenarios. decide_entry receives byte-identical DecisionInputs on both paths,");
-        println!("so it makes value-identical decisions. PARITY: PASS.");
+        println!("so it makes value-identical decisions. The live leg is the harness's own");
+        println!("fixture, not an import from pm-shadow: since the strategy reset the twin");
+        println!("hands the book to a Strategy and no shipped strategy calls decide_entry.");
+        println!("PARITY: PASS.");
     } else {
         println!();
         println!("DIVERGENCES (first {}):", t.first_diffs.len());
@@ -56,7 +60,8 @@ fn main() {
         }
         println!();
         println!(
-            "VERDICT: backtest-construction != live-construction. {} divergent. PARITY: FAIL.",
+            "VERDICT: backtest-construction != reference live-construction pattern \
+             (fixture). {} divergent. PARITY: FAIL.",
             t.mismatches
         );
         std::process::exit(1);

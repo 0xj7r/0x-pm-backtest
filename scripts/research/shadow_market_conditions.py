@@ -90,7 +90,12 @@ def pair_entries(entries: list[dict], resolutions: list[dict]) -> list[dict]:
             if pnl == 0 and res.get("won") is not None:
                 # Fallback: won/lost at touch if ladder pnl missing
                 touch = float(ent.get("touch_price") or 0.5)
-                clip = float(ent.get("target_notional") or CLIP_USD)
+                # `or` would turn a genuine 0.0 notional into CLIP_USD.
+                # Since the reset, target_notional is shares * price, so
+                # zero is a real value (a strategy that sized to nothing)
+                # and papering over it with a plausible $50 would hide it.
+                _tn = ent.get("target_notional")
+                clip = float(CLIP_USD if _tn is None else _tn)
                 shares = clip / touch if touch > 0 else 0
                 pnl = shares * (1.0 - touch) if res.get("won") else -clip
             row = {

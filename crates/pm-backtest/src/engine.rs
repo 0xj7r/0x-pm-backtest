@@ -262,32 +262,14 @@ pub fn run_backtest<S: Strategy>(
         };
         let ctx = Ctx {
             events_seen: events_processed as u64,
-            yes_shares,
-            no_shares,
             cash_usdc: cash,
             market_yes_range_so_far,
-            regime_whipsaw_score: whipsaw_snapshot.score,
             regime_path_efficiency: whipsaw_snapshot.path_efficiency,
             regime_reversal_pressure: whipsaw_snapshot.reversal_pressure,
             regime_sign_flip_rate: whipsaw_snapshot.sign_flip_rate,
             regime_realized_vol_180s_bps: whipsaw_snapshot.realized_vol_180s_bps,
-            prior_market_range_1d: cfg.prior_market_range_1d,
-            prior_market_range_3d: cfg.prior_market_range_3d,
-            prior_market_range_7d: cfg.prior_market_range_7d,
-            model_output: Some(canonical_model_eval.output),
-            model_attribution: Some(canonical_model_eval.attribution),
             market_close_ns: cfg.market_close_ns,
-            // Ladder exposure populated at walk-forward level for portfolio runs.
-            // For now zeroed here; real values come from higher-level asset aggregation
-            // (see future cross-market accounting work for BackToExplore).
-            btc_net_exposure_shares: cfg.current_btc_net_shares,
-            eth_net_exposure_shares: cfg.current_eth_net_shares,
-            daily_start_cash_usdc: cfg.daily_start_cash_usdc,
-            daily_loss_cap_pct: cfg.daily_loss_cap_pct,
-            current_daily_loss_pct: cfg.current_daily_loss_pct,
-            no_bid: 0.0,
             no_ask: 0.0,
-            no_mid: 0.0,
         };
         let (output, strategy_model_output) = strategy.on_event_scored(event, &ctx, spot, trades);
         let strategy_emitted_model_output = strategy_model_output.is_some();
@@ -2167,10 +2149,6 @@ async fn collect_training_samples_for_market(
         update_model_state_on_resolution: true,
         meta_calibrator_snapshot: None,
         enable_meta_calibration: true,
-        current_btc_net_shares: 0.0,
-        current_eth_net_shares: 0.0,
-        daily_start_cash_usdc: 0.0,
-        daily_loss_cap_pct: 1.0,
         model_market_context: if enable_market_context_features {
             model_market_context_for_slug(&m.slug)
         } else {
@@ -2190,7 +2168,6 @@ async fn collect_training_samples_for_market(
         model_gate_min_confidence: 0.68,
         model_gate_max_risk: 0.72,
         model_gate_min_edge: 0.05,
-        current_daily_loss_pct: 0.0,
     };
     let mut strat = NoopStrategy;
     match run_backtest(
@@ -2341,11 +2318,6 @@ async fn run_markets(
                 model_gate_min_confidence: cfg_arc.model_gate_min_confidence,
                 model_gate_max_risk: cfg_arc.model_gate_max_risk,
                 model_gate_min_edge: cfg_arc.model_gate_min_edge,
-                current_btc_net_shares: 0.0,
-                current_eth_net_shares: 0.0,
-                daily_start_cash_usdc: 0.0,
-                daily_loss_cap_pct: 1.0,
-                current_daily_loss_pct: 0.0,
             };
 
             Some((m.clone(), events_for_run, spot, trades, runner_cfg, idx))
@@ -2757,8 +2729,6 @@ async fn run_portfolio(
                     max_daily_exposure_usdc: bankroll * 5.0,
                     ..PortfolioLimits::default()
                 },
-                current_btc_net_shares: 0.0,
-                current_eth_net_shares: 0.0,
                 equity_curve_jsonl: None,
                 snapshot_every_n: 1_000_000,
                 maker_rebate_bps: cfg.maker_rebate_bps,
@@ -2788,9 +2758,6 @@ async fn run_portfolio(
                 model_gate_min_confidence: cfg.model_gate_min_confidence,
                 model_gate_max_risk: cfg.model_gate_max_risk,
                 model_gate_min_edge: cfg.model_gate_min_edge,
-                daily_start_cash_usdc: daily_start_equity,
-                daily_loss_cap_pct: cfg.daily_loss_cap_pct,
-                current_daily_loss_pct: daily_loss_pct,
             };
             match run_one_strategy(
                 strat,

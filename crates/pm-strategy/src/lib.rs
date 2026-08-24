@@ -12,7 +12,7 @@ pub mod regime;
 #[path = "archive/trivial.rs"]
 pub mod trivial;
 
-use pm_model::{ModelAttribution, ModelOutput};
+use pm_model::ModelOutput;
 use pm_types::{ReplayEvent, SpotHistory, TradeHistory};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,63 +36,33 @@ pub struct OrderRequest {
     pub tag: &'static str,
 }
 
+/// Per-event context handed to a strategy alongside the tape.
+///
+/// Every field here is read by at least one strategy. Fields that only the
+/// runner wrote and nothing consumed have been removed: a field nobody reads
+/// is a claim about the contract that the code does not back up, and it costs
+/// a plumbing site in every construction path. Adding one back is cheap (a
+/// field plus one line in the runner's `Ctx` literal), and should happen in
+/// the same change as the strategy that reads it.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Ctx {
     pub events_seen: u64,
-    pub yes_shares: f64,
-    pub no_shares: f64,
     pub cash_usdc: f64,
     /// Observed market volatility so far as `max(yes_mid) - min(yes_mid)`.
     /// This is live-safe: it only includes ticks already seen by the runner.
     pub market_yes_range_so_far: f32,
     /// Live-safe spot regime snapshot at this event. These distinguish clean
     /// directional expansion from chop with the same observed market range.
-    pub regime_whipsaw_score: f32,
     pub regime_path_efficiency: f32,
     pub regime_reversal_pressure: f32,
     pub regime_sign_flip_rate: f32,
     pub regime_realized_vol_180s_bps: f32,
-    /// Mean full-market YES-mid range over already closed prior BTC 5m markets.
-    /// These fields are live-safe in portfolio replay because they never include
-    /// the current market.
-    pub prior_market_range_1d: f32,
-    pub prior_market_range_3d: f32,
-    pub prior_market_range_7d: f32,
-    /// Canonical 4-score model output for this event, produced by the shared
-    /// model state before the strategy hook. Strategies can use this for
-    /// ML-gated lanes while the runner still owns attribution and parity.
-    pub model_output: Option<ModelOutput>,
-    /// Replay-safe feature attribution from the same canonical model evaluation.
-    /// Specialist strategies consume this to match offline decision-log training
-    /// without recomputing a parallel feature stack.
-    pub model_attribution: Option<ModelAttribution>,
     /// Market resolution time in ns since epoch (UTC). Strategies use this
     /// to compute time-to-close and gate early/mid/late behaviour.
     pub market_close_ns: i64,
-
-    /// Real NO-leg top of book (from the opposing ladder, NOT synthetic 1-yes).
-    /// 0.0 when no NO book is available (Phase-1 tests / pre-first-NO).
-    pub no_bid: f32,
+    /// Real NO-leg top of book ask (from the opposing ladder, NOT synthetic
+    /// 1-yes). 0.0 when no NO book is available.
     pub no_ask: f32,
-    pub no_mid: f32,
-
-    // === Cross-market ladder exposure (for BackToExplore and similar ladder strategies) ===
-    // These are populated in portfolio replay so strategies can see net exposure
-    // across all currently open windows for the same asset.
-    pub btc_net_exposure_shares: f64,
-    pub eth_net_exposure_shares: f64,
-
-    /// Daily loss cap info (populated in portfolio mode for strategies that
-    /// want to avoid adding risk on bad days, while still allowing repair/pair
-    /// hedges -- better than blunt runner stop for two-sided strats).
-    pub daily_start_cash_usdc: f64,
-    pub daily_loss_cap_pct: f64,
-
-    /// Current realized daily loss (0.0 at open or non-portfolio). 0.05 means 5% down from
-    /// that day's starting equity. BackToExplore etc use this to adapt: boost pair/repair
-    /// (two-sided), cut size_mult, lower target_net on bad days. This is the "better than
-    /// hard clip=0" approach: signal-driven risk response inside the strat.
-    pub current_daily_loss_pct: f64,
 }
 
 #[derive(Debug, Default, Clone)]

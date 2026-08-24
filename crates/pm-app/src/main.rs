@@ -2901,8 +2901,6 @@ async fn run_market_backtest(
     let market_close_ns = close_ts_seconds.saturating_mul(1_000_000_000);
     let market_run_mode = mode.as_str();
     let cfg = RunnerConfig {
-        current_btc_net_shares: 0.0,
-        current_eth_net_shares: 0.0,
         starting_cash_usdc: starting_cash,
         market_open_ns: market_close_ns.saturating_sub(300_000_000_000),
         market_close_ns,
@@ -2939,9 +2937,6 @@ async fn run_market_backtest(
         model_gate_min_confidence: 0.68,
         model_gate_max_risk: 0.72,
         model_gate_min_edge: 0.00,
-        daily_start_cash_usdc: starting_cash,
-        daily_loss_cap_pct: 1.0,
-        current_daily_loss_pct: 0.0,
     };
     let trade_history = match resolve_pm_trades_day(&store, &date, &asset_id).await {
         Ok(path) => match load_pm_trades_async(store.store(), path).await {

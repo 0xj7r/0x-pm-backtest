@@ -85,21 +85,6 @@ pub struct RunnerConfig {
     pub model_gate_max_risk: f32,
     /// Minimum edge over implied side probability required for an order.
     pub model_gate_min_edge: f32,
-
-    /// Current net ladder exposure for the asset (yes - no shares summed across open windows).
-    /// Used by BackToExplore and similar strategies for cross-market hedging and sizing.
-    /// Populated by the walk-forward harness in portfolio mode.
-    pub current_btc_net_shares: f64,
-    pub current_eth_net_shares: f64,
-
-    /// Daily loss tracking for smart capping inside strategies (e.g. BackToExplore
-    /// can still do pair/repair on capped days instead of blunt stop-everything).
-    pub daily_start_cash_usdc: f64,
-    pub daily_loss_cap_pct: f64,
-
-    /// Current realized loss this day (fraction of daily_start_equity). Passed from
-    /// walkforward so strategies can adapt sizing/pair/target instead of hard zeroing.
-    pub current_daily_loss_pct: f64,
 }
 
 impl Default for RunnerConfig {
@@ -139,11 +124,6 @@ impl Default for RunnerConfig {
             model_gate_min_confidence: 0.68,
             model_gate_max_risk: 0.72,
             model_gate_min_edge: 0.05,
-            current_btc_net_shares: 0.0,
-            current_eth_net_shares: 0.0,
-            daily_start_cash_usdc: 0.0,
-            daily_loss_cap_pct: 1.0,
-            current_daily_loss_pct: 0.0,
         }
     }
 }

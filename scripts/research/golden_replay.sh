@@ -5,13 +5,11 @@
 # extraction tasks: `check` must print GOLDEN: IDENTICAL after any refactor
 # that is supposed to be behavior-preserving.
 #
-# Flag notes vs. the original task brief (verified against
-# `./target/release/pm-app walk-forward --help` on this branch):
-#   --fee-curve-rate does not exist on `walk-forward` (it is an alpha-hunt-only
-#     flag on HarnessConfig). walk-forward's fee/rebate accounting is fixed in
-#     code (maker_rebate_bps=10.0, taker_fee_bps=0.0) regardless of CLI args;
-#     this is the "canonical accounting" referenced in the commit message, so
-#     the flag is simply omitted here.
+# Flag notes (verified against `./target/release/pm-app walk-forward --help`):
+#   --fee-curve-rate exists (added with constraint 2) and defaults to the
+#     canonical 0.07; this script deliberately omits it so the replay runs at
+#     the canonical default. maker_rebate_bps=10.0 / taker_fee_bps=0.0 remain
+#     fixed in code; the curve fee is charged on taker fills on top of those.
 #   --latency-ms does not exist; the equivalent flag is --taker-latency-ms.
 #
 # Usage: golden_replay.sh {record|check}

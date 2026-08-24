@@ -4,20 +4,20 @@
 # Runs in sequence:
 #   1. data_gate_june.sh (cache coverage)
 #   2. pm-alpha decide:: unit tests
-#   3. exo_fade_equivalence (Gate B construction parity)
+#   3. decide_construction_parity (backtest-vs-live DecisionInputs parity)
 #   4. optional 1-day alpha smoke (if BIN exists): reports n_skipped_load_error
 #
 # Usage:
 #   ./scripts/pipeline/harness_data_audit.sh
 #   DATE_START=2026-06-10 DATE_END=2026-06-16 ./scripts/pipeline/harness_data_audit.sh
-#   SKIP_EQUIVALENCE=1 ./scripts/pipeline/harness_data_audit.sh   # data gate + tests only
+#   SKIP_PARITY=1 ./scripts/pipeline/harness_data_audit.sh        # data gate + tests only
 #   SKIP_SMOKE=1 ./scripts/pipeline/harness_data_audit.sh
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 DATE_START="${DATE_START:-2026-06-10}"
 DATE_END="${DATE_END:-2026-06-16}"
-SKIP_EQUIVALENCE="${SKIP_EQUIVALENCE:-0}"
+SKIP_PARITY="${SKIP_PARITY:-${SKIP_EQUIVALENCE:-0}}"
 SKIP_SMOKE="${SKIP_SMOKE:-0}"
 BIN="${BIN:-./target/release/pm-app}"
 SMOKE_DAY="${SMOKE_DAY:-$DATE_END}"
@@ -55,15 +55,15 @@ else
 fi
 echo ""
 
-if [[ "$SKIP_EQUIVALENCE" == "1" ]]; then
-  record "exo_fade_equivalence" "SKIP"
-  echo "=== 3. exo_fade_equivalence: SKIPPED (SKIP_EQUIVALENCE=1) ==="
+if [[ "$SKIP_PARITY" == "1" ]]; then
+  record "decide_construction_parity" "SKIP"
+  echo "=== 3. decide_construction_parity: SKIPPED (SKIP_PARITY=1) ==="
 else
-  echo "=== 3. exo_fade_equivalence (Gate B) ==="
-  if cargo run -p pm-app --bin exo_fade_equivalence --quiet; then
-    record "exo_fade_equivalence" "PASS"
+  echo "=== 3. decide_construction_parity ==="
+  if cargo run -p pm-app --bin decide_construction_parity --quiet; then
+    record "decide_construction_parity" "PASS"
   else
-    record "exo_fade_equivalence" "FAIL"
+    record "decide_construction_parity" "FAIL"
   fi
 fi
 echo ""

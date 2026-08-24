@@ -7,7 +7,9 @@
 //! computes nothing about fills: the caller realizes the order (the sim
 //! book-walk in the backtest, a marketable IOC live). Keeping the decision in
 //! one pure function is what guarantees that the backtest and the live agent
-//! make byte-identical decisions.
+//! make byte-identical decisions, proven by the `decide_construction_parity`
+//! test (`crates/pm-alpha/src/decide_construction_parity.rs`), which compares
+//! the two paths' `DecisionInputs` construction value-for-value.
 //!
 //! The function is ported character-for-character from `execute()` L354-457 so
 //! the backtest refactor changes nothing (provable by a before/after diff). The

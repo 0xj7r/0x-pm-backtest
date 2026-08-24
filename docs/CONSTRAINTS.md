@@ -6,6 +6,10 @@ money. Each rule lists what it requires, the evidence that made it a
 constraint, and where the enforcement lives today (file plus a verified
 test name).
 
+A final section states the one rule that cannot be enforced mechanically
+today, because there is nothing to enforce it against: the promotion gate a
+future strategy must pass.
+
 ## 1. Truthful latency
 - Rule: backtests run at a truthful taker latency (>=750ms). A run below the
   floor requires `--fantasy`; every output (JSON summary, scorecard,
@@ -141,3 +145,45 @@ test name).
   near-the-money edge.
 - Enforcement: `crates/pm-alpha/src/fair_value_twap.rs::twap_digital`; test
   `locked_average_dominates_near_close`.
+
+---
+
+## Promotion gate: construction parity before any strategy goes live
+
+The ten rules above are enforced by code that runs today. This one cannot be,
+because the repo ships zero deployable strategies: there is no strategy to
+gate. It is written down so the next author inherits it as a requirement
+rather than rediscovering it the expensive way.
+
+- Rule: no strategy is promoted toward live (paper, shadow-with-intent, or
+  real money) until an equivalence gate proves that the backtest path and the
+  live path **build identical decision inputs** for the same market data.
+  Matching P&L is not evidence. Matching fill rates is not evidence. The gate
+  must compare the constructed inputs, or the decisions taken from them,
+  value-for-value on shared tapes, and must assert real coverage of every gate
+  it claims to exercise (both side-picks, each skip reason, the sizing floor)
+  so that "zero mismatches" cannot mean "nothing ran".
+- Evidence: in June 2026 `fade_live` was a separate reimplementation of a
+  validated strategy. It agreed with the shadow stream on which side to take
+  only 57.6% of the time, over-entered, and lost roughly $700 overnight while
+  the shadow made +$211. Both were "decision-identical" by construction in
+  the sense that both called the same intent; neither had ever been checked
+  input-by-input. The postmortem lesson was explicit: validate
+  decision-parity, not fill-rate similarity
+  (`docs/deep-review-2026-07-10.md`, and the June cycle postmortem).
+- Reference pattern: `crates/pm-alpha/src/equivalence.rs` with its CI front-end
+  `crates/pm-alpha/src/decide_construction_parity.rs` (test
+  `decide_construction_parity`) and the runnable report
+  `cargo run -q -p pm-app --bin decide_construction_parity`. It builds
+  `DecisionInputs` two ways from the same tapes, mirroring the backtest
+  (`harness::replay::belief_pass`) and the live shadow (`ShadowCore::decide`,
+  including its cent-grid ladder semantics), feeds both to `decide_entry`, and
+  compares the quantized decisions exactly. It is parameterized by a frozen
+  `DecideConfig` and belief model as a FIXTURE, not as a deployment target,
+  and imports nothing from `pm-strategy`. A new strategy swaps the fixture; it
+  does not rewrite the harness.
+- Also gated by it today: `decide_entry` itself. It is the retained decision
+  SSOT whose entire justification is that backtest and live make byte-identical
+  decisions, so it must not be left with the claim and no proof.
+- Enforcement: the CI test runs in `cargo test --workspace`; the report bin is
+  step 3 of `scripts/pipeline/harness_data_audit.sh`.

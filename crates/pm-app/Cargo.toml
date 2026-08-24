@@ -18,6 +18,10 @@ path = "src/bin/f11_deep_tail.rs"
 name = "deep_tail_long"
 path = "src/bin/deep_tail_long.rs"
 
+[[bin]]
+name = "decide_construction_parity"
+path = "src/bin/decide_construction_parity.rs"
+
 [dependencies]
 pm-types          = { workspace = true }
 pm-telonex-loader = { workspace = true }

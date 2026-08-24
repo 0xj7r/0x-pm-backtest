@@ -11,6 +11,10 @@
 pub mod calibrator;
 pub mod decide;
 pub mod directional;
+#[doc(hidden)]
+pub mod equivalence;
+#[cfg(test)]
+mod decide_construction_parity;
 pub mod fair_value;
 pub mod fair_value_twap;
 pub mod harness;

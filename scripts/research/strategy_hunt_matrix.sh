@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
-# Systematic strategy matrix: fresh validation, $1K bankroll.
+# Systematic signal matrix over the pm-alpha research harness: fresh
+# validation, $1K bankroll.
 # Usage: WINDOWS=VERIFY STRATEGIES=F1,F2 MARKETS=btc5m,eth5m ./scripts/research/strategy_hunt_matrix.sh
+#
+# The walk-forward lanes (F1/W1/W2/W3, which ran exo_fade, back_to_explore,
+# paired_mm and bonereaper_v2 through `pm-app walk-forward`) were removed on
+# 2026-08-24: all four strategies are deleted and the repo ships none. What
+# remains is the `pm-app alpha` signal sweep, which is strategy-free and still
+# live. If a strategy is ever written again, add its walk-forward lane back
+# here rather than reviving this script's history.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 BIN="${BIN:-./target/fast/pm-app}"
@@ -63,19 +71,6 @@ run_alpha() {
     --trades-out "$OUT/${tag}.trades.jsonl" > "$OUT/${tag}.log" 2>&1 &
 }
 
-run_wf() {
-  local tag=$1; shift
-  local dir="$OUT/${tag}"
-  [ -s "$dir/summary.json" ] && { log "skip $tag"; return; }
-  disk_ok || exit 1
-  throttle
-  mkdir -p "$dir"
-  log "wf $tag"
-  "$BIN" walk-forward "$@" \
-    --out-markets "$dir/markets.jsonl" \
-    --out-summary "$dir/summary.json" > "$dir/run.log" 2>&1 &
-}
-
 wants() { [[ "${STRATEGIES}" == "all" || "${STRATEGIES}" == *"$1"* ]]; }
 
 WINDOWS="${WINDOWS:-VERIFY}"
@@ -122,17 +117,6 @@ for WIN in ${WINDOWS//,/ }; do
         --edge-thresholds 0.16 --exit-after-s 0
     fi
 
-    if [ "$MKT" = "btc5m" ]; then
-      DS=$(echo $DATES | awk '{print $2}')
-      DE=$(echo $DATES | awk '{print $4}')
-      WF="--markets data/manifests/canonical/btc-updown-5m_up.jsonl --local-cache-dir data/cache --date-start $DS --date-end $DE --starting-cash 1000 --portfolio-mode --clip-fraction-of-equity 0.025 --max-clip-usdc 30 --use-outcome-label --spot-symbol BTCUSDT --replay-sample-ms 1000"
-      if wants F1; then
-        run_wf "${WIN}_F1_exo_${MKT}" $WF --strategies exo_fade
-      fi
-      if wants W1; then run_wf "${WIN}_W1_bte_${MKT}" $WF --strategies back_to_explore; fi
-      if wants W2; then run_wf "${WIN}_W2_paired_${MKT}" $WF --strategies paired_mm; fi
-      if wants W3; then run_wf "${WIN}_W3_br2_${MKT}" $WF --strategies bonereaper_v2; fi
-    fi
   done
   wait
   log "======== $WIN done ========"

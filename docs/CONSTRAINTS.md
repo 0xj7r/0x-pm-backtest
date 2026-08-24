@@ -164,13 +164,16 @@ rather than rediscovering it the expensive way.
   it claims to exercise (both side-picks, each skip reason, the sizing floor)
   so that "zero mismatches" cannot mean "nothing ran".
 - Evidence: in June 2026 `fade_live` was a separate reimplementation of a
-  validated strategy. It agreed with the shadow stream on which side to take
-  only 57.6% of the time, over-entered, and lost roughly $700 overnight while
-  the shadow made +$211. Both were "decision-identical" by construction in
-  the sense that both called the same intent; neither had ever been checked
-  input-by-input. The postmortem lesson was explicit: validate
-  decision-parity, not fill-rate similarity
-  (`docs/deep-review-2026-07-10.md`, and the June cycle postmortem).
+  validated strategy. It picked the SAME side as the validated shadow stream
+  on only 24 of 61 overlapping markets (39% same-side, 61% opposite),
+  over-entered 68 markets shadow rejected, and lost roughly $700 overnight
+  while the shadow made +$211, all with an exact field-for-field config match
+  and healthy fill rates. Neither path had ever been checked input-by-input.
+  The postmortem lesson was explicit: validate decision-parity, not
+  fill-rate similarity
+  (`docs/postmortem-2026-06-16-fade-live-divergence.md`; the related but
+  distinct twin-instability figure, 57.6% side agreement between two
+  identical engines on sub-15s entries, is rule 3's citation).
 - Reference pattern: `crates/pm-alpha/src/equivalence.rs` with its CI front-end
   `crates/pm-alpha/src/decide_construction_parity.rs` (test
   `decide_construction_parity`) and the runnable report

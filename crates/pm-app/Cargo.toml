@@ -29,6 +29,7 @@ pm-strategy       = { workspace = true }
 pm-risk           = { workspace = true }
 pm-model          = { workspace = true }
 pm-alpha          = { workspace = true }
+pm-backtest       = { workspace = true }
 pm-shadow         = { workspace = true }
 
 anyhow             = { workspace = true }

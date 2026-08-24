@@ -1614,6 +1614,7 @@ dependencies = [
  "object_store",
  "parquet",
  "pm-alpha",
+ "pm-backtest",
  "pm-model",
  "pm-risk",
  "pm-shadow",
@@ -1630,6 +1631,22 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zstd",
+]
+
+[[package]]
+name = "pm-backtest"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "chrono",
+ "parquet",
+ "pm-model",
+ "pm-risk",
+ "pm-strategy",
+ "pm-types",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

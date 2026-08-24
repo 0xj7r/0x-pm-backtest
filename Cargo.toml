@@ -7,6 +7,7 @@ members = [
     "crates/pm-alpha",
     "crates/pm-strategy",
     "crates/pm-risk",
+    "crates/pm-backtest",
     "crates/pm-app",
     "crates/pm-shadow",
 ]
@@ -66,6 +67,7 @@ pm-model            = { path = "crates/pm-model" }
 pm-alpha            = { path = "crates/pm-alpha" }
 pm-strategy        = { path = "crates/pm-strategy" }
 pm-risk             = { path = "crates/pm-risk" }
+pm-backtest         = { path = "crates/pm-backtest" }
 pm-shadow           = { path = "crates/pm-shadow" }
 
 [profile.release]

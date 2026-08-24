@@ -1,0 +1,20 @@
+[package]
+name = "pm-backtest"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+pm-types  = { workspace = true }
+pm-model  = { workspace = true }
+pm-risk   = { workspace = true }
+pm-strategy = { workspace = true }
+
+anyhow     = { workspace = true }
+arrow      = { workspace = true }
+parquet    = { workspace = true }
+chrono     = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }

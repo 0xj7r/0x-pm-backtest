@@ -48,10 +48,12 @@ which is exactly what makes it a stable anchor across the engine slimming.
 The harness was originally anchored to an `exo_fade` replay hashed into
 `tests/golden/day-2026-06-25.sha256`. That file and that variant were
 deleted when `exo_fade` was deleted. It is worth recording WHY it was a weak
-gate, so nobody rebuilds the same thing: `exo_fade` submitted **zero** orders
-on 2026-06-25, so its hash pinned the loader, the manifest walk, and a page
-of zeros, and would not have caught a fill-model or settlement regression at
-all. Its last recorded value was
+gate, so nobody rebuilds the same thing: `exo_fade` submitted only **5**
+orders across the day's 288 markets on 2026-06-25 (all 5 filled as takers, 0
+maker fills; see the fee-curve audit table below), so its hash mostly pinned
+the loader, the manifest walk, and 283 markets of no-op rows, and would have
+caught only a sliver of a fill-model or settlement regression. Its last
+recorded value was
 `41313410e8a700ca40dd467b0fb62d767b202fda536f2af66b084b9d94f1f83a`; the
 history and the audit trail below are kept for provenance.
 

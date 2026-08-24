@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Archive-era analyzer: written for the exo_fade shadow-final stream, deleted
+# in the framework reset. Kept to re-read those archived runs, not rewritten
+# for the current engine (there is no shadow-final stream to tail today).
 """Shadow A/B gate sidecar: tails shadow-final JSONL without restarting the engine.
 
 Evaluates counterfactual gates on each baseline `would_enter` and logs `gate_eval`

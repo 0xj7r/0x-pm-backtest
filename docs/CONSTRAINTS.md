@@ -75,9 +75,18 @@ future strategy must pass.
   `validation_label`; test `single_run_is_unvalidated`.
 
 ## 5. Sizing realism
-- Rule: reports run at fractional sizing on the live bankroll (~$2,800),
-  show the 0.82 realization haircut alongside raw P&L, and flag the 5-share
-  venue-floor/ruin check.
+- Rule: when `--bankroll` is supplied, reports show fractional sizing on
+  that bankroll, the 0.82 realization haircut alongside raw P&L, and the
+  5-share venue-floor/ruin check. The block is opt-in today: `--bankroll` is
+  `Option<f64>` with no default, so a run without it reports raw P&L with no
+  haircut/floor context. The standard scorecard driver must pass
+  `--bankroll` (currently ~$2,800, the live bankroll) for its output to
+  carry the sizing-realism context.
+- Planned: making `--bankroll` default to 2800 (matching the live bankroll)
+  so every run carries this context unprompted. Deferred because it adds the
+  sizing block to the summary and would move the fixture golden hash; it
+  needs its own ledgered change with a golden re-anchor, not a silent
+  default flip.
 - Evidence: an $850-start equity simulation showed flat $50 clips hit ruin
   within 8 days; fractional sizing was the only policy that survived the
   adversarial ordering (`docs/drawdown-handling-plan-2026-07.md`).

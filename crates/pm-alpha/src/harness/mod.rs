@@ -1090,8 +1090,13 @@ mod tests {
 
     #[test]
     fn fee_features_default_off_and_byte_identical() {
-        // Defaults must be off, and a run with both features explicitly
-        // disabled must produce byte-identical trades to the default config.
+        // This is the library-level `HarnessConfig::default()` used only as a
+        // test fixture; it is intentionally gross/zero-latency to isolate the
+        // fee behavior under test. It is NOT the `pm-app alpha` CLI default,
+        // which is 0.07/750ms and validated (see pm_backtest::validate and
+        // crates/pm-app/src/main.rs's Cmd::Alpha). Defaults here must be off,
+        // and a run with both features explicitly disabled must produce
+        // byte-identical trades to the default config.
         let base = HarnessConfig::default();
         assert_eq!(base.fee_curve_rate, 0.0);
         assert!(!base.fee_aware_exit);

@@ -59,6 +59,9 @@ if ! START="$DAY" END="$DAY" bash scripts/pipeline/ingest_june_live.sh > "$LOG_D
 fi
 
 echo "== replay $DAY (frozen config, canonical accounting) =="
+# --latency-ms 250 is below the 750ms truthful floor (CONSTRAINTS.md rule 1),
+# so --fantasy is required; these numbers are upper bounds, not achievable
+# P&L (the 1250ms latency-matched replays below are the truthful reference).
 "$BIN" alpha \
   --markets data/manifests/canonical/btc-updown-5m_up.jsonl \
   --local-cache-dir data/cache \
@@ -70,7 +73,7 @@ echo "== replay $DAY (frozen config, canonical accounting) =="
   --vol-lookback-s 3600 \
   --edge-thresholds 0.12 \
   --notional-usdc 50 \
-  --latency-ms 250 \
+  --latency-ms 250 --fantasy \
   --max-clips 2 \
   --rearm-edge 0.08 \
   --clip-cooldown-ms 5000 \
@@ -145,6 +148,8 @@ mkdir -p "$OUT/lat1250_gated" "$OUT/lat1250_recommended"
 
 # 15m book replay for the same day (separate output; used by the 15m
 # realization loop). Failure here does not block the 5m result.
+# --latency-ms 250 is below the 750ms truthful floor; --fantasy required,
+# numbers are upper bounds (see the 5m block's comment above).
 "$BIN" alpha \
   --markets data/manifests/canonical/btc-updown-15m_up.jsonl \
   --slug-prefix btc-updown-15m- \
@@ -157,7 +162,7 @@ mkdir -p "$OUT/lat1250_gated" "$OUT/lat1250_recommended"
   --vol-lookback-s 3600 \
   --edge-thresholds 0.12 \
   --notional-usdc 50 \
-  --latency-ms 250 \
+  --latency-ms 250 --fantasy \
   --max-clips 2 \
   --rearm-edge 0.08 \
   --clip-cooldown-ms 5000 \

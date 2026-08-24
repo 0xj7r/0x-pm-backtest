@@ -137,6 +137,11 @@ fn process_batch(
             volume: 0.0,
             bids,
             asks,
+            // Live-vs-backtest divergence (see ReplayEvent::spot_price doc):
+            // the Telonex book parquet carries no spot column, so this is
+            // always 0.0 here, while the pm-shadow twin writes the real
+            // spot price on the equivalent field. A strategy reading
+            // event.spot_price gets it live and never in backtest.
             spot_price: 0.0,
             flags: ReplayFlags::BOOK_UPDATE,
         });

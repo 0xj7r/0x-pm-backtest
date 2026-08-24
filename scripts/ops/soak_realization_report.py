@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Archive-era analyzer: written for the exo_fade shadow-final stream, deleted
+# in the framework reset. Kept to re-read those archived runs, not rewritten
+# for the current engine (there is no shadow-final stream to compare against
+# today).
 """Daily realization report: live shadow decisions vs same-day canonical replay.
 
 For each UTC day, joins shadow-final `would_enter`/`resolution` (live feeds)

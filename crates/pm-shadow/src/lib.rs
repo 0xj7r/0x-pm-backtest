@@ -489,7 +489,10 @@ pub struct MarketWindow {
     /// ignored, so feed code never has to invent one.
     pub id: MarketId,
     /// Observed `max(yes_mid) - min(yes_mid)` so far (live-safe: only ticks
-    /// already seen). Feeds `Ctx::market_yes_range_so_far`.
+    /// already seen). Feeds `Ctx::market_yes_range_so_far`. Updated once per
+    /// decide pass, not per raw book event (see the sampling-density note on
+    /// `Ctx::market_yes_range_so_far`), so this is narrower than the
+    /// backtest's per-event range on a fast tape.
     pub yes_mid_lo: f32,
     pub yes_mid_hi: f32,
     /// Decide passes this market has been handed to the strategy. Feeds

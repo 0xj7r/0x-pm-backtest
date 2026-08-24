@@ -33,8 +33,15 @@ pub struct AlphaArgs {
     pub edge_thresholds: Vec<f64>,
     pub fee_bps: f64,
     /// Polymarket taker fee curve: rate * p * (1-p) per share on every
-    /// aggressive fill (0 disables; crypto = 0.07).
+    /// aggressive fill. Truthful default is 0.07 (crypto); a lower rate
+    /// requires the caller to have granted --fantasy (see `watermark`).
     pub fee_curve_rate: f64,
+    /// Set by the caller after validating latency/fee against
+    /// `pm_backtest::validate`: `Some("FANTASY")` when either was
+    /// sub-floor/sub-canonical and --fantasy was granted, `None` for a
+    /// truthful run. Stamped onto the report and printed in the stdout
+    /// header/log so a fantasy run is never mistaken for a truthful one.
+    pub watermark: Option<String>,
     /// Sell at the exit horizon only when net proceeds beat the hold EV.
     pub fee_aware_exit: bool,
     /// Variance premium per share on the fee-aware sell test.
@@ -162,6 +169,10 @@ pub struct AlphaArgs {
 
 #[derive(serde::Serialize)]
 struct AlphaRunReport {
+    /// `Some("FANTASY")` when this run modeled latency below the truthful
+    /// floor or a fee curve rate below the canonical venue rate under an
+    /// explicit --fantasy grant; `None` for a truthful run.
+    watermark: Option<String>,
     model_cfg: AlphaModelConfig,
     harness_cfg: HarnessConfig,
     /// `DecideConfig::canon()` for the config this run replayed (first edge
@@ -822,7 +833,10 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
     if n_considered == 0 {
         return Err(anyhow!("no markets match prefix/date filters"));
     }
-    tracing::info!(n = n_considered, "alpha run starting");
+    tracing::info!(n = n_considered, watermark = ?args.watermark, "alpha run starting");
+    if let Some(w) = &args.watermark {
+        println!("*** {w} RUN: below the truthful latency floor and/or the canonical fee curve rate; numbers are upper bounds, not achievable P&L. ***");
+    }
 
     let vol_estimator = match args.vol_estimator.as_str() {
         "realized" => VolEstimator::Realized,
@@ -1242,6 +1256,7 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
         }
         let edge0 = args.edge_thresholds.first().copied().unwrap_or(0.12);
         let report = AlphaRunReport {
+            watermark: args.watermark.clone(),
             model_cfg,
             harness_cfg: base_cfg,
             decide_config_canon: DecideConfig::from_harness(&base_cfg, edge0).canon(),

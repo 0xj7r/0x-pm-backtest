@@ -25,7 +25,9 @@ disk_ok() {
 }
 throttle() { while [ "$(jobs -rp | wc -l)" -ge "$MAXJOBS" ]; do sleep 20; done; }
 
-COMMON="--local-cache-dir data/cache --down-assets data/manifests/canonical/down_all.jsonl --tick-cache-dir data/cache/ticks --latency-ms 150 --vol-lookback-s 3600 --stop-before-close-s 90 --fee-curve-rate 0.07 --notional-usdc ${NOTIONAL}"
+# --latency-ms 150 is below the 750ms truthful floor (CONSTRAINTS.md rule 1),
+# so --fantasy is required; these numbers are upper bounds, not achievable P&L.
+COMMON="--local-cache-dir data/cache --down-assets data/manifests/canonical/down_all.jsonl --tick-cache-dir data/cache/ticks --latency-ms 150 --fantasy --vol-lookback-s 3600 --stop-before-close-s 90 --fee-curve-rate 0.07 --notional-usdc ${NOTIONAL}"
 
 manifest_args() {
   case $1 in

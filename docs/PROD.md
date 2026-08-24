@@ -1,5 +1,17 @@
 # PROD: BTC-5m Exogenous Fade (canonical reference)
 
+> **RETIRED 2026-08-24.** `exo_fade` and every other strategy (back_to_explore,
+> paired_mm, bonereaper_v2, mayjune_fade, convex) were deleted in the framework
+> reset; the repo ships zero deployable strategies by design. This document
+> describes that retired deployment: its reference commands no longer run
+> (the CLI rejects the fade's flags by design), and nothing described below is
+> live. Sections 5 and 7 (governance, the deployment gate) remain doctrine for
+> whatever strategy is written next. See
+> [docs/CONSTRAINTS.md](CONSTRAINTS.md) for what the current engine enforces
+> and
+> [docs/superpowers/specs/2026-08-23-framework-reset-design.md](superpowers/specs/2026-08-23-framework-reset-design.md)
+> for the reset itself.
+
 Last updated: 2026-07-03. This is the single source of truth for what runs in
 production. If another doc disagrees with this one, this one wins.
 
@@ -70,8 +82,11 @@ Gate history (why the candidate is bare):
   is pre-registered and judged on the candidate-config soak. Not in the
   candidate unless it passes.
 
-Flags SSOT: `scripts/ops/shadow_candidate_flags.sh` (enforced against the
-Rust canon by the config-parity test). Reference command:
+Flags SSOT: `scripts/ops/shadow_candidate_flags.sh` never existed in the
+tree (broken citation; the file this doc's history actually enforced against
+the Rust canon was `scripts/ops/shadow_flags.sh`, retired with the fade).
+Reference command below is historical only; see the banner at the top of
+this file.
 
 ```bash
 pm-app shadow \

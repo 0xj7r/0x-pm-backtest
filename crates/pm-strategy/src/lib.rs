@@ -67,6 +67,12 @@ pub struct Ctx {
     pub cash_usdc: f64,
     /// Observed market volatility so far as `max(yes_mid) - min(yes_mid)`.
     /// This is live-safe: it only includes ticks already seen by the runner.
+    /// Live-vs-backtest divergence: the backtest engine updates this on
+    /// every raw tape event, but the pm-shadow twin only re-samples it once
+    /// per decide pass (`--decide-interval-ms`, default 1000ms, or the
+    /// `--decide-on-event` floor). On a fast tape the twin's range is
+    /// therefore systematically narrower than the backtest's for the same
+    /// wall-clock window.
     pub market_yes_range_so_far: f32,
     /// Live-safe spot regime snapshot at this event. These distinguish clean
     /// directional expansion from chop with the same observed market range.

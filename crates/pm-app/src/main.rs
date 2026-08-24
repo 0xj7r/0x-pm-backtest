@@ -122,9 +122,12 @@ enum Cmd {
         #[arg(long)]
         replay_event_cache_dir: Option<PathBuf>,
         /// Entry latency in ms (single run); ignored when --latency-sweep.
-        #[arg(long, default_value = "150")]
+        /// Default 750 is the truthful floor (see CONSTRAINTS.md rule 1);
+        /// a value below it requires --fantasy and watermarks the run.
+        #[arg(long, default_value = "750")]
         latency_ms: u64,
-        /// Sweep latencies 0/50/150/300/500/1000 ms.
+        /// Sweep latencies 0/50/150/300/500/1000 ms. Always includes
+        /// sub-floor values, so this requires --fantasy.
         #[arg(long)]
         latency_sweep: bool,
         /// Comma-separated edge thresholds to grid over.
@@ -133,9 +136,17 @@ enum Cmd {
         #[arg(long, default_value = "0.0")]
         fee_bps: f64,
         /// Polymarket taker fee curve rate: fee = rate * p * (1-p) per share
-        /// on every aggressive fill (0 disables; crypto markets = 0.07).
-        #[arg(long, default_value = "0.0")]
+        /// on every aggressive fill. Default 0.07 is the validated venue
+        /// rate (see CONSTRAINTS.md rule 2); a rate below it requires
+        /// --fantasy and watermarks the run.
+        #[arg(long, default_value = "0.07")]
         fee_curve_rate: f64,
+        /// Permit a run below the truthful latency floor (750ms) or the
+        /// canonical fee curve rate (0.07). The run proceeds but is
+        /// watermarked "FANTASY" in the report/stdout header, and the
+        /// FANTASY- prefix is applied to --out-json/--trades-out filenames.
+        #[arg(long, default_value_t = false)]
+        fantasy: bool,
         /// Fee-aware exit: at the exit instant, sell only when net proceeds
         /// beat the belief's hold-to-resolution EV; otherwise hold.
         #[arg(long)]
@@ -559,7 +570,9 @@ enum Cmd {
         #[arg(long, default_value = "0")]
         replay_sample_ms: u64,
         /// Simulated delay before taker orders execute against the book.
-        #[arg(long, default_value = "0")]
+        /// Default 750 is the truthful floor (CONSTRAINTS.md rule 1); a
+        /// value below it requires --fantasy and watermarks the run.
+        #[arg(long, default_value = "750")]
         taker_latency_ms: u64,
         /// Directory for on-disk cache of raw ReplayEvents (JSONL). Huge win on AWS
         /// for repeated runs on the same dates — avoids re-downloading parquets from S3.
@@ -863,6 +876,7 @@ async fn main() -> Result<()> {
             edge_thresholds,
             fee_bps,
             fee_curve_rate,
+            fantasy,
             fee_aware_exit,
             fee_exit_margin,
             notional_usdc,
@@ -951,6 +965,24 @@ async fn main() -> Result<()> {
             } else {
                 vec![latency_ms]
             };
+            // Constraint envelope (CONSTRAINTS.md rules 1-2): the alpha
+            // research harness is fed by the same latency/fee validators as
+            // walk-forward. The strictest (minimum) latency in the sweep
+            // governs, since --fantasy is an all-or-nothing grant.
+            let strictest_latency_ms = latencies_ms.iter().copied().min().unwrap_or(latency_ms);
+            let latency_watermark =
+                pm_backtest::validate::validate_latency(strictest_latency_ms, fantasy)?;
+            let fee_rate_watermark = pm_backtest::validate::validate_fee_rate(fee_curve_rate, fantasy)?;
+            let mut watermark_parts: Vec<String> =
+                [latency_watermark, fee_rate_watermark].into_iter().flatten().collect();
+            watermark_parts.dedup();
+            let watermark = if watermark_parts.is_empty() {
+                None
+            } else {
+                Some(watermark_parts.join(","))
+            };
+            let out_json = out_json.map(|p| apply_fantasy_prefix(&p, fantasy));
+            let trades_out = trades_out.map(|p| apply_fantasy_prefix(&p, fantasy));
             alpha::run_alpha(
                 &store,
                 alpha::AlphaArgs {
@@ -964,6 +996,7 @@ async fn main() -> Result<()> {
                     edge_thresholds,
                     fee_bps,
                     fee_curve_rate,
+                    watermark,
                     fee_aware_exit,
                     fee_exit_margin,
                     notional_usdc,

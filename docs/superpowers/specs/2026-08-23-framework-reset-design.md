@@ -259,3 +259,17 @@ reference implementation); Telonex retention for July is unverified until Pro
 access exists (checked as the first act after upgrade, before deleting any
 local raw data); pm-model's live/dead status is verified by call-site trace
 before deletion.
+
+## Acknowledged deviations (2026-08-24, final review)
+
+- Section 8's "fingerprint stable across CLI/TOML paths" and the future
+  strategy contract's `--strategy <name> --config <toml>` sketch: no `--config`
+  TOML loading path exists in the tree. Correct at zero strategies (nothing to
+  configure that way yet), but the first strategy's plan must build it rather
+  than rediscover the gap.
+- Section 7's byte-identical pm-shadow decision-stream verification (recorded
+  tape, pre- vs post-refactor binary) was not done and could not be: the
+  config event's schema changed deliberately (`config_fingerprint` replaced
+  `decide_config_canon`, a `strategy` field was added). It was replaced by the
+  12b re-review's evidence instead: 17 new engine tests, mutation-tested gate
+  pins, and a full gate re-run, judged adequate for the same purpose.

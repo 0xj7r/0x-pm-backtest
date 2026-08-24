@@ -8,9 +8,10 @@
 # (pm-strategy::fixture::ThresholdFadeStrategy): deterministic, test-only, and
 # not deployable. That is the point. A golden anchored to a tradeable strategy
 # only gates the engine for as long as that strategy lives, and the exo_fade
-# variant this harness used to carry submitted zero orders on the pinned day,
-# so it gated almost none of the order/fill/settlement path. The fixture
-# submits 126 orders across the day's 288 markets and all of them fill.
+# variant this harness used to carry submitted only 5 orders (all taker
+# fills, 0 maker) on the pinned day, so it gated only a sliver of the
+# order/fill/settlement path across the day's 288 markets. The fixture
+# submits 126 orders across the same 288 markets and all of them fill.
 #
 # Flag notes (verified against `./target/release/pm-app walk-forward --help`):
 #   --fee-curve-rate exists (added with constraint 2) and defaults to the

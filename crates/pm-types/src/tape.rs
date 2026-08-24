@@ -39,6 +39,11 @@ pub struct ReplayEvent {
     pub volume: f32,
     pub bids: [BookLevel; TAPE_DEPTH],
     pub asks: [BookLevel; TAPE_DEPTH],
+    /// Live-vs-backtest divergence: the pm-shadow twin writes the real spot
+    /// price here (`state.spot_now()`), but the only production tape builder
+    /// (`pm_telonex_loader::book_snapshot`) hardcodes this to `0.0`, since
+    /// the Telonex book parquet carries no spot column. A strategy reading
+    /// this field gets a real price live and always 0.0 in backtest.
     pub spot_price: f32,
     pub flags: ReplayFlags,
 }

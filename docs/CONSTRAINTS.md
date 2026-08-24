@@ -180,9 +180,14 @@ rather than rediscovering it the expensive way.
   `decide_construction_parity`) and the runnable report
   `cargo run -q -p pm-app --bin decide_construction_parity`. It builds
   `DecisionInputs` two ways from the same tapes, mirroring the backtest
-  (`harness::replay::belief_pass`) and the live shadow (`ShadowCore::decide`,
-  including its cent-grid ladder semantics), feeds both to `decide_entry`, and
-  compares the quantized decisions exactly. It is parameterized by a frozen
+  (`harness::replay::belief_pass`) and the live construction pattern (touch
+  asks off a cent-grid ladder, as `ShadowCore` maintains), feeds both to
+  `decide_entry`, and compares the quantized decisions exactly. Since the
+  strategy reset, `ShadowCore::decide` no longer builds `DecisionInputs`
+  itself: it hands the book to a `Strategy` and no shipped strategy calls
+  `decide_entry`. The harness therefore holds the live leg on its own, which
+  is the point of it being a fixture rather than a live import, and a future
+  strategy that reaches for `decide_entry` inherits the proof. It is parameterized by a frozen
   `DecideConfig` and belief model as a FIXTURE, not as a deployment target,
   and imports nothing from `pm-strategy`. A new strategy swaps the fixture; it
   does not rewrite the harness.

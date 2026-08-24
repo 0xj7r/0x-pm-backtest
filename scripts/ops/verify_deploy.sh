@@ -23,7 +23,6 @@ UNIT_DIR="$SCRIPT_DIR/systemd"
 UNITS=(
   pm-shadow-final
   pm-shadow-final-b
-  pm-shadow-recommended
   pm-shadow-15m
   pm-fast-live
   pm-shadow-exec-paper

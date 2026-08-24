@@ -16,6 +16,7 @@ pub mod equivalence;
 #[cfg(test)]
 mod exo_fade_equivalence;
 pub mod fair_value;
+pub mod fair_value_twap;
 pub mod harness;
 pub mod model;
 pub mod regime;
@@ -30,6 +31,7 @@ pub use decide::{
 };
 pub use directional::{DIR_FEATURE_NAMES, DIR_FEATURES, DirFeatures, DirModel, clean_directional_pressure, dir_features};
 pub use fair_value::{FairValueEstimate, FairValueModel, NoSignalReason};
+pub use fair_value_twap::twap_digital;
 pub use model::{AlphaModel, AlphaModelConfig, Belief, Evaluation};
 pub use regime::Regime;
 pub use state::{ExoState, MarketMeta, PerpState, Token};

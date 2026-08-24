@@ -16,6 +16,7 @@ use crate::accounting::{MarketResult, StrategyMarketResult, buy_fill_won, fill_r
 use crate::config::WalkForwardConfig;
 use crate::engine::{MetaSampleLimits, StratId, evaluate_meta_calibration, filter_meta_samples_for_training, market_balanced_meta_samples};
 use crate::fingerprint::config_fingerprint;
+use crate::jitter::JitterReport;
 use crate::portfolio::{SharedRunConfig, VolatilityBand};
 
 mod summary;
@@ -45,6 +46,10 @@ pub struct WalkForwardSummary {
     /// Meta-calibrator training/evaluation evidence for train-once portfolio
     /// runs. Empty for legacy independent-market runs without ML training.
     pub meta_calibration: Option<MetaCalibrationReport>,
+    /// P&L spread across N jittered-latency replay runs. `None` (omitted from
+    /// JSON) for ordinary single-run backtests where `--jitter` is 0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jitter: Option<JitterReport>,
 }
 
 
@@ -967,6 +972,7 @@ pub fn aggregate(results: &[MarketResult], strategies: &[StratId]) -> WalkForwar
         by_volatility_band,
         fold_summaries: Vec::new(),
         meta_calibration: None,
+        jitter: None,
     }
 }
 

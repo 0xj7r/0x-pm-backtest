@@ -896,6 +896,20 @@ enum Cmd {
         /// `FANTASY-` prefix is applied to output filenames.
         #[arg(long, default_value_t = false)]
         fantasy: bool,
+        /// Run the walk-forward N times at deterministically seeded perturbed
+        /// taker latencies and report the P&L spread (p10/p50/p90) instead of a
+        /// point estimate. 0 (default) runs once. Runs are serial: a
+        /// 288-market day at N=5 is ~5x the single-run wall time.
+        #[arg(long, default_value_t = 0)]
+        jitter: usize,
+        /// Half-width (ms) of the uniform latency jitter band around
+        /// --taker-latency-ms. Each draw is clamped up to the 750ms truthful
+        /// floor unless --fantasy is granted.
+        #[arg(long, default_value_t = 250)]
+        jitter_latency_spread_ms: u64,
+        /// Seed for the jitter PRNG (same seed reproduces the same latencies).
+        #[arg(long, default_value_t = 42)]
+        jitter_seed: u64,
     },
     /// Summarize a walk-forward `markets.jsonl` result file.
     SummarizeMarkets {
@@ -1550,6 +1564,9 @@ async fn main() -> Result<()> {
             out_markets,
             out_summary,
             fantasy,
+            jitter,
+            jitter_latency_spread_ms,
+            jitter_seed,
         } => {
             walk_forward(
                 markets,
@@ -1618,6 +1635,9 @@ async fn main() -> Result<()> {
                 out_markets,
                 out_summary,
                 fantasy,
+                jitter,
+                jitter_latency_spread_ms,
+                jitter_seed,
             )
             .await
         }
@@ -2221,6 +2241,9 @@ async fn walk_forward(
     out_markets: Option<PathBuf>,
     out_summary: Option<PathBuf>,
     fantasy: bool,
+    jitter: usize,
+    jitter_latency_spread_ms: u64,
+    jitter_seed: u64,
 ) -> Result<()> {
     if let Some(path) = &profile {
         tracing::warn!(
@@ -2330,6 +2353,9 @@ async fn walk_forward(
         replay_sample_ms,
         taker_latency_ms,
         fantasy,
+        jitter,
+        jitter_latency_spread_ms,
+        jitter_seed,
         replay_event_cache_dir,
         load_pm_trades,
         use_outcome_label,

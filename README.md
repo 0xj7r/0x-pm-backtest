@@ -71,5 +71,6 @@ For the reasoning behind the reset, see
 [docs/deep-review-2026-07-10.md](docs/deep-review-2026-07-10.md). For what
 still needs deciding before Plan 2 starts, see
 [docs/OPEN-QUESTIONS.md](docs/OPEN-QUESTIONS.md). For live/paper deployment
-rules, see [docs/PROD.md](docs/PROD.md). The constraints-as-code doc
-(`docs/CONSTRAINTS.md`) is itself a Plan 2 deliverable and does not exist yet.
+rules, see [docs/PROD.md](docs/PROD.md). For the ten constraints the
+framework enforces as code, not discipline, see
+[docs/CONSTRAINTS.md](docs/CONSTRAINTS.md).

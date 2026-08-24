@@ -227,6 +227,10 @@ pub struct WalkForwardConfig {
     pub maker_rebate_bps: f64,
     pub taker_fee_bps: f64,
     pub taker_latency_ms: u64,
+    /// Explicit grant to run below `TRUTHFUL_LATENCY_FLOOR_MS`. Fantasy runs
+    /// proceed but are watermarked (`"FANTASY"`) in the summary and output
+    /// filenames so they are never mistaken for a truthful backtest.
+    pub fantasy: bool,
     /// **Portfolio mode**: process markets in chronological order, compound
     /// equity from one market into the next. Disables parallelism (each
     /// market's starting cash depends on the previous market's end cash).
@@ -364,6 +368,7 @@ impl Default for WalkForwardConfig {
             maker_rebate_bps: 0.0,
             taker_fee_bps: 0.0,
             taker_latency_ms: 0,
+            fantasy: false,
             portfolio_mode: false,
             clip_fraction_of_equity: None,
             clip_drawdown_soft_pct: 1.0,

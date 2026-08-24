@@ -30,6 +30,10 @@ pub struct WalkForwardSummary {
     pub markets_succeeded: usize,
     /// 16-hex sha256 prefix of the canonical JSON of the resolved run config.
     pub config_fingerprint: Option<String>,
+    /// `"FANTASY"` when the run was executed below the truthful latency floor
+    /// under an explicit `--fantasy` grant. `None` for truthful runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub watermark: Option<String>,
     /// Key runtime controls used to produce this summary.
     pub run_config: Option<SummaryRunConfig>,
     /// Overall aggregate for all markets.
@@ -640,6 +644,17 @@ pub fn binary_log_loss(p: f32, observed: bool) -> f32 {
     if observed { -p.ln() } else { -(1.0 - p).ln() }
 }
 
+/// The summary watermark for a run: `"FANTASY"` when the config carries an
+/// explicit fantasy grant, `None` for truthful runs. Mirrors
+/// [`crate::validate::validate_latency`]'s granted-fantasy return value.
+pub fn fantasy_watermark(cfg: &WalkForwardConfig) -> Option<String> {
+    if cfg.fantasy {
+        Some("FANTASY".to_string())
+    } else {
+        None
+    }
+}
+
 
 pub fn write_portfolio_checkpoint(
     cfg: &WalkForwardConfig,
@@ -650,6 +665,7 @@ pub fn write_portfolio_checkpoint(
 ) -> Result<()> {
     let mut summary = aggregate(results, &cfg.strategies);
     summary.config_fingerprint = Some(config_fingerprint(cfg));
+    summary.watermark = fantasy_watermark(cfg);
     summary.run_config = Some(summary_run_config(cfg));
     if let Some(report) = meta_report {
         let mut report = report.clone();
@@ -945,6 +961,7 @@ pub fn aggregate(results: &[MarketResult], strategies: &[StratId]) -> WalkForwar
             .filter(|r| !r.per_strategy.is_empty())
             .count(),
         config_fingerprint: None,
+        watermark: None,
         run_config: None,
         per_strategy,
         by_volatility_band,

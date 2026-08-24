@@ -7,13 +7,11 @@ use chrono::{DateTime, NaiveDate, Utc};
 use clap::{Parser, Subcommand};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use pm_model::MetaTrainingConfig;
-use pm_risk::PortfolioLimits;
-use pm_strategy::NoopStrategy;
 use pm_telonex_loader::{
-    Channel, TelonexStore, TelonexStoreConfig, load_binance_agg_trades_async,
-    load_book_snapshot_async, load_pm_trades_async, resolve_binance_day, resolve_pm_trades_day,
+    Channel, TelonexStore, TelonexStoreConfig,
+    load_book_snapshot_async,
 };
-use pm_types::{MarketId, SpotHistory, TradeHistory};
+use pm_types::MarketId;
 use std::fs::File;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -23,9 +21,8 @@ mod discovery;
 use pm_shadow as shadow;
 mod prep_cache;
 
-use pm_backtest::accounting::pretty_print;
-use pm_backtest::config::{RunnerConfig, SpotSource, StrikeSource, WalkForwardConfig};
-use pm_backtest::engine::{StratId, run_backtest, run_walkforward};
+use pm_backtest::config::{SpotSource, StrikeSource, WalkForwardConfig};
+use pm_backtest::engine::{StratId, run_walkforward};
 use pm_backtest::scorecard::{
     print_result_summary, print_summary, summarize_markets_jsonl, write_market_results_jsonl_atomic,
     write_result_summary_json, write_summary_json_atomic,
@@ -42,28 +39,6 @@ use std::io::{BufRead, BufReader, Write};
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
-}
-
-#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
-enum StrategyKind {
-    Noop,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum MarketRunMode {
-    Backtest,
-    Paper,
-    Live,
-}
-
-impl MarketRunMode {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Backtest => "backtest",
-            Self::Paper => "paper",
-            Self::Live => "live",
-        }
-    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -517,59 +492,6 @@ enum Cmd {
         #[arg(long)]
         local_cache_dir: Option<PathBuf>,
     },
-    /// Run a backtest on one Polymarket asset using the selected strategy.
-    BacktestS3 {
-        #[arg(long, default_value = "polymarket")]
-        exchange: String,
-        #[arg(long, default_value = "book_snapshot_25")]
-        channel: String,
-        #[arg(long)]
-        date: String,
-        #[arg(long)]
-        asset_id: String,
-        /// Slug of the market (e.g. btc-updown-5m-1778587500). Used to parse
-        /// the resolution timestamp when --close-ts is omitted.
-        #[arg(long)]
-        slug: Option<String>,
-        /// Resolution Unix epoch seconds. Overrides --slug parsing.
-        #[arg(long)]
-        close_ts: Option<i64>,
-        /// Force the resolution outcome (true = YES won). When omitted, infer
-        /// from final yes_mid >= 0.5.
-        #[arg(long)]
-        resolved_yes: Option<bool>,
-        #[arg(long, default_value = "1")]
-        market_id: u32,
-        #[arg(long, value_enum, default_value = "noop")]
-        strategy: StrategyKind,
-        #[arg(long, default_value = "100.0")]
-        starting_cash: f64,
-        #[arg(long, default_value = "5.0")]
-        max_clip_usdc: f64,
-        #[arg(long, default_value = "0.30")]
-        max_drawdown_pct: f64,
-        #[arg(long, default_value = "250.0")]
-        max_daily_exposure_usdc: f64,
-        /// Binance spot symbol to load for momentum + regime signals (e.g.
-        /// BTCUSDT). Set to empty string to disable spot.
-        #[arg(long, default_value = "BTCUSDT")]
-        spot_symbol: String,
-        /// If set, write the JSON report to this path.
-        #[arg(long)]
-        out: Option<PathBuf>,
-        /// If set, write per-snapshot portfolio rows (JSONL) to this path.
-        #[arg(long)]
-        equity_curve: Option<PathBuf>,
-        /// Write per-decision attribution rows (JSONL) to this path.
-        #[arg(long)]
-        decision_log: Option<PathBuf>,
-        /// Only log every Nth decision event when writing `--decision-log`.
-        #[arg(long, default_value = "1")]
-        decision_log_every_n: usize,
-        /// Read data from a local cache mirror instead of S3.
-        #[arg(long)]
-        local_cache_dir: Option<PathBuf>,
-    },
     /// Discover Polymarket BTC-updown-5m markets for a given date and write
     /// the (asset_id, slug, close_ts, outcome) list to JSONL.
     DiscoverDay {
@@ -670,11 +592,6 @@ enum Cmd {
         /// JSONL of `MarketHandle` rows from `discover-day`.
         #[arg(long)]
         markets: PathBuf,
-        /// Accepted for backward compatibility only. Profile-driven strategy
-        /// overrides were removed along with the legacy strategies that used
-        /// them; passing this flag applies nothing to the run.
-        #[arg(long)]
-        profile: Option<PathBuf>,
         /// Chronological offset for smoke/diagnostic slices.
         #[arg(long, default_value_t = 0)]
         skip_markets: usize,
@@ -699,17 +616,13 @@ enum Cmd {
         max_per_market_exposure_frac: Option<f64>,
         #[arg(long, default_value = "BTCUSDT")]
         spot_symbol: String,
-        /// Load the perp complex for exo_fade belief (e.g. BTCUSDT). When unset,
-        /// defaults to `spot_symbol` for exo_fade runs (alpha parity).
+        /// Binance USD-M futures symbol to load alongside spot. No strategy
+        /// consumes perp data today, so this is off unless asked for.
         #[arg(long)]
         perp_symbol: Option<String>,
         /// Cache root for perp parquets (default: --local-cache-dir or data/cache).
         #[arg(long)]
         perp_cache_dir: Option<PathBuf>,
-        /// Experimental clean-directional tilt strength for exo_fade
-        /// (0 = off = validated baseline; UNVALIDATED research above 0).
-        #[arg(long, default_value_t = 0.0)]
-        directional_tilt_strength: f64,
         /// Comma-separated active strategy IDs.
         ///
         /// There are no deployable strategies. `noop` (the default) emits no
@@ -964,112 +877,6 @@ enum Cmd {
         /// Optional JSON output path for the computed summary.
         #[arg(long)]
         out: Option<PathBuf>,
-    },
-    /// Run a paper-mode replay on one market (historical tape + same execution stack as backtest).
-    Paper {
-        #[arg(long, default_value = "polymarket")]
-        exchange: String,
-        #[arg(long, default_value = "book_snapshot_25")]
-        channel: String,
-        #[arg(long)]
-        date: String,
-        #[arg(long)]
-        asset_id: String,
-        /// Slug of the market (e.g. btc-updown-5m-1778587500). Used to parse
-        /// the resolution timestamp when --close-ts is omitted.
-        #[arg(long)]
-        slug: Option<String>,
-        /// Resolution Unix epoch seconds. Overrides --slug parsing.
-        #[arg(long)]
-        close_ts: Option<i64>,
-        /// Force the resolution outcome (true = YES won). When omitted, infer
-        /// from final yes_mid >= 0.5.
-        #[arg(long)]
-        resolved_yes: Option<bool>,
-        #[arg(long, default_value = "1")]
-        market_id: u32,
-        #[arg(long, value_enum, default_value = "noop")]
-        strategy: StrategyKind,
-        #[arg(long, default_value = "100.0")]
-        starting_cash: f64,
-        #[arg(long, default_value = "5.0")]
-        max_clip_usdc: f64,
-        #[arg(long, default_value = "0.30")]
-        max_drawdown_pct: f64,
-        #[arg(long, default_value = "250.0")]
-        max_daily_exposure_usdc: f64,
-        /// Binance spot symbol to load for momentum + regime signals (e.g.
-        /// BTCUSDT). Set to empty string to disable spot.
-        #[arg(long, default_value = "BTCUSDT")]
-        spot_symbol: String,
-        /// If set, write the JSON report to this path.
-        #[arg(long)]
-        out: Option<PathBuf>,
-        /// If set, write per-snapshot portfolio rows (JSONL) to this path.
-        #[arg(long)]
-        equity_curve: Option<PathBuf>,
-        /// Write per-decision attribution rows (JSONL) to this path.
-        #[arg(long)]
-        decision_log: Option<PathBuf>,
-        /// Only log every Nth decision event when writing `--decision-log`.
-        #[arg(long, default_value = "1")]
-        decision_log_every_n: usize,
-        /// Read data from a local cache mirror instead of S3.
-        #[arg(long)]
-        local_cache_dir: Option<PathBuf>,
-    },
-    /// Run a live-mode replay on one market (historical tape + same execution stack for parity scaffolding).
-    Live {
-        #[arg(long, default_value = "polymarket")]
-        exchange: String,
-        #[arg(long, default_value = "book_snapshot_25")]
-        channel: String,
-        #[arg(long)]
-        date: String,
-        #[arg(long)]
-        asset_id: String,
-        /// Slug of the market (e.g. btc-updown-5m-1778587500). Used to parse
-        /// the resolution timestamp when --close-ts is omitted.
-        #[arg(long)]
-        slug: Option<String>,
-        /// Resolution Unix epoch seconds. Overrides --slug parsing.
-        #[arg(long)]
-        close_ts: Option<i64>,
-        /// Force the resolution outcome (true = YES won). When omitted, infer
-        /// from final yes_mid >= 0.5.
-        #[arg(long)]
-        resolved_yes: Option<bool>,
-        #[arg(long, default_value = "1")]
-        market_id: u32,
-        #[arg(long, value_enum, default_value = "noop")]
-        strategy: StrategyKind,
-        #[arg(long, default_value = "100.0")]
-        starting_cash: f64,
-        #[arg(long, default_value = "5.0")]
-        max_clip_usdc: f64,
-        #[arg(long, default_value = "0.30")]
-        max_drawdown_pct: f64,
-        #[arg(long, default_value = "250.0")]
-        max_daily_exposure_usdc: f64,
-        /// Binance spot symbol to load for momentum + regime signals (e.g.
-        /// BTCUSDT). Set to empty string to disable spot.
-        #[arg(long, default_value = "BTCUSDT")]
-        spot_symbol: String,
-        /// If set, write the JSON report to this path.
-        #[arg(long)]
-        out: Option<PathBuf>,
-        /// If set, write per-snapshot portfolio rows (JSONL) to this path.
-        #[arg(long)]
-        equity_curve: Option<PathBuf>,
-        /// Write per-decision attribution rows (JSONL) to this path.
-        #[arg(long)]
-        decision_log: Option<PathBuf>,
-        /// Only log every Nth decision event when writing `--decision-log`.
-        #[arg(long, default_value = "1")]
-        decision_log_every_n: usize,
-        /// Read data from a local cache mirror instead of S3.
-        #[arg(long)]
-        local_cache_dir: Option<PathBuf>,
     },
 }
 
@@ -1393,65 +1200,6 @@ async fn main() -> Result<()> {
             )
             .await
         }
-        Cmd::BacktestS3 {
-            exchange,
-            channel,
-            date,
-            asset_id,
-            slug,
-            close_ts,
-            resolved_yes,
-            market_id,
-            strategy,
-            starting_cash,
-            max_clip_usdc,
-            max_drawdown_pct,
-            max_daily_exposure_usdc,
-            spot_symbol,
-            out,
-            equity_curve,
-            decision_log,
-            decision_log_every_n,
-            local_cache_dir,
-        } => {
-            let channel: Channel = channel
-                .parse()
-                .map_err(|e: String| anyhow!("bad --channel: {e}"))?;
-            let close_ts_s = match (close_ts, slug.as_deref()) {
-                (Some(ts), _) => ts,
-                (None, Some(s)) => parse_close_ts_from_slug(s)?,
-                (None, None) => {
-                    return Err(anyhow!(
-                        "need either --close-ts or --slug to determine market resolution time"
-                    ));
-                }
-            };
-            let limits = PortfolioLimits {
-                max_drawdown_pct,
-                max_daily_exposure_usdc,
-                max_clip_usdc,
-                max_per_market_exposure_usdc: 15.0,
-            };
-            backtest_s3(
-                exchange,
-                channel,
-                date,
-                asset_id,
-                MarketId(market_id),
-                strategy,
-                starting_cash,
-                limits,
-                close_ts_s,
-                resolved_yes,
-                spot_symbol,
-                out,
-                equity_curve,
-                decision_log,
-                decision_log_every_n,
-                local_cache_dir,
-            )
-            .await
-        }
         Cmd::DiscoverDay {
             date,
             slug_prefix,
@@ -1540,7 +1288,6 @@ async fn main() -> Result<()> {
         }
         Cmd::WalkForward {
             markets,
-            profile,
             skip_markets,
             max_markets,
             starting_cash,
@@ -1552,7 +1299,6 @@ async fn main() -> Result<()> {
             spot_symbol,
             perp_symbol,
             perp_cache_dir,
-            directional_tilt_strength,
             strategies,
             allow_fixture,
             max_concurrent_fetches,
@@ -1620,7 +1366,6 @@ async fn main() -> Result<()> {
         } => {
             walk_forward(
                 markets,
-                profile,
                 skip_markets,
                 max_markets,
                 starting_cash,
@@ -1632,7 +1377,6 @@ async fn main() -> Result<()> {
             spot_symbol,
             perp_symbol,
             perp_cache_dir,
-            directional_tilt_strength,
             strategies,
             allow_fixture,
             max_concurrent_fetches,
@@ -1711,126 +1455,6 @@ async fn main() -> Result<()> {
                 tracing::info!(?path, "wrote result summary");
             }
             Ok(())
-        }
-        Cmd::Paper {
-            exchange,
-            channel,
-            date,
-            asset_id,
-            slug,
-            close_ts,
-            resolved_yes,
-            market_id,
-            strategy,
-            starting_cash,
-            max_clip_usdc,
-            max_drawdown_pct,
-            max_daily_exposure_usdc,
-            spot_symbol,
-            out,
-            equity_curve,
-            decision_log,
-            decision_log_every_n,
-            local_cache_dir,
-        } => {
-            let channel: Channel = channel
-                .parse()
-                .map_err(|e: String| anyhow!("bad --channel: {e}"))?;
-            let close_ts_s = match (close_ts, slug.as_deref()) {
-                (Some(ts), _) => ts,
-                (None, Some(s)) => parse_close_ts_from_slug(s)?,
-                (None, None) => {
-                    return Err(anyhow!(
-                        "need either --close-ts or --slug to determine market resolution time"
-                    ));
-                }
-            };
-            let limits = PortfolioLimits {
-                max_drawdown_pct,
-                max_daily_exposure_usdc,
-                max_clip_usdc,
-                max_per_market_exposure_usdc: 15.0,
-            };
-            run_market_backtest(
-                exchange,
-                channel,
-                date,
-                asset_id,
-                MarketId(market_id),
-                strategy,
-                starting_cash,
-                limits,
-                close_ts_s,
-                resolved_yes,
-                spot_symbol,
-                out,
-                equity_curve,
-                decision_log,
-                decision_log_every_n,
-                local_cache_dir,
-                MarketRunMode::Paper,
-            )
-            .await
-        }
-        Cmd::Live {
-            exchange,
-            channel,
-            date,
-            asset_id,
-            slug,
-            close_ts,
-            resolved_yes,
-            market_id,
-            strategy,
-            starting_cash,
-            max_clip_usdc,
-            max_drawdown_pct,
-            max_daily_exposure_usdc,
-            spot_symbol,
-            out,
-            equity_curve,
-            decision_log,
-            decision_log_every_n,
-            local_cache_dir,
-        } => {
-            let channel: Channel = channel
-                .parse()
-                .map_err(|e: String| anyhow!("bad --channel: {e}"))?;
-            let close_ts_s = match (close_ts, slug.as_deref()) {
-                (Some(ts), _) => ts,
-                (None, Some(s)) => parse_close_ts_from_slug(s)?,
-                (None, None) => {
-                    return Err(anyhow!(
-                        "need either --close-ts or --slug to determine market resolution time"
-                    ));
-                }
-            };
-            let limits = PortfolioLimits {
-                max_drawdown_pct,
-                max_daily_exposure_usdc,
-                max_clip_usdc,
-                max_per_market_exposure_usdc: 15.0,
-            };
-            run_market_backtest(
-                exchange,
-                channel,
-                date,
-                asset_id,
-                MarketId(market_id),
-                strategy,
-                starting_cash,
-                limits,
-                close_ts_s,
-                resolved_yes,
-                spot_symbol,
-                out,
-                equity_curve,
-                decision_log,
-                decision_log_every_n,
-                local_cache_dir,
-                MarketRunMode::Live,
-            )
-            .await
         }
     }
 }
@@ -2234,7 +1858,6 @@ fn string_value(array: &StringArray, row: usize) -> Option<&str> {
 #[allow(clippy::too_many_arguments)]
 async fn walk_forward(
     markets_path: PathBuf,
-    profile: Option<PathBuf>,
     skip_markets: usize,
     max_markets: usize,
     starting_cash: f64,
@@ -2246,7 +1869,6 @@ async fn walk_forward(
     spot_symbol: String,
     perp_symbol: Option<String>,
     perp_cache_dir: Option<PathBuf>,
-    directional_tilt_strength: f64,
     strategies_csv: String,
     allow_fixture: bool,
     max_concurrent_fetches: usize,
@@ -2311,14 +1933,6 @@ async fn walk_forward(
     allow_mixed_basis: bool,
     era_diagnostics: bool,
 ) -> Result<()> {
-    if let Some(path) = &profile {
-        tracing::warn!(
-            path = %path.display(),
-            "--profile is accepted for backward compatibility only and is NOT applied; \
-             profile-driven strategy overrides were removed along with the legacy strategies"
-        );
-    }
-
     let file = std::fs::File::open(&markets_path)
         .with_context(|| format!("open markets file {}", markets_path.display()))?;
     let mut markets: Vec<discovery::MarketHandle> = Vec::new();
@@ -2456,7 +2070,6 @@ async fn walk_forward(
         spot_symbol,
         perp_symbol,
         perp_cache_dir: perp_cache_dir.or(local_cache_dir.clone()),
-        directional_tilt_strength,
         strategies,
         max_concurrent_fetches,
         replay_sample_ms,
@@ -2531,14 +2144,7 @@ async fn walk_forward(
     };
 
     let active_strats: Vec<&str> = wf_cfg.strategies.iter().map(|s| s.name()).collect();
-    let profile_log = profile.as_ref().map(|path| {
-        serde_json::json!({
-            "path": path
-        })
-    });
-
     let effective_config = serde_json::json!({
-        "profile": profile_log,
         "strategies": active_strats,
         "starting_cash_usdc": wf_cfg.starting_cash_usdc,
         "replay_sample_ms": wf_cfg.replay_sample_ms,
@@ -2560,7 +2166,7 @@ async fn walk_forward(
         daily_loss_cap_pct = wf_cfg.daily_loss_cap_pct,
         clip_drawdown_hard_pct = wf_cfg.clip_drawdown_hard_pct,
         replay_sample_ms = wf_cfg.replay_sample_ms,
-        "effective walk-forward profile"
+        "effective walk-forward config"
     );
 
     tracing::info!(markets = markets.len(), "starting walk-forward");
@@ -2615,7 +2221,6 @@ async fn walk_forward(
             });
         let manifest_path = p.with_file_name("run_manifest.json");
         let manifest = serde_json::json!({
-            "profile_path": profile.as_ref().map(|p| p.to_string_lossy()),
             "git_sha": git_sha,
             "timestamp": chrono::Utc::now().to_rfc3339(),
             "command": std::env::args().collect::<Vec<_>>(),
@@ -2675,14 +2280,6 @@ fn parse_strategies(csv: &str, allow_fixture: bool) -> Result<Vec<StratId>> {
     }
 
     Ok(out)
-}
-
-/// Parses `btc-updown-5m-1778587500` -> 1778587500.
-fn parse_close_ts_from_slug(slug: &str) -> Result<i64> {
-    slug.rsplit('-')
-        .next()
-        .and_then(|t| t.parse::<i64>().ok())
-        .ok_or_else(|| anyhow!("could not parse resolution timestamp from slug: {slug}"))
 }
 
 async fn fetch_tape(
@@ -2822,180 +2419,6 @@ async fn inspect_s3(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn backtest_s3(
-    exchange: String,
-    channel: Channel,
-    date: String,
-    asset_id: String,
-    market_id: MarketId,
-    strategy: StrategyKind,
-    starting_cash: f64,
-    limits: PortfolioLimits,
-    close_ts_seconds: i64,
-    resolved_yes: Option<bool>,
-    spot_symbol: String,
-    out: Option<PathBuf>,
-    equity_curve: Option<PathBuf>,
-    decision_log: Option<PathBuf>,
-    decision_log_every_n: usize,
-    local_cache_dir: Option<PathBuf>,
-) -> Result<()> {
-    run_market_backtest(
-        exchange,
-        channel,
-        date,
-        asset_id,
-        market_id,
-        strategy,
-        starting_cash,
-        limits,
-        close_ts_seconds,
-        resolved_yes,
-        spot_symbol,
-        out,
-        equity_curve,
-        decision_log,
-        decision_log_every_n,
-        local_cache_dir,
-        MarketRunMode::Backtest,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn run_market_backtest(
-    exchange: String,
-    channel: Channel,
-    date: String,
-    asset_id: String,
-    market_id: MarketId,
-    strategy: StrategyKind,
-    starting_cash: f64,
-    limits: PortfolioLimits,
-    close_ts_seconds: i64,
-    resolved_yes: Option<bool>,
-    spot_symbol: String,
-    out: Option<PathBuf>,
-    equity_curve: Option<PathBuf>,
-    decision_log: Option<PathBuf>,
-    decision_log_every_n: usize,
-    local_cache_dir: Option<PathBuf>,
-    mode: MarketRunMode,
-) -> Result<()> {
-    let (store, events, _stats) = fetch_tape(
-        &exchange,
-        channel,
-        &date,
-        &asset_id,
-        market_id,
-        local_cache_dir.as_ref(),
-    )
-    .await?;
-
-    let spot_history = if spot_symbol.is_empty() {
-        SpotHistory::default()
-    } else {
-        load_spot_history(&store, &spot_symbol, &date).await?
-    };
-
-    let market_close_ns = close_ts_seconds.saturating_mul(1_000_000_000);
-    let market_run_mode = mode.as_str();
-    let cfg = RunnerConfig {
-        starting_cash_usdc: starting_cash,
-        market_open_ns: market_close_ns.saturating_sub(300_000_000_000),
-        market_close_ns,
-        resolved_yes,
-        portfolio_limits: limits,
-        equity_curve_jsonl: equity_curve,
-        snapshot_every_n: 200,
-        maker_rebate_bps: 10.0,
-        taker_fee_bps: 0.0,
-        // Out of scope for this task: run_market_backtest backs Paper/Live/
-        // BacktestS3, not the walk-forward path this constraint closes.
-        // Left at 0.0 (unchanged pre-existing behavior) rather than silently
-        // changing execution economics for live/paper trading.
-        taker_fee_curve_rate: 0.0,
-        max_inventory_imbalance_shares: 1.5,
-        taker_slippage_bps: 15.0,
-        taker_latency_ms: 0,
-        decision_log_jsonl: decision_log,
-        decision_log_parquet: None,
-        strategy_name: market_run_mode.to_string(),
-        shared_model_state: None,
-        update_model_state_on_resolution: true,
-        meta_calibrator_snapshot: None,
-        enable_meta_calibration: true,
-        model_market_context: pm_model::ModelMarketContext::default(),
-        prior_market_range_1d: 0.0,
-        prior_market_range_3d: 0.0,
-        prior_market_range_7d: 0.0,
-        model_btc_whipsaw_risk_weight: 0.16,
-        model_btc_path_inefficiency_risk_weight: 0.10,
-        model_btc_reversal_pressure_risk_weight: 0.12,
-        decision_log_every_n,
-        enforce_model_gate: true,
-        model_gate_min_confidence: 0.68,
-        model_gate_max_risk: 0.72,
-        model_gate_min_edge: 0.00,
-    };
-    let trade_history = match resolve_pm_trades_day(&store, &date, &asset_id).await {
-        Ok(path) => match load_pm_trades_async(store.store(), path).await {
-            Ok((trades, stats)) => {
-                tracing::info!(
-                    rows = stats.rows_emitted,
-                    buys = stats.buy_count,
-                    sells = stats.sell_count,
-                    "pm trades loaded"
-                );
-                TradeHistory::new(trades)
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "pm trades load failed, defaulting to empty trade history");
-                TradeHistory::default()
-            }
-        },
-        Err(_) => TradeHistory::default(),
-    };
-
-    let started = Instant::now();
-    let report = match strategy {
-        StrategyKind::Noop => {
-            let mut s = NoopStrategy;
-            run_backtest(&events, &spot_history, &trade_history, &mut s, &cfg)?
-        }
-    };
-    tracing::info!(
-        elapsed_ms = started.elapsed().as_millis() as u64,
-        events = report.events_processed,
-        mode = market_run_mode,
-        ?strategy,
-        "market run done"
-    );
-
-    pretty_print(&report);
-
-    if let Some(path) = out {
-        let json = serde_json::to_string_pretty(&report)?;
-        std::fs::write(&path, json)?;
-        tracing::info!(?path, "wrote report");
-    }
-    Ok(())
-}
-
-async fn load_spot_history(store: &TelonexStore, symbol: &str, date: &str) -> Result<SpotHistory> {
-    let load_started = Instant::now();
-    let path = resolve_binance_day(store, "agg_trades", symbol, date).await?;
-    let (ticks, stats) = load_binance_agg_trades_async(store.store(), path).await?;
-    tracing::info!(
-        symbol = %symbol,
-        date = %date,
-        ticks = stats.rows_emitted,
-        load_ms = load_started.elapsed().as_millis() as u64,
-        "spot history loaded"
-    );
-    Ok(SpotHistory::new(ticks))
-}
 
 async fn prep_cache_cmd(
     markets_path: PathBuf,

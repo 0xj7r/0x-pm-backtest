@@ -270,13 +270,11 @@ pub struct WalkForwardConfig {
     pub max_per_market_exposure_usdc: f64,
     pub max_per_market_exposure_frac: Option<f64>,
     pub spot_symbol: String,
-    /// Binance USD-M futures symbol for exo_fade perp-led belief (e.g. BTCUSDT).
-    /// When unset and exo_fade is active, defaults to `spot_symbol` if not `auto`.
+    /// Binance USD-M futures symbol to load alongside spot. Only an explicit
+    /// request loads a perp complex; no strategy consumes one today.
     pub perp_symbol: Option<String>,
     /// Cache root for perp parquets (defaults to `data/cache`).
     pub perp_cache_dir: Option<PathBuf>,
-    /// Experimental clean-directional tilt for exo_fade (0 = off = validated baseline).
-    pub directional_tilt_strength: f64,
     pub strategies: Vec<StratId>,
     pub max_concurrent_fetches: usize,
     /// Optional research-speed replay thinning. `0` keeps every raw event.
@@ -462,7 +460,6 @@ impl Default for WalkForwardConfig {
             spot_symbol: "auto".to_string(),
             perp_symbol: None,
             perp_cache_dir: None,
-            directional_tilt_strength: 0.0,
             strategies: StratId::ACTIVE.to_vec(),
             max_concurrent_fetches: 64,
             replay_sample_ms: 0,

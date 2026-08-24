@@ -16,23 +16,29 @@ MarketData → FeatureState → AlphaModel → StrategyDecision → RiskEngine �
 | **AlphaModel** | `pm-alpha::model` | `belief(ExoState) → P(up)`; strict exogenous |
 | **StrategyDecision** | `pm-alpha::decide`, `pm-strategy` | Entry/exit gates, side pick, rearm state |
 | **RiskEngine** | `pm-risk` | Kelly sizing, exposure caps, drawdown halt |
-| **Execution** | `pm-app::runner` | Taker/maker fills, fees, slippage, latency |
+| **Execution** | `pm-backtest::fills` | Taker/maker fills, fees, slippage, latency |
 | **Portfolio** | `pm-risk::PortfolioState` | Equity, daily loss, per-market caps |
 
 ## Strategy
 
 A **Strategy** implements `pm_strategy::Strategy::on_event` and composes the layers
 above. Configuration is a serde struct (`*Config`) of compiled defaults plus CLI
-flags; the legacy `--profile` flag is still accepted but applies nothing (warns)
-since the TOML-profile system was removed. Decision logic that must match live is
-pure functions in `pm-alpha::decide` (SSOT).
+flags. Decision logic that must match live is pure functions in
+`pm-alpha::decide` (SSOT).
 
-## Active strategies
+## Strategies
+
+**There are none, deliberately.** The 2026-08 framework reset ended with zero
+deployable strategies: the framework is the deliverable, and a new strategy
+starts from a codebase that cannot report the numbers that misled the June 2026
+live cycle. What `--strategies` accepts:
 
 | Name | Type | Status |
 |---|---|---|
-| `exo_fade` | Exogenous fade + timed exit | canonical reference; scheduled for removal in Plan 2 |
-| `noop` | Emits no orders | baseline |
+| `noop` | Emits no orders | the default; exercises the loader, fill engine and accounting without taking a position |
+| `fixture` | `ThresholdFadeStrategy`: buy the cheap side once per market, hold to resolution | TEST-ONLY. Not deployable, rejected without `--allow-fixture`. It exists solely to anchor the golden replay gate so the hash covers the order/fill/settlement path |
+
+Neither is alpha. The fixture loses money on the pinned day, on purpose.
 
 ## Quant signals (SSOT)
 
@@ -50,3 +56,10 @@ walk-forward @ $1K. See `docs/research/strategy-hunt/04-first-principles.md`.
 Backtests run through `pm-app walk-forward` with `--portfolio-mode` and
 `--starting-cash`. The `alpha` subcommand is a fast research harness only; promoted
 strategies must pass through walk-forward before deployment.
+
+The engine's own regression gate is the pinned-tape golden replay:
+`bash scripts/research/golden_replay.sh check` must print `GOLDEN: IDENTICAL`
+after any change meant to be behavior-preserving. It replays a fixed day
+through the `fixture` strategy and hashes the normalized output. The hash is an
+anchor: a divergence means bisect the engine, not re-record the hash. See
+`tests/golden/README.md`.

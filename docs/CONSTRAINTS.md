@@ -26,16 +26,27 @@ test name).
   accounting (`docs/fill-model-calibration-2026-07.md`).
 - Enforcement: `crates/pm-backtest/src/fills.rs` applies `taker_fee_bps` AND
   `taker_fee_curve_rate` (via `curve_fee`) on every taker fill, no bypass
-  path (audited, comment at `crates/pm-app/src/main.rs:2458`). Maker fills
-  are unaffected (rebate only). Default `taker_fee_curve_rate` is `0.07` in
-  both `RunnerConfig` and `WalkForwardConfig`
+  path (`crates/pm-backtest/src/fills.rs::curve_fee`, charged unconditionally
+  at the single taker-fill site). Maker fills are unaffected (rebate only).
+  Default `taker_fee_curve_rate` is `0.07` in both `RunnerConfig` and `WalkForwardConfig`
   (`crates/pm-backtest/src/config.rs`), serialized into the config
   fingerprint. A sub-canonical rate is rejected unless `--fantasy` grants a
   watermarked override:
   `crates/pm-backtest/src/validate.rs::validate_fee_rate`, wired into
   `walk-forward` via `--fee-curve-rate` (default `0.07`) next to the latency
   floor check in `crates/pm-app/src/main.rs`. Closed 2026-08-24 (golden
-  hash re-recorded; see `tests/golden/README.md`). Tests:
+  hash re-recorded; see `tests/golden/README.md`).
+
+  Strengthened 2026-08-24 by the phase-2 CLI thinning: this rule previously
+  carried a documented carve-out. `run_market_backtest`, which backed the
+  `backtest-s3`, `paper` and `live` subcommands, hardcoded
+  `taker_fee_curve_rate: 0.0`, so those three paths charged no curve fee at
+  all. All three subcommands and that function were deleted with the
+  strategies they ran, so the carve-out is gone rather than merely
+  documented. The one remaining zero-rate `RunnerConfig` is
+  `collect_training_samples_for_market` (`crates/pm-backtest/src/engine.rs`),
+  which replays a `NoopStrategy` to harvest meta-training samples and never
+  submits an order, so no fill and no fee arises. Tests:
   `curve_fee_at_half_is_175_cents_per_hundred_shares`,
   `curve_fee_vanishes_at_extremes`,
   `taker_fill_charges_curve_fee_and_maker_does_not`,

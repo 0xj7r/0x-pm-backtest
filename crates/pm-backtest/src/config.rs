@@ -244,6 +244,12 @@ pub struct WalkForwardConfig {
     /// Seed for the jitter PRNG (splitmix64, inlined; no new deps). Same seed
     /// yields the same latency vec across runs for reproducibility.
     pub jitter_seed: u64,
+    /// Optional multi-window validation label (e.g. `feb2026`). When set, the
+    /// summary records it and the validation status is derived from whether it
+    /// is a member of the canonical validated set AND the caller asserted the
+    /// full set ran. `None` for ordinary single runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_label: Option<String>,
     /// **Portfolio mode**: process markets in chronological order, compound
     /// equity from one market into the next. Disables parallelism (each
     /// market's starting cash depends on the previous market's end cash).
@@ -385,6 +391,7 @@ impl Default for WalkForwardConfig {
             jitter: 0,
             jitter_latency_spread_ms: 250,
             jitter_seed: 42,
+            window_label: None,
             portfolio_mode: false,
             clip_fraction_of_equity: None,
             clip_drawdown_soft_pct: 1.0,

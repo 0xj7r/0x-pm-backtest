@@ -75,9 +75,12 @@ echo "day manifest: $MARKET_COUNT markets" >&2
 # checkpoint_summary_out fields echo back the --out-* paths, which are
 # call-site artifacts (e.g. differ between /tmp/golden-run.json and a
 # future --record-to override) rather than replay output, so they are
-# stripped too.
+# stripped too. `.validation` is an always-present scorecard field (defaults
+# to "UNVALIDATED") unrelated to replay bytes, so it is stripped as well;
+# the skip-serializing-if optional blocks (jitter, window_label, sizing)
+# stay None in this non-jitter, no-bankroll run and never reach the JSON.
 jq -c -S '.' "$OUT_MARKETS" | jq -s -c 'sort_by(.asset_id)' > /tmp/golden-run.markets.sorted.json
-jq -S 'del(.config_fingerprint, .run_config.shared.checkpoint_markets_out, .run_config.shared.checkpoint_summary_out)' "$OUT_SUMMARY" > /tmp/golden-run.summary.normalized.json
+jq -S 'del(.config_fingerprint, .validation, .run_config.shared.checkpoint_markets_out, .run_config.shared.checkpoint_summary_out)' "$OUT_SUMMARY" > /tmp/golden-run.summary.normalized.json
 
 jq -n -c \
   --slurpfile markets /tmp/golden-run.markets.sorted.json \

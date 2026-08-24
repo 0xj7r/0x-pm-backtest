@@ -223,7 +223,7 @@ pub fn estimate_fair_value_with_momentum(
 }
 
 /// Standard normal CDF via erf: Phi(x) = 0.5 * (1 + erf(x / sqrt(2))).
-pub fn standard_normal_cdf(x: f64) -> f64 {
+pub(crate) fn standard_normal_cdf(x: f64) -> f64 {
     if !x.is_finite() {
         if x.is_nan() {
             return f64::NAN;

@@ -616,8 +616,10 @@ enum Cmd {
         max_per_market_exposure_frac: Option<f64>,
         #[arg(long, default_value = "BTCUSDT")]
         spot_symbol: String,
-        /// Binance USD-M futures symbol to load alongside spot. No strategy
-        /// consumes perp data today, so this is off unless asked for.
+        /// Binance USD-M futures symbol. NOTE: the walk-forward perp path is
+        /// currently INERT. No strategy consumes perp data, so nothing reads
+        /// what this would load. The loaders are retained as plumbing for a
+        /// future perp-weighted belief; setting this today changes nothing.
         #[arg(long)]
         perp_symbol: Option<String>,
         /// Cache root for perp parquets (default: --local-cache-dir or data/cache).

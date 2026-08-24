@@ -270,10 +270,14 @@ pub struct WalkForwardConfig {
     pub max_per_market_exposure_usdc: f64,
     pub max_per_market_exposure_frac: Option<f64>,
     pub spot_symbol: String,
-    /// Binance USD-M futures symbol to load alongside spot. Only an explicit
-    /// request loads a perp complex; no strategy consumes one today.
+    /// Binance USD-M futures symbol. INERT: the walk-forward perp path has no
+    /// consumer (no strategy reads perp data), so this is accepted and
+    /// currently ignored. Retained as plumbing for a future perp-weighted
+    /// belief; `load_walkforward_perp` in `portfolio.rs` is the loader waiting
+    /// for a caller.
     pub perp_symbol: Option<String>,
-    /// Cache root for perp parquets (defaults to `data/cache`).
+    /// Cache root for perp parquets (defaults to `data/cache`). Inert for the
+    /// same reason as `perp_symbol`.
     pub perp_cache_dir: Option<PathBuf>,
     pub strategies: Vec<StratId>,
     pub max_concurrent_fetches: usize,

@@ -49,11 +49,18 @@ pub struct OrderRequest {
 /// was still here to define the surface; re-running it now would delete the
 /// contract itself rather than dead plumbing.
 ///
+/// Every surviving field carries a real per-event value from the runner. That
+/// is the bar for being here: a field the runner cannot populate is worse than
+/// a missing one, because a missing field fails at compile time while a
+/// hardcoded one silently hands the strategy a lie. `no_ask` was removed for
+/// exactly that reason: it was documented as the real NO-leg top of book but
+/// the runner only ever wrote `0.0`.
+///
 /// Adding a field back is cheap (the field plus one line in the runner's `Ctx`
-/// literal) and should land in the same change as the strategy that reads it.
-/// Notably absent: the strategy's own `yes_shares`/`no_shares` position, which
-/// was removed as write-only and will likely be the first thing an
-/// inventory-managing strategy needs back.
+/// literal) and should land in the same change as the strategy that reads it,
+/// with a real value at the literal site. Notably absent: the strategy's own
+/// `yes_shares`/`no_shares` position, which was removed as write-only and will
+/// likely be the first thing an inventory-managing strategy needs back.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Ctx {
     pub events_seen: u64,
@@ -70,9 +77,6 @@ pub struct Ctx {
     /// Market resolution time in ns since epoch (UTC). Strategies use this
     /// to compute time-to-close and gate early/mid/late behaviour.
     pub market_close_ns: i64,
-    /// Real NO-leg top of book ask (from the opposing ladder, NOT synthetic
-    /// 1-yes). 0.0 when no NO book is available.
-    pub no_ask: f32,
 }
 
 #[derive(Debug, Default, Clone)]

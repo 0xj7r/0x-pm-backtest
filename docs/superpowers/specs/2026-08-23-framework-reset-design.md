@@ -72,6 +72,29 @@ kinds of numbers that misled us before.
 "Kill" means delete from the working tree on main. Git history keeps everything
 reachable; nothing is force-pushed or rewritten.
 
+### Addendum 2026-08-24: crates/pm-model does NOT die (deviation)
+
+Phase 2 removed the last strategies, which was the premise for expecting
+`pm-model` to fall out. It did not, and the repo is knowingly divergent from
+the "Dies" list and from section 3's target workspace on this one crate.
+
+The strategy coupling is gone: `Ctx.model_output` / `Ctx.model_attribution`
+were deleted as write-only. What holds the crate alive is the engine's own
+per-event loop, which evaluates the canonical model unconditionally (not behind
+`enforce_model_gate`) and feeds it to three live consumers: meta-calibration
+sample collection, the `FillModelContext` built for every order request (the
+fill model itself), and the ~40-column `DecisionLogRow` feature stack. None of
+that is strategy-specific.
+
+Deleting it is therefore a deliberate behavior change, not a byproduct of
+removing strategies: it alters the walk-forward summary JSON shape
+(`meta_calibration`, the `run_config.shared` meta keys,
+`per_strategy.model_fill_quality`, `orders_rejected_model_gate*`) and so must
+re-anchor `tests/golden/day-2026-06-25-fixture.sha256` in the same commit. The
+correct scoping for any follow-up is "retire the meta-calibration research
+layer and the decision-log feature stack", with the crate dropping out as a
+byproduct. Full trace and reasoning: `docs/OPEN-QUESTIONS.md` item 5.
+
 ### Explicitly out of scope
 
 - polymarket-agent changes, except one landmine fix: fast_live.rs:65 compiles

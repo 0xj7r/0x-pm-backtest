@@ -269,7 +269,6 @@ pub fn run_backtest<S: Strategy>(
             regime_sign_flip_rate: whipsaw_snapshot.sign_flip_rate,
             regime_realized_vol_180s_bps: whipsaw_snapshot.realized_vol_180s_bps,
             market_close_ns: cfg.market_close_ns,
-            no_ask: 0.0,
         };
         let (output, strategy_model_output) = strategy.on_event_scored(event, &ctx, spot, trades);
         let strategy_emitted_model_output = strategy_model_output.is_some();

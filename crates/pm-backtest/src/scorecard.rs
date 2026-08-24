@@ -15,6 +15,7 @@ use crate::fills::Fill;
 use crate::accounting::{MarketResult, StrategyMarketResult, buy_fill_won, fill_resolution_pnl};
 use crate::config::WalkForwardConfig;
 use crate::engine::{MetaSampleLimits, StratId, evaluate_meta_calibration, filter_meta_samples_for_training, market_balanced_meta_samples};
+use crate::fingerprint::config_fingerprint;
 use crate::portfolio::{SharedRunConfig, VolatilityBand};
 
 mod summary;
@@ -27,6 +28,8 @@ pub use summary::{
 pub struct WalkForwardSummary {
     pub markets_attempted: usize,
     pub markets_succeeded: usize,
+    /// 16-hex sha256 prefix of the canonical JSON of the resolved run config.
+    pub config_fingerprint: Option<String>,
     /// Key runtime controls used to produce this summary.
     pub run_config: Option<SummaryRunConfig>,
     /// Overall aggregate for all markets.
@@ -646,6 +649,7 @@ pub fn write_portfolio_checkpoint(
     oos_meta_samples: &[MetaTrainingSample],
 ) -> Result<()> {
     let mut summary = aggregate(results, &cfg.strategies);
+    summary.config_fingerprint = Some(config_fingerprint(cfg));
     summary.run_config = Some(summary_run_config(cfg));
     if let Some(report) = meta_report {
         let mut report = report.clone();
@@ -940,6 +944,7 @@ pub fn aggregate(results: &[MarketResult], strategies: &[StratId]) -> WalkForwar
             .iter()
             .filter(|r| !r.per_strategy.is_empty())
             .count(),
+        config_fingerprint: None,
         run_config: None,
         per_strategy,
         by_volatility_band,

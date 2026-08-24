@@ -56,6 +56,9 @@ clap          = { version = "4", features = ["derive"] }
 bincode       = "1"
 zstd          = "0.13"
 
+# Hashing (config fingerprinting)
+sha2          = "0.10"
+
 
 # HTTP (Telonex availability lookups)
 reqwest       = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }

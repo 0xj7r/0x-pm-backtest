@@ -2128,6 +2128,9 @@ mod bootstrap {
         // uses) so the bootstrap vol matches the live tick-sampled vol and the
         // engine has parity from t=0.
         match warm_spot_1s(&core, 3600).await {
+            // Zero rows is not an error, but it is not a warm buffer either:
+            // say so rather than logging "pre-warmed" over an empty backfill.
+            Ok(0) => tracing::warn!("spot 1s klines pre-warm returned no candles; live warm-up fallback"),
             Ok(n) => tracing::info!(klines = n, "spot buffer pre-warmed from Binance 1s klines"),
             Err(e) => tracing::warn!(error = %e, "spot 1s klines pre-warm failed; live warm-up fallback"),
         }
@@ -2198,29 +2201,47 @@ mod bootstrap {
         }
     }
 
-    async fn warm_klines(core: &Core, url: &str, perp: bool) -> anyhow::Result<usize> {
-        let body: serde_json::Value = reqwest::get(url).await?.json().await?;
+    /// One Binance klines page as `(close_ms, close_price)` rows.
+    ///
+    /// A non-array body is an ERROR, never an empty page. Binance answers a
+    /// rejected request with an object (`{"code":-1121,"msg":...}`), and the
+    /// callers below treat an empty page as "pagination finished" -- so
+    /// conflating the two would turn a refused warmup into a silent success
+    /// and leave the engine running on a cold vol buffer while the log said
+    /// "pre-warmed".
+    ///
+    /// Malformed individual rows are skipped rather than fatal: Binance has
+    /// never mixed row shapes within a page, and one unparseable candle in a
+    /// 1000-row backfill is not worth failing the whole warmup over.
+    fn parse_klines_page(body: &serde_json::Value) -> anyhow::Result<Vec<(i64, f64)>> {
         let arr = body
             .as_array()
-            .context("binance klines response was not an array")?;
+            .with_context(|| format!("binance klines response was not an array: {body}"))?;
+        Ok(arr
+            .iter()
+            .filter_map(|k| {
+                let close_ms = k.get(6).and_then(serde_json::Value::as_i64)?;
+                let close_px = k
+                    .get(4)
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|s| s.parse::<f64>().ok())?;
+                Some((close_ms, close_px))
+            })
+            .collect())
+    }
+
+    async fn warm_klines(core: &Core, url: &str, perp: bool) -> anyhow::Result<usize> {
+        let body: serde_json::Value = reqwest::get(url).await?.json().await?;
+        let rows = parse_klines_page(&body)?;
         let mut core = core.lock().expect("shadow core poisoned");
-        let mut n = 0usize;
-        for k in arr {
-            let close_ms = k.get(6).and_then(serde_json::Value::as_i64);
-            let close_px = k
-                .get(4)
-                .and_then(serde_json::Value::as_str)
-                .and_then(|s| s.parse::<f64>().ok());
-            if let (Some(ms), Some(px)) = (close_ms, close_px) {
-                if perp {
-                    core.push_perp(ms, ms, px, 0.0, false);
-                } else {
-                    core.push_spot(ms, ms, px, 0.0, false);
-                }
-                n += 1;
+        for (ms, px) in &rows {
+            if perp {
+                core.push_perp(*ms, *ms, *px, 0.0, false);
+            } else {
+                core.push_spot(*ms, *ms, *px, 0.0, false);
             }
         }
-        Ok(n)
+        Ok(rows.len())
     }
 
     /// Backfill the spot buffer with ~`seconds` of 1s klines (Binance caps at
@@ -2238,24 +2259,17 @@ mod bootstrap {
                 start
             );
             let body: serde_json::Value = client.get(&url).send().await?.json().await?;
-            let arr = match body.as_array() {
-                Some(a) if !a.is_empty() => a,
-                _ => break,
-            };
-            let mut last_close = start;
+            let rows = parse_klines_page(&body)
+                .with_context(|| format!("1s klines page from {start}"))?;
+            if rows.is_empty() {
+                break;
+            }
+            let last_close = advance_cursor(&rows, start);
             {
                 let mut core_g = core.lock().expect("shadow core poisoned");
-                for k in arr {
-                    let close_ms = k.get(6).and_then(serde_json::Value::as_i64);
-                    let close_px = k
-                        .get(4)
-                        .and_then(serde_json::Value::as_str)
-                        .and_then(|s| s.parse::<f64>().ok());
-                    if let (Some(ms), Some(px)) = (close_ms, close_px) {
-                        core_g.push_spot(ms, ms, px, 0.0, false);
-                        last_close = ms;
-                        total += 1;
-                    }
+                for (ms, px) in &rows {
+                    core_g.push_spot(*ms, *ms, *px, 0.0, false);
+                    total += 1;
                 }
             }
             if last_close <= start {
@@ -2264,6 +2278,73 @@ mod bootstrap {
             start = last_close + 1;
         }
         Ok(total)
+    }
+
+    /// Next page cursor: the newest close time in the page, or `start` when
+    /// the page went nowhere (which stops the loop rather than spinning).
+    fn advance_cursor(rows: &[(i64, f64)], start: i64) -> i64 {
+        rows.iter().map(|(ms, _)| *ms).max().unwrap_or(start)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{advance_cursor, parse_klines_page};
+
+        fn kline(close_ms: i64, close_px: &str) -> serde_json::Value {
+            serde_json::json!([0, "1", "2", "3", close_px, "5", close_ms, "7"])
+        }
+
+        #[test]
+        fn parses_a_normal_page() {
+            let body = serde_json::json!([kline(1_000, "100.5"), kline(2_000, "101.25")]);
+            let rows = parse_klines_page(&body).unwrap();
+            assert_eq!(rows, vec![(1_000, 100.5), (2_000, 101.25)]);
+        }
+
+        #[test]
+        fn empty_array_is_a_finished_pagination_not_an_error() {
+            let rows = parse_klines_page(&serde_json::json!([])).unwrap();
+            assert!(rows.is_empty());
+        }
+
+        #[test]
+        fn binance_error_object_is_an_error_not_an_empty_page() {
+            // The bug this replaces: `body.as_array()` returning None was
+            // treated as end-of-pagination, so a refused warmup returned
+            // Ok(0) and the caller logged "pre-warmed" over a cold buffer.
+            let body = serde_json::json!({"code": -1121, "msg": "Invalid symbol."});
+            let err = parse_klines_page(&body).unwrap_err().to_string();
+            assert!(err.contains("was not an array"), "{err}");
+            assert!(err.contains("-1121"), "the body must reach the log: {err}");
+        }
+
+        #[test]
+        fn html_error_page_is_an_error() {
+            let body = serde_json::Value::String("<html>451</html>".to_string());
+            assert!(parse_klines_page(&body).is_err());
+        }
+
+        #[test]
+        fn malformed_rows_are_skipped_and_the_rest_survive() {
+            let body = serde_json::json!([
+                kline(1_000, "100.0"),
+                serde_json::json!([0, "1", "2", "3", "not-a-number", "5", 2_000, "7"]),
+                serde_json::json!(["short"]),
+                kline(3_000, "102.0"),
+            ]);
+            let rows = parse_klines_page(&body).unwrap();
+            assert_eq!(rows, vec![(1_000, 100.0), (3_000, 102.0)]);
+        }
+
+        #[test]
+        fn cursor_advances_to_the_newest_close_and_never_backwards() {
+            assert_eq!(advance_cursor(&[(1_000, 1.0), (5_000, 1.0)], 900), 5_000);
+            // Out-of-order rows still advance by the max, not the last.
+            assert_eq!(advance_cursor(&[(5_000, 1.0), (1_000, 1.0)], 900), 5_000);
+            // A page whose rows all failed to parse leaves the cursor put, so
+            // `warm_spot_1s` breaks instead of refetching the same window.
+            assert_eq!(advance_cursor(&[], 900), 900);
+        }
     }
 }
 

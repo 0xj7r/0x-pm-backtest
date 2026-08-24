@@ -896,6 +896,35 @@ enum Cmd {
         /// `FANTASY-` prefix is applied to output filenames.
         #[arg(long, default_value_t = false)]
         fantasy: bool,
+        /// Run the walk-forward N times at deterministically seeded perturbed
+        /// taker latencies and report the P&L spread (p10/p50/p90) instead of a
+        /// point estimate. 0 (default) runs once. Runs are serial: a
+        /// 288-market day at N=5 is ~5x the single-run wall time.
+        #[arg(long, default_value_t = 0)]
+        jitter: usize,
+        /// Half-width (ms) of the uniform latency jitter band around
+        /// --taker-latency-ms. Each draw is clamped up to the 750ms truthful
+        /// floor unless --fantasy is granted.
+        #[arg(long, default_value_t = 250)]
+        jitter_latency_spread_ms: u64,
+        /// Seed for the jitter PRNG (same seed reproduces the same latencies).
+        #[arg(long, default_value_t = 42)]
+        jitter_seed: u64,
+        /// Optional multi-window validation label (e.g. `feb2026`). Recorded in
+        /// the summary; the validation status is derived from it plus
+        /// --validated-set-complete.
+        #[arg(long)]
+        window_label: Option<String>,
+        /// Assert that the full canonical validated window set ran. Only the
+        /// multi-window driver script sets this; a single run can never claim
+        /// validated status by itself.
+        #[arg(long, default_value_t = false)]
+        validated_set_complete: bool,
+        /// Bankroll (USD) for the sizing-realism block. When set, the summary
+        /// carries a haircut P&L (winners x0.82, losers full), the smallest
+        /// clip the sizing implies, and the 5-share floor/ruin flag.
+        #[arg(long)]
+        bankroll: Option<f64>,
     },
     /// Summarize a walk-forward `markets.jsonl` result file.
     SummarizeMarkets {
@@ -1550,6 +1579,12 @@ async fn main() -> Result<()> {
             out_markets,
             out_summary,
             fantasy,
+            jitter,
+            jitter_latency_spread_ms,
+            jitter_seed,
+            window_label,
+            validated_set_complete,
+            bankroll,
         } => {
             walk_forward(
                 markets,
@@ -1618,6 +1653,12 @@ async fn main() -> Result<()> {
                 out_markets,
                 out_summary,
                 fantasy,
+                jitter,
+                jitter_latency_spread_ms,
+                jitter_seed,
+                window_label,
+                validated_set_complete,
+                bankroll,
             )
             .await
         }
@@ -2221,6 +2262,12 @@ async fn walk_forward(
     out_markets: Option<PathBuf>,
     out_summary: Option<PathBuf>,
     fantasy: bool,
+    jitter: usize,
+    jitter_latency_spread_ms: u64,
+    jitter_seed: u64,
+    window_label: Option<String>,
+    validated_set_complete: bool,
+    bankroll: Option<f64>,
 ) -> Result<()> {
     if let Some(path) = &profile {
         tracing::warn!(
@@ -2330,6 +2377,10 @@ async fn walk_forward(
         replay_sample_ms,
         taker_latency_ms,
         fantasy,
+        jitter,
+        jitter_latency_spread_ms,
+        jitter_seed,
+        window_label: window_label.clone(),
         replay_event_cache_dir,
         load_pm_trades,
         use_outcome_label,
@@ -2431,6 +2482,24 @@ async fn walk_forward(
     // omitted from JSON via skip_serializing_if). Matches the value returned
     // by validate_latency so the on-disk watermark is authoritative.
     summary.watermark = watermark.clone();
+
+    // Multi-window validation labeling and sizing-realism block. Validation is
+    // UNVALIDATED unless the window label is canonical AND the caller asserted
+    // the full set ran; a single run can never claim validated status alone.
+    summary.window_label = window_label.clone();
+    summary.validation = pm_backtest::scorecard::validation_label(
+        window_label.as_deref(),
+        validated_set_complete,
+    );
+    if let Some(bankroll_usd) = bankroll {
+        let clip_fraction = wf_cfg.clip_fraction_of_equity.unwrap_or(0.01);
+        summary.sizing = Some(pm_backtest::scorecard::sizing_realism(
+            &results,
+            &wf_cfg.strategies,
+            bankroll_usd,
+            clip_fraction,
+        ));
+    }
 
     print_summary(&summary);
 

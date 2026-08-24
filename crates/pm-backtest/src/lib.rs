@@ -12,6 +12,7 @@ pub mod config;
 pub mod engine;
 pub mod fills;
 pub mod fingerprint;
+pub mod jitter;
 pub mod portfolio;
 pub mod scorecard;
 pub mod validate;

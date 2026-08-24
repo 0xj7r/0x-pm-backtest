@@ -231,6 +231,25 @@ pub struct WalkForwardConfig {
     /// proceed but are watermarked (`"FANTASY"`) in the summary and output
     /// filenames so they are never mistaken for a truthful backtest.
     pub fantasy: bool,
+    /// Number of jittered-latency replay runs. `0` (default) runs the walk
+    /// forward once with a point-estimate P&L. `N > 0` runs it N times at
+    /// deterministically seeded perturbed latencies and attaches a p10/p50/p90
+    /// P&L spread to the summary. Runs are serial, so wall time scales ~Nx.
+    pub jitter: usize,
+    /// Half-width of the uniform latency jitter band around
+    /// `taker_latency_ms` (ms). Each jittered draw is a uniform integer in
+    /// `[taker_latency_ms - spread, taker_latency_ms + spread]`, clamped up to
+    /// `TRUTHFUL_LATENCY_FLOOR_MS` unless `fantasy` is granted.
+    pub jitter_latency_spread_ms: u64,
+    /// Seed for the jitter PRNG (splitmix64, inlined; no new deps). Same seed
+    /// yields the same latency vec across runs for reproducibility.
+    pub jitter_seed: u64,
+    /// Optional multi-window validation label (e.g. `feb2026`). When set, the
+    /// summary records it and the validation status is derived from whether it
+    /// is a member of the canonical validated set AND the caller asserted the
+    /// full set ran. `None` for ordinary single runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_label: Option<String>,
     /// **Portfolio mode**: process markets in chronological order, compound
     /// equity from one market into the next. Disables parallelism (each
     /// market's starting cash depends on the previous market's end cash).
@@ -369,6 +388,10 @@ impl Default for WalkForwardConfig {
             taker_fee_bps: 0.0,
             taker_latency_ms: 0,
             fantasy: false,
+            jitter: 0,
+            jitter_latency_spread_ms: 250,
+            jitter_seed: 42,
+            window_label: None,
             portfolio_mode: false,
             clip_fraction_of_equity: None,
             clip_drawdown_soft_pct: 1.0,

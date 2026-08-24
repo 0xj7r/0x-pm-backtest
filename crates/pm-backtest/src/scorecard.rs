@@ -16,6 +16,7 @@ use crate::accounting::{MarketResult, StrategyMarketResult, buy_fill_won, fill_r
 use crate::config::WalkForwardConfig;
 use crate::engine::{MetaSampleLimits, StratId, evaluate_meta_calibration, filter_meta_samples_for_training, market_balanced_meta_samples};
 use crate::fingerprint::config_fingerprint;
+use crate::jitter::JitterReport;
 use crate::portfolio::{SharedRunConfig, VolatilityBand};
 
 mod summary;
@@ -45,6 +46,135 @@ pub struct WalkForwardSummary {
     /// Meta-calibrator training/evaluation evidence for train-once portfolio
     /// runs. Empty for legacy independent-market runs without ML training.
     pub meta_calibration: Option<MetaCalibrationReport>,
+    /// P&L spread across N jittered-latency replay runs. `None` (omitted from
+    /// JSON) for ordinary single-run backtests where `--jitter` is 0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jitter: Option<JitterReport>,
+    /// Optional window label (e.g. `feb2026`) for multi-window validation
+    /// drivers. `None` (omitted from JSON) when `--window-label` is absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_label: Option<String>,
+    /// Validation status. `"UNVALIDATED"` unless the run's window label is a
+    /// member of [`VALIDATED_WINDOWS`] AND the caller asserted the full window
+    /// set ran (`--validated-set-complete`). A single run can never claim
+    /// validated status by itself; only the multi-window driver script can.
+    pub validation: String,
+    /// Sizing-realism block: fractional sizing at a given bankroll with the
+    /// 0.82 realization haircut and the 5-share floor/ruin check. `None`
+    /// (omitted from JSON) unless `--bankroll` was passed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sizing: Option<SizingRealism>,
+}
+
+/// Canonical set of validated backtest windows. A run is labeled `"VALIDATED"`
+/// only when its `--window-label` is a member of this set AND the multi-window
+/// driver asserted `--validated-set-complete`. This list extends as data
+/// accrues (add the next month's window once its tape is pinned).
+pub const VALIDATED_WINDOWS: &[&str] = &["feb2026", "mar2026", "apr2026", "may2026", "jun2026"];
+
+/// Compute the validation label for a run. Returns `"VALIDATED"` only when
+/// `window_label` is a member of [`VALIDATED_WINDOWS`] and the caller asserted
+/// the full validated set ran; otherwise `"UNVALIDATED"`. A single run passing
+/// `--validated-set-complete` without a canonical label is still unvalidated.
+pub fn validation_label(window_label: Option<&str>, validated_set_complete: bool) -> String {
+    match window_label {
+        Some(label) if validated_set_complete && VALIDATED_WINDOWS.contains(&label) => {
+            "VALIDATED".to_string()
+        }
+        _ => "UNVALIDATED".to_string(),
+    }
+}
+
+/// Sizing-realism summary: what the run's P&L looks like under fractional
+/// sizing at a real bankroll, with the standing realization haircut (winners
+/// scaled by 0.82, losers full size) and the 5-share floor / ruin check.
+///
+/// The 0.82 haircut is the standing realization-haircut convention from
+/// `docs/drawdown-sizing-2026-07.md`: winning positions are discounted to
+/// reflect that not all of a backtested win is realized at size in production,
+/// while losing positions are taken at full size (the pessimistic assumption).
+#[derive(Debug, Clone, Serialize)]
+pub struct SizingRealism {
+    pub bankroll_usd: f64,
+    pub clip_fraction: f64,
+    pub raw_net_pnl: f64,
+    pub haircut_net_pnl: f64,
+    pub min_clip_usd: f64,
+    pub five_share_floor_breached: bool,
+}
+
+/// Apply the realization haircut to a slice of per-market P&Ls: winners scaled
+/// by 0.82, losers taken at full size. `100 * 0.82 - 50 = 32` for `[+100, -50]`.
+pub fn haircut_net_pnl(per_market_pnls: &[f64]) -> f64 {
+    per_market_pnls
+        .iter()
+        .map(|&pnl| if pnl > 0.0 { pnl * 0.82 } else { pnl })
+        .sum()
+}
+
+/// Median of a slice (linear interpolation of the two middle values for an
+/// even-length slice). Returns `0.0` for an empty slice.
+pub fn median_f64(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut s = values.to_vec();
+    s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = s.len();
+    if n % 2 == 1 {
+        s[n / 2]
+    } else {
+        0.5 * (s[n / 2 - 1] + s[n / 2])
+    }
+}
+
+/// The 5-share floor is breached when the smallest clip cannot purchase 5
+/// shares at the run's median entry price, i.e. `min_clip_usd < 5 * median_price`.
+pub fn five_share_floor_breached(min_clip_usd: f64, median_entry_price: f64) -> bool {
+    min_clip_usd < 5.0 * median_entry_price
+}
+
+/// Build the sizing-realism block from per-market results. `clip_fraction`
+/// comes from `cfg.clip_fraction_of_equity` (or 0.01 when unset). The raw net
+/// P&L, haircut, and median entry price are all derived from the run's
+/// per-market, per-strategy results so a single strategy run and a combined
+/// run are both handled consistently.
+pub fn sizing_realism(
+    results: &[MarketResult],
+    strategies: &[StratId],
+    bankroll_usd: f64,
+    clip_fraction: f64,
+) -> SizingRealism {
+    let strategy_names: Vec<&'static str> = strategies.iter().map(|s| s.name()).collect();
+    // Per-market net P&L summed across the active strategies, and every fill
+    // price for the median-entry-price computation.
+    let mut per_market_pnls: Vec<f64> = Vec::with_capacity(results.len());
+    let mut fill_prices: Vec<f64> = Vec::new();
+    for r in results {
+        let mut market_pnl = 0.0;
+        for name in &strategy_names {
+            if let Some(s) = r.per_strategy.get(name) {
+                market_pnl += s.pnl_usdc;
+                for fill in &s.fills_detail {
+                    fill_prices.push(fill.price as f64);
+                }
+            }
+        }
+        per_market_pnls.push(market_pnl);
+    }
+    let raw_net_pnl: f64 = per_market_pnls.iter().sum();
+    let haircut = haircut_net_pnl(&per_market_pnls);
+    let median_price = median_f64(&fill_prices);
+    let min_clip_usd = bankroll_usd * clip_fraction;
+    let breached = five_share_floor_breached(min_clip_usd, median_price);
+    SizingRealism {
+        bankroll_usd,
+        clip_fraction,
+        raw_net_pnl,
+        haircut_net_pnl: haircut,
+        min_clip_usd,
+        five_share_floor_breached: breached,
+    }
 }
 
 
@@ -967,6 +1097,10 @@ pub fn aggregate(results: &[MarketResult], strategies: &[StratId]) -> WalkForwar
         by_volatility_band,
         fold_summaries: Vec::new(),
         meta_calibration: None,
+        jitter: None,
+        window_label: None,
+        validation: "UNVALIDATED".to_string(),
+        sizing: None,
     }
 }
 
@@ -1092,5 +1226,74 @@ pub fn print_summary(summary: &WalkForwardSummary) {
                 &fold.fold_results.per_strategy,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn single_run_is_unvalidated() {
+        // No window label and no completeness flag: unvalidated.
+        assert_eq!(validation_label(None, false), "UNVALIDATED");
+        // A canonical label but no completeness assertion (a single run): still
+        // unvalidated. A single run can never claim validated status by itself.
+        assert_eq!(validation_label(Some("feb2026"), false), "UNVALIDATED");
+        // Completeness flag set but the label is not canonical: unvalidated.
+        assert_eq!(validation_label(Some("research_only"), true), "UNVALIDATED");
+        // Non-canonical label without the flag: unvalidated.
+        assert_eq!(validation_label(Some("jan2026"), false), "UNVALIDATED");
+        // Only a canonical label AND the completeness flag validates.
+        assert_eq!(validation_label(Some("feb2026"), true), "VALIDATED");
+        assert_eq!(validation_label(Some("jun2026"), true), "VALIDATED");
+
+        // A fresh aggregate summary (the single-run path) defaults to UNVALIDATED.
+        let summary = aggregate(&[], &[]);
+        assert_eq!(summary.validation, "UNVALIDATED");
+        assert!(summary.window_label.is_none());
+        assert!(summary.sizing.is_none());
+    }
+
+    #[test]
+    fn haircut_scales_only_winners() {
+        // Two per-market P&Ls: +100 (winner) and -50 (loser).
+        // Winners scale by 0.82, losers stay full size: 100*0.82 - 50 = 32.
+        let haircut = haircut_net_pnl(&[100.0, -50.0]);
+        assert!((haircut - 32.0).abs() < 1e-9, "haircut {haircut}");
+
+        // A flat-zero market contributes nothing.
+        let h2 = haircut_net_pnl(&[100.0, 0.0, -50.0]);
+        assert!((h2 - 32.0).abs() < 1e-9, "h2 {h2}");
+
+        // All winners: pure 0.82 scaling.
+        let h3 = haircut_net_pnl(&[10.0, 20.0, 30.0]);
+        assert!((h3 - 0.82 * 60.0).abs() < 1e-9, "h3 {h3}");
+
+        // All losers: no scaling, full loss retained.
+        let h4 = haircut_net_pnl(&[-10.0, -20.0]);
+        assert!((h4 - (-30.0)).abs() < 1e-9, "h4 {h4}");
+
+        // Empty: zero.
+        assert_eq!(haircut_net_pnl(&[]), 0.0);
+    }
+
+    #[test]
+    fn five_share_floor_flags_small_bankroll() {
+        // min_clip = bankroll * fraction. The floor is breached when the clip
+        // cannot buy 5 shares at the median entry price:
+        //   min_clip_usd < 5 * median_price.
+        //
+        // Small bankroll: 200 * 0.01 = $2.00 clip; 5 shares at $0.50 = $2.50.
+        // $2.00 < $2.50 -> breached.
+        let min_clip_small = 200.0 * 0.01;
+        assert!(five_share_floor_breached(min_clip_small, 0.5));
+        // Larger bankroll: 300 * 0.01 = $3.00 clip; $3.00 >= $2.50 -> not breached.
+        let min_clip_ok = 300.0 * 0.01;
+        assert!(!five_share_floor_breached(min_clip_ok, 0.5));
+        // Boundary: clip exactly 5 * price is not a breach (strict <).
+        assert!(!five_share_floor_breached(2.5, 0.5));
+        // A higher median price makes the same clip breach.
+        assert!(five_share_floor_breached(3.0, 0.7));
     }
 }

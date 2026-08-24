@@ -782,6 +782,7 @@ use crate::config::{MarketHandle, WalkForwardConfig, spot_symbol_for_market};
 use crate::portfolio::{LossStreakCooldownState, SpotCache, compounded_clip, daily_remaining_loss_budget_usdc, drawdown_clip_multiplier, load_walkforward_perp, market_volatility_range, model_market_context_for_cfg, model_market_context_for_slug, per_market_exposure_cap, spot_history_for_market, volatility_band};
 use crate::scorecard::{CalibrationBin, CalibrationBinAccumulator, MarketCalibrationAccumulator, MetaCalibrationReport, MetaCandidateEvaluation, MetaEvaluationSummary, PredictionDistribution, WalkForwardFoldSummary, WalkForwardSummary, aggregate, binary_log_loss, meta_calibration_report, prediction_distribution, summary_run_config, write_portfolio_checkpoint};
 use crate::fingerprint::config_fingerprint;
+use crate::jitter::{build_jitter_report, jittered_run_latencies};
 
 pub const DEFAULT_META_MAX_FIT_SAMPLES: usize = 120_000;
 
@@ -988,6 +989,14 @@ pub async fn run_walkforward(
     markets: &[MarketHandle],
     cfg: &WalkForwardConfig,
 ) -> Result<(Vec<MarketResult>, WalkForwardSummary)> {
+    // Jittered replay: when --jitter N is set, run the full walk-forward N
+    // times at seeded perturbed latencies and report the P&L spread instead of
+    // a point estimate. Dispatches to run_jittered, which calls back into
+    // run_walkforward with jitter=0 (so there is no recursion). N runs are
+    // serial; a 288-market day at N=5 is ~5x the single-run wall time.
+    if cfg.jitter > 0 {
+        return run_jittered(store, markets, cfg).await;
+    }
     // Always sort by normalized close so portfolio mode is well-defined and
     // parallel mode logs read sensibly. Some older local market lists stored
     // the slug/open timestamp in `close_ts`; normalize those to open + 300s.
@@ -1237,6 +1246,45 @@ pub async fn run_walkforward(
         summary.fold_summaries = fold_summaries;
     }
     Ok((results, summary))
+}
+
+
+/// Run the walk-forward once per jittered latency and attach a p10/p50/p90 P&L
+/// spread to the summary. Each run reuses the same markets/config with only
+/// `taker_latency_ms` perturbed (and `jitter` cleared so the inner
+/// `run_walkforward` call does not recurse). Runs are serial; the spot/perp
+/// caches are rebuilt inside each `run_walkforward` call.
+async fn run_jittered(
+    store: &TelonexStore,
+    markets: &[MarketHandle],
+    cfg: &WalkForwardConfig,
+) -> Result<(Vec<MarketResult>, WalkForwardSummary)> {
+    let latencies = jittered_run_latencies(cfg);
+    let n = latencies.len();
+    tracing::info!(runs = n, base_latency_ms = cfg.taker_latency_ms, "jittered replay start");
+    let mut net_pnls = Vec::with_capacity(n);
+    let mut last_results: Vec<MarketResult> = Vec::new();
+    let mut last_summary: Option<WalkForwardSummary> = None;
+    for (i, lat) in latencies.iter().enumerate() {
+        let mut jcfg = cfg.clone();
+        jcfg.jitter = 0;
+        jcfg.taker_latency_ms = *lat;
+        tracing::info!(run = i, latency_ms = lat, "jitter run");
+        // Box::pin breaks the run_walkforward -> run_jittered -> run_walkforward
+        // async recursion (otherwise the future is infinitely sized).
+        let (results, summary) = Box::pin(run_walkforward(store, markets, &jcfg)).await?;
+        let total_net_pnl: f64 = summary
+            .per_strategy
+            .values()
+            .map(|agg| agg.total_pnl_usdc)
+            .sum();
+        net_pnls.push(total_net_pnl);
+        last_results = results;
+        last_summary = Some(summary);
+    }
+    let mut summary = last_summary.ok_or_else(|| anyhow!("jitter produced no runs"))?;
+    summary.jitter = build_jitter_report(cfg, latencies, net_pnls);
+    Ok((last_results, summary))
 }
 
 

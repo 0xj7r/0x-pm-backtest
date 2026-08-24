@@ -17,48 +17,11 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MarketHandle {
-    pub asset_id: String,
-    pub slug: String,
-    /// Resolution timestamp (Unix seconds, UTC).
-    pub close_ts: i64,
-    /// Outcome label as returned by Telonex (e.g. "Up", "Down", "Yes", "No").
-    pub outcome: String,
-    /// Date partition (`YYYY-MM-DD`).
-    pub date: String,
-}
-
-pub fn spot_symbol_for_market(configured: &str, slug: &str) -> Result<Option<String>> {
-    if configured.is_empty() {
-        return Ok(None);
-    }
-    if !configured.eq_ignore_ascii_case("auto") {
-        return Ok(Some(configured.to_string()));
-    }
-    infer_spot_symbol_from_slug(slug)
-        .map(|symbol| Some(symbol.to_string()))
-        .ok_or_else(|| anyhow!("cannot infer spot symbol from market slug: {slug}"))
-}
-
-pub fn spot_cache_key(symbol: &str, date: &str) -> String {
-    format!("{}|{}", symbol.to_ascii_uppercase(), date)
-}
-
-fn infer_spot_symbol_from_slug(slug: &str) -> Option<&'static str> {
-    let slug = slug.to_ascii_lowercase();
-    if slug.starts_with("btc-updown-") {
-        Some("BTCUSDT")
-    } else if slug.starts_with("eth-updown-") {
-        Some("ETHUSDT")
-    } else if slug.starts_with("sol-updown-") {
-        Some("SOLUSDT")
-    } else if slug.starts_with("xrp-updown-") {
-        Some("XRPUSDT")
-    } else {
-        None
-    }
-}
+// `MarketHandle`, `spot_symbol_for_market`, `spot_cache_key`, and `parse_close_ts`
+// moved to `pm_backtest::config` (extraction map tranche 4, companion moves 1-4);
+// re-exported here so the rest of this file, and `crate::discovery::...` call
+// sites elsewhere in pm-app, keep working unchanged.
+pub use pm_backtest::config::{MarketHandle, parse_close_ts, spot_symbol_for_market};
 
 #[derive(Debug, Deserialize)]
 struct AvailabilityResponse {
@@ -444,11 +407,6 @@ fn write_availability_cache(path: &Path, cache: &AvailabilityCache) -> Result<()
     std::fs::rename(&tmp, path)
         .with_context(|| format!("rename {} to {}", tmp.display(), path.display()))?;
     Ok(())
-}
-
-/// Parse `btc-updown-5m-1778587500` -> 1778587500.
-pub fn parse_close_ts(slug: &str) -> Option<i64> {
-    slug.rsplit('-').next().and_then(|t| t.parse::<i64>().ok())
 }
 
 async fn resolve_market_handles(

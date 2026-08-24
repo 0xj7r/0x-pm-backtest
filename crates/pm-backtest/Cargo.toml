@@ -7,14 +7,20 @@ license.workspace = true
 publish = false
 
 [dependencies]
-pm-types  = { workspace = true }
-pm-model  = { workspace = true }
-pm-risk   = { workspace = true }
-pm-strategy = { workspace = true }
+pm-types          = { workspace = true }
+pm-model          = { workspace = true }
+pm-risk           = { workspace = true }
+pm-strategy       = { workspace = true }
+pm-alpha          = { workspace = true }
+pm-telonex-loader = { workspace = true }
 
-anyhow     = { workspace = true }
-arrow      = { workspace = true }
-parquet    = { workspace = true }
-chrono     = { workspace = true }
-serde      = { workspace = true }
-serde_json = { workspace = true }
+anyhow       = { workspace = true }
+arrow        = { workspace = true }
+parquet      = { workspace = true }
+chrono       = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+futures      = { workspace = true }
+rayon        = { workspace = true }
+tracing      = { workspace = true }
+object_store = { workspace = true }

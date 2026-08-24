@@ -7,4 +7,3 @@
 pub use pm_backtest::accounting::pretty_print;
 pub use pm_backtest::config::RunnerConfig;
 pub use pm_backtest::engine::run_backtest;
-pub use pm_backtest::fills::Fill;

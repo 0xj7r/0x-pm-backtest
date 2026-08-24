@@ -781,6 +781,7 @@ use crate::accounting::{MarketResult, StrategyMarketResult, market_close_ns, mar
 use crate::config::{MarketHandle, WalkForwardConfig, spot_symbol_for_market};
 use crate::portfolio::{LossStreakCooldownState, SpotCache, compounded_clip, daily_remaining_loss_budget_usdc, drawdown_clip_multiplier, load_walkforward_perp, market_volatility_range, model_market_context_for_cfg, model_market_context_for_slug, per_market_exposure_cap, spot_history_for_market, volatility_band};
 use crate::scorecard::{CalibrationBin, CalibrationBinAccumulator, MarketCalibrationAccumulator, MetaCalibrationReport, MetaCandidateEvaluation, MetaEvaluationSummary, PredictionDistribution, WalkForwardFoldSummary, WalkForwardSummary, aggregate, binary_log_loss, meta_calibration_report, prediction_distribution, summary_run_config, write_portfolio_checkpoint};
+use crate::fingerprint::config_fingerprint;
 
 pub const DEFAULT_META_MAX_FIT_SAMPLES: usize = 120_000;
 
@@ -1212,6 +1213,7 @@ pub async fn run_walkforward(
         .await?;
         if use_folds {
             let mut fold_summary = aggregate(&fold_markets, &cfg.strategies);
+            fold_summary.config_fingerprint = Some(config_fingerprint(cfg));
             fold_summary.run_config = Some(summary_run_config(cfg));
             fold_summaries.push(WalkForwardFoldSummary {
                 fold_idx,
@@ -1229,6 +1231,7 @@ pub async fn run_walkforward(
     }
 
     let mut summary = aggregate(&results, &cfg.strategies);
+    summary.config_fingerprint = Some(config_fingerprint(cfg));
     summary.run_config = Some(summary_run_config(cfg));
     if use_folds {
         summary.fold_summaries = fold_summaries;
@@ -2813,6 +2816,7 @@ async fn run_portfolio(
     }
 
     let mut summary = aggregate(&results, &cfg.strategies);
+    summary.config_fingerprint = Some(config_fingerprint(cfg));
     summary.run_config = Some(summary_run_config(cfg));
     if let Some(report) = meta_report.as_mut() {
         report.oos_samples = oos_meta_samples.len();

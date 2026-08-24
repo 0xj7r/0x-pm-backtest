@@ -197,7 +197,7 @@ pub fn parse_close_ts(slug: &str) -> Option<i64> {
 }
 
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct WalkForwardConfig {
     pub starting_cash_usdc: f64,
     pub kelly_fraction: f64,

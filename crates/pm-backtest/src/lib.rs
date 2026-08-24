@@ -11,5 +11,6 @@ pub mod accounting;
 pub mod config;
 pub mod engine;
 pub mod fills;
+pub mod fingerprint;
 pub mod portfolio;
 pub mod scorecard;

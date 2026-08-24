@@ -77,7 +77,7 @@ echo "day manifest: $MARKET_COUNT markets" >&2
 # future --record-to override) rather than replay output, so they are
 # stripped too.
 jq -c -S '.' "$OUT_MARKETS" | jq -s -c 'sort_by(.asset_id)' > /tmp/golden-run.markets.sorted.json
-jq -S 'del(.run_config.shared.checkpoint_markets_out, .run_config.shared.checkpoint_summary_out)' "$OUT_SUMMARY" > /tmp/golden-run.summary.normalized.json
+jq -S 'del(.config_fingerprint, .run_config.shared.checkpoint_markets_out, .run_config.shared.checkpoint_summary_out)' "$OUT_SUMMARY" > /tmp/golden-run.summary.normalized.json
 
 jq -n -c \
   --slurpfile markets /tmp/golden-run.markets.sorted.json \

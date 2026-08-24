@@ -768,7 +768,7 @@ pub struct ShadowCore {
     inputs_dirty: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ShadowConfig {
     pub edge_threshold: f64,
     pub vol_lookback_s: u32,
@@ -808,7 +808,59 @@ pub struct ShadowConfig {
     pub open_fav_ask_max: f64,
     pub open_fav_secs: u32,
     /// Shared `decide_entry` config — byte-identical to backtest harness.
+    /// Serialized via `canon()` (DecideConfig is not `Serialize`) so the
+    /// fingerprint still covers the decide layer.
+    #[serde(serialize_with = "serialize_decide_canon")]
     pub decide_cfg: DecideConfig,
+}
+
+/// Serialize a `DecideConfig` as its `canon()` JSON, embedded as a value so the
+/// fingerprint's recursive key-sort canonicalizes it with the rest of the config.
+fn serialize_decide_canon<S: serde::Serializer>(cfg: &DecideConfig, s: S) -> Result<S::Ok, S::Error> {
+    let val: serde_json::Value =
+        serde_json::from_str(&cfg.canon()).unwrap_or(serde_json::Value::Null);
+    serde::Serialize::serialize(&val, s)
+}
+
+/// 16-hex sha256 prefix of the canonical (sorted-keys) JSON of a resolved
+/// config. Mirrors `pm_backtest::fingerprint::config_fingerprint`; duplicated
+/// here because pm-shadow intentionally does not depend on pm-backtest.
+fn config_fingerprint<T: serde::Serialize>(cfg: &T) -> String {
+    fn sort_value(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(map) => {
+                let mut entries: Vec<(String, serde_json::Value)> =
+                    map.iter_mut().map(|(k, v)| (k.clone(), v.take())).collect();
+                for (_, v) in &mut entries {
+                    sort_value(v);
+                }
+                entries.sort_by(|a, b| a.0.cmp(&b.0));
+                map.clear();
+                for (k, v) in entries {
+                    map.insert(k, v);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    sort_value(item);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut value = serde_json::to_value(cfg).unwrap_or(serde_json::Value::Null);
+    sort_value(&mut value);
+    let canon = serde_json::to_string(&value).unwrap_or_default();
+    let mut hasher = sha2::Sha256::new();
+    use sha2::Digest;
+    hasher.update(canon.as_bytes());
+    let digest = hasher.finalize();
+    digest
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<String>()[..16]
+        .to_string()
 }
 
 /// Build `ShadowConfig` from CLI/runtime args plus the frozen decide SSOT.
@@ -2039,11 +2091,17 @@ pub async fn run_shadow_with_sink(
     mut commit_rx: Option<tokio::sync::mpsc::UnboundedReceiver<EntryCommit>>,
 ) -> Result<()> {
     let (mut logger, log_path) = Logger::create(&args.out_dir)?;
-    tracing::info!(log = %log_path.display(), "shadow mode: LOG ONLY, zero orders");
+    let shadow_cfg = shadow_config_from_args(&args);
+    let config_fingerprint = config_fingerprint(&shadow_cfg);
+    tracing::info!(
+        log = %log_path.display(),
+        config_fingerprint = %config_fingerprint,
+        "shadow mode: LOG ONLY, zero orders"
+    );
 
     let defer_entry_commit = intent_tx.is_some();
     let core = std::sync::Arc::new(std::sync::Mutex::new(ShadowCore::new(
-        shadow_config_from_args(&args),
+        shadow_cfg,
     )));
 
     // FIRST event of every stream: the resolved config fingerprint, so the

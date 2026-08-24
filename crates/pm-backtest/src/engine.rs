@@ -749,11 +749,10 @@ pub fn run_backtest<S: Strategy>(
 
 use pm_model::{MetaTrainingConfig, MetaTrainingStats, ModelMarketContext, OnlineMetaCalibrator, OnlineMetaCalibratorSnapshot};
 use pm_risk::PortfolioLimits;
-use pm_strategy::{ExoFadeStrategy, NoopStrategy, ThresholdFadeStrategy, exo_fade::ExoFadeConfig};
+use pm_strategy::{NoopStrategy, ThresholdFadeStrategy};
 use pm_telonex_loader::{
     Channel, TelonexStore, load_book_snapshot_async, load_pm_trades_async, resolve_pm_trades_day,
 };
-use pm_alpha::PerpState;
 use pm_types::MarketId;
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
@@ -764,7 +763,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::accounting::{MarketResult, StrategyMarketResult, market_close_ns, market_close_ts, market_duration_secs_from_slug, market_open_ns, outcome_label_resolved_yes, prior_market_range_mean};
 use crate::config::{MarketHandle, WalkForwardConfig, spot_symbol_for_market};
-use crate::portfolio::{LossStreakCooldownState, SpotCache, compounded_clip, daily_remaining_loss_budget_usdc, drawdown_clip_multiplier, load_walkforward_perp, market_volatility_range, model_market_context_for_cfg, model_market_context_for_slug, per_market_exposure_cap, spot_history_for_market, volatility_band};
+use crate::portfolio::{LossStreakCooldownState, SpotCache, compounded_clip, daily_remaining_loss_budget_usdc, drawdown_clip_multiplier, market_volatility_range, model_market_context_for_cfg, model_market_context_for_slug, per_market_exposure_cap, spot_history_for_market, volatility_band};
 use crate::scorecard::{CalibrationBin, CalibrationBinAccumulator, EraBreakdown, MarketCalibrationAccumulator, MetaCalibrationReport, MetaCandidateEvaluation, MetaEvaluationSummary, PredictionDistribution, WalkForwardFoldSummary, WalkForwardSummary, aggregate, binary_log_loss, meta_calibration_report, prediction_distribution, summary_run_config, write_portfolio_checkpoint};
 use crate::settlement::{MarketDuration, SettlementEra, resolve_outcome, settlement_era};
 use crate::fingerprint::config_fingerprint;
@@ -781,8 +780,6 @@ pub const DEFAULT_META_MAX_SAMPLES_PER_MARKET: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
 pub enum StratId {
-    ExoFade,
-    MayJuneFade,
     Noop,
     /// Test-only deterministic fixture that anchors the golden replay gate.
     /// Not deployable: the CLI rejects it unless `--allow-fixture` is passed.
@@ -791,14 +788,12 @@ pub enum StratId {
 
 
 impl StratId {
-    pub const ACTIVE: [Self; 3] = [Self::ExoFade, Self::MayJuneFade, Self::Noop];
+    pub const ACTIVE: [Self; 1] = [Self::Noop];
 
-    pub const ALL: [Self; 4] = [Self::ExoFade, Self::MayJuneFade, Self::Noop, Self::Fixture];
+    pub const ALL: [Self; 2] = [Self::Noop, Self::Fixture];
 
     pub fn from_name(value: &str) -> Option<Self> {
         match value {
-            "exo_fade" => Some(Self::ExoFade),
-            "mayjune_fade" => Some(Self::MayJuneFade),
             "noop" => Some(Self::Noop),
             "fixture" => Some(Self::Fixture),
             _ => None,
@@ -807,8 +802,6 @@ impl StratId {
 
     pub fn name(self) -> &'static str {
         match self {
-            StratId::ExoFade => "exo_fade",
-            StratId::MayJuneFade => "mayjune_fade",
             StratId::Noop => "noop",
             StratId::Fixture => "fixture",
         }
@@ -1022,7 +1015,6 @@ pub async fn run_walkforward(
             .with_context(|| format!("preload spot {symbol} {date}"))?;
     }
     let spot_map_top: HashMap<String, Arc<SpotHistory>> = spot_cache.inner.clone();
-    let perp = load_walkforward_perp(store, cfg, markets).await?;
     if cfg.portfolio_mode && (cfg.walk_forward_folds.is_some() || cfg.fold_size.is_some()) {
         return Err(anyhow!(
             "walk-forward fold configuration is not supported in portfolio mode"
@@ -1105,7 +1097,6 @@ pub async fn run_walkforward(
                 &markets[cfg.min_train_markets..],
                 cfg,
                 &spot_map_top,
-                perp,
                 meta_snapshot,
                 meta_report,
             )
@@ -1138,7 +1129,6 @@ pub async fn run_walkforward(
             markets,
             cfg,
             &spot_map_top,
-            perp,
             preloaded_snapshot,
             meta_report,
         )
@@ -1210,7 +1200,6 @@ pub async fn run_walkforward(
             fold_markets,
             cfg,
             &spot_map_top,
-            perp.clone(),
             *test_start,
             cfg.max_concurrent_fetches,
             meta_snapshot,
@@ -2197,7 +2186,6 @@ async fn run_markets(
     markets: &[MarketHandle],
     cfg: &WalkForwardConfig,
     spot_map: &HashMap<String, Arc<SpotHistory>>,
-    perp: Option<Arc<PerpState>>,
     market_id_offset: usize,
     max_concurrent_fetches: usize,
     meta_calibrator_snapshot: Option<OnlineMetaCalibratorSnapshot>,
@@ -2209,7 +2197,6 @@ async fn run_markets(
     let spot_empty = Arc::new(SpotHistory::default());
     let store_inner = store.store();
     let cfg_arc = Arc::new(cfg.clone());
-    let perp = perp.clone();
 
     // Phase 1: bounded async I/O — only load raw data + build runner config.
     // No strategy execution here.
@@ -2344,15 +2331,12 @@ async fn run_markets(
             for &strat in &cfg.strategies {
                 match run_one_strategy(
                     strat,
-                    cfg,
-                    &m.slug,
                     &events_for_run,
                     &spot,
                     &trades,
                     &runner_cfg,
                     cfg.starting_cash_usdc,
                     cfg.max_clip_usdc,
-                    perp.clone(),
                 ) {
                     Ok(mut r) => {
                         for sample in &mut r.model_training_samples {
@@ -2392,15 +2376,12 @@ async fn run_markets(
                 for &strat in &cfg.strategies {
                     match run_one_strategy(
                         strat,
-                        cfg,
-                        &m.slug,
                         &events_for_run,
                         &spot,
                         &trades,
                         &runner_cfg,
                         cfg.starting_cash_usdc,
                         cfg.max_clip_usdc,
-                        perp.clone(),
                     ) {
                         Ok(mut r) => {
                             for sample in &mut r.model_training_samples {
@@ -2440,47 +2421,14 @@ async fn run_markets(
 
 fn run_one_strategy(
     strat: StratId,
-    cfg: &WalkForwardConfig,
-    market_slug: &str,
     events: &[pm_types::ReplayEvent],
     spot: &SpotHistory,
     trades: &TradeHistory,
     runner_cfg: &RunnerConfig,
     bankroll: f64,
     clip: f64,
-    perp: Option<Arc<PerpState>>,
 ) -> Result<StrategyMarketResult> {
     let report = match strat {
-        StratId::ExoFade | StratId::MayJuneFade => {
-            let slug = market_slug.to_ascii_lowercase();
-            let token = if slug.starts_with("eth-updown-") {
-                "eth"
-            } else if slug.starts_with("sol-updown-") {
-                "sol"
-            } else if slug.starts_with("xrp-updown-") {
-                "xrp"
-            } else {
-                "btc"
-            };
-            let window_secs = market_duration_secs_from_slug(market_slug).max(300) as u32;
-            let mut base = match strat {
-                StratId::MayJuneFade => ExoFadeConfig::mayjune_btc5m(),
-                _ => ExoFadeConfig::champion_1k(),
-            };
-            base.directional_tilt_strength = cfg.directional_tilt_strength;
-            let mut s = ExoFadeStrategy::new(ExoFadeConfig {
-                bankroll_usdc: bankroll,
-                clip_usdc: clip,
-                kelly_fraction: cfg.kelly_fraction,
-                token: token.into(),
-                window_secs,
-                ..base
-            });
-            if let Some(p) = perp {
-                s = s.with_perp(p);
-            }
-            run_backtest(events, spot, trades, &mut s, runner_cfg)?
-        }
         StratId::Noop => {
             let mut s = NoopStrategy;
             run_backtest(events, spot, trades, &mut s, runner_cfg)?
@@ -2549,7 +2497,6 @@ async fn run_portfolio(
     markets: &[MarketHandle],
     cfg: &WalkForwardConfig,
     spot_map: &HashMap<String, Arc<SpotHistory>>,
-    perp: Option<Arc<PerpState>>,
     meta_calibrator_snapshot: Option<OnlineMetaCalibratorSnapshot>,
     mut meta_report: Option<MetaCalibrationReport>,
 ) -> Result<(Vec<MarketResult>, WalkForwardSummary)> {
@@ -2761,15 +2708,12 @@ async fn run_portfolio(
             };
             match run_one_strategy(
                 strat,
-                cfg,
-                &m.slug,
                 events_for_run,
                 &spot,
                 &trades,
                 &runner_cfg,
                 bankroll,
                 clip,
-                perp.clone(),
             ) {
                 Ok(mut r) => {
                     for sample in &mut r.model_training_samples {
@@ -3075,7 +3019,7 @@ mod tests {
     #[test]
     fn summary_run_config_keeps_archived_knobs_out_of_shared_config() {
         let mut cfg = WalkForwardConfig::default();
-        cfg.strategies = vec![StratId::ExoFade];
+        cfg.strategies = vec![StratId::Fixture];
 
         let value = serde_json::to_value(summary_run_config(&cfg)).unwrap();
         let shared = value.get("shared").expect("shared config missing");
@@ -3109,7 +3053,7 @@ mod tests {
                 .get("model_spot_reversal_pressure_risk_weight")
                 .is_some()
         );
-        assert_eq!(strategies[0].get("strategy").unwrap(), "exo_fade");
+        assert_eq!(strategies[0].get("strategy").unwrap(), "fixture");
         assert!(strategies[0].get("config").is_none());
     }
 
@@ -3161,7 +3105,7 @@ mod tests {
     fn aggregate_handles_per_strategy_metrics() {
         let mut result_reactive = HashMap::new();
         result_reactive.insert(
-            StratId::ExoFade.name(),
+            StratId::Fixture.name(),
             StrategyMarketResult {
                 orders_submitted: 10,
                 orders_filled: 6,
@@ -3285,14 +3229,14 @@ mod tests {
             },
         ];
 
-        let summary = aggregate(&results, &[StratId::ExoFade, StratId::Noop]);
+        let summary = aggregate(&results, &[StratId::Fixture, StratId::Noop]);
         assert_eq!(summary.markets_attempted, 3);
         assert_eq!(summary.markets_succeeded, 3);
 
         let reactive = summary
             .per_strategy
-            .get(StratId::ExoFade.name())
-            .expect("exo_fade missing");
+            .get(StratId::Fixture.name())
+            .expect("fixture missing");
         assert_eq!(reactive.markets_with_orders, 1);
         assert_eq!(reactive.total_orders_filled, 6);
         assert_eq!(reactive.total_orders_filled_taker, 4);
@@ -3316,8 +3260,8 @@ mod tests {
             .get(&VolatilityBand::Low)
             .expect("low band missing");
         let low_reactive = low
-            .get(StratId::ExoFade.name())
-            .expect("low exo_fade missing");
+            .get(StratId::Fixture.name())
+            .expect("low fixture missing");
         assert_eq!(low_reactive.total_pnl_usdc, 4.0);
 
         let high = summary
@@ -3637,21 +3581,19 @@ mod tests {
     }
 
     #[test]
-    fn resolve_perp_symbol_defaults_to_spot_for_exo_fade() {
+    fn resolve_perp_symbol_only_honours_an_explicit_request() {
         let mut cfg = WalkForwardConfig::default();
         cfg.spot_symbol = "BTCUSDT".into();
-        cfg.strategies = vec![StratId::ExoFade];
-        assert_eq!(resolve_perp_symbol(&cfg).as_deref(), Some("BTCUSDT"));
+        assert!(
+            resolve_perp_symbol(&cfg).is_none(),
+            "spot symbol must not imply a perp fetch now that no strategy reads perp"
+        );
 
         cfg.perp_symbol = Some("ETHUSDT".into());
         assert_eq!(resolve_perp_symbol(&cfg).as_deref(), Some("ETHUSDT"));
 
         cfg.perp_symbol = None;
         cfg.spot_symbol = "auto".into();
-        assert!(resolve_perp_symbol(&cfg).is_none());
-
-        cfg.strategies = vec![StratId::Noop];
-        cfg.spot_symbol = "BTCUSDT".into();
         assert!(resolve_perp_symbol(&cfg).is_none());
     }
 }

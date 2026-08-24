@@ -1,12 +1,13 @@
-//! Strategy trait + signal stack + reference strategies.
+//! The `Strategy` trait and the two strategies that implement it.
 //!
-//! The Nautilus-native runtime integration lives in `pm-app`; this crate stays
-//! Nautilus-free so signal math can be unit-tested in milliseconds without
-//! pulling the engine.
+//! Both are plumbing: `NoopStrategy` emits nothing, and `ThresholdFadeStrategy`
+//! is the deterministic test-only fixture that anchors the golden replay gate.
+//! There is deliberately no deployable strategy here. This crate stays free of
+//! engine and runtime dependencies so strategy logic can be unit-tested in
+//! milliseconds.
 
 #![forbid(unsafe_code)]
 
-pub mod exo_fade;
 pub mod fixture;
 pub mod regime;
 #[path = "archive/trivial.rs"]
@@ -38,12 +39,21 @@ pub struct OrderRequest {
 
 /// Per-event context handed to a strategy alongside the tape.
 ///
-/// Every field here is read by at least one strategy. Fields that only the
-/// runner wrote and nothing consumed have been removed: a field nobody reads
-/// is a claim about the contract that the code does not back up, and it costs
-/// a plumbing site in every construction path. Adding one back is cheap (a
-/// field plus one line in the runner's `Ctx` literal), and should happen in
-/// the same change as the strategy that reads it.
+/// These are the runner-derived facts a strategy cannot recover from
+/// `ReplayEvent` alone: how far into the market it is, what it holds in cash,
+/// how the market and the underlying have moved so far, and when the market
+/// resolves. Only `events_seen` currently has a reader, because the only
+/// strategies left are the noop and the golden fixture; the rest survive
+/// deliberately, as the contract a future strategy is written against. The
+/// write-only rule that pruned this struct was applied while a real strategy
+/// was still here to define the surface; re-running it now would delete the
+/// contract itself rather than dead plumbing.
+///
+/// Adding a field back is cheap (the field plus one line in the runner's `Ctx`
+/// literal) and should land in the same change as the strategy that reads it.
+/// Notably absent: the strategy's own `yes_shares`/`no_shares` position, which
+/// was removed as write-only and will likely be the first thing an
+/// inventory-managing strategy needs back.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Ctx {
     pub events_seen: u64,
@@ -92,8 +102,14 @@ pub trait Strategy {
         trades: &TradeHistory,
     ) -> StrategyOutput;
 
-    /// Optional per-event model diagnostics. Return model scores when available
-    /// for attribution and offline analysis.
+    /// Optional per-event model diagnostics: return model scores to override the
+    /// runner's canonical evaluation for this event.
+    ///
+    /// No shipped strategy overrides this. It survives the strategy reset because
+    /// it is the seam the engine's own model-gate and decision-log tests use to
+    /// drive a controlled `ModelOutput` through the gate
+    /// (`pm_backtest::fills` tests). Removing it would delete that coverage with
+    /// nothing to replace it, in exchange for one dependency edge.
     fn on_event_scored(
         &mut self,
         event: &ReplayEvent,
@@ -107,6 +123,5 @@ pub trait Strategy {
     fn on_market_resolved(&mut self, _market_mid: f32, _resolved_yes: bool) {}
 }
 
-pub use exo_fade::{ExoFadeConfig, ExoFadeGateStats, ExoFadeStrategy};
 pub use fixture::ThresholdFadeStrategy;
 pub use trivial::NoopStrategy;

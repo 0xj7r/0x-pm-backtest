@@ -83,26 +83,37 @@ for the subset of trades where both-sides-hold actually occurs, quantifying how 
 re-reversal happens and whether the recovered residual exceeds the transaction/spread cost of
 exiting the losing leg early.
 
-## 5. pm-model removal deferred to Plan 2 engine extraction
+## 5. pm-model removal: ANSWERED 2026-08-24 (it stays; the coupling was not the strategies)
 
-Task 11 of the phase-1 reset re-traced `pm_model` usage after legacy strategy removal (Task 10)
-expecting most consumers to be gone. They are not: `run_backtest` in `crates/pm-app/src/runner.rs`
-unconditionally constructs a `pm_model::ModelState`, evaluates it every event via
-`evaluate_detailed_with_market_context`, and feeds the result into `pm_strategy::Ctx` (whose
-`model_output` / `model_attribution` fields are typed as `pm_model::ModelOutput` /
-`pm_model::ModelAttribution`). This happens regardless of which `Strategy` impl runs, so it is on
-the `pm-app walk-forward --strategies exo_fade` path, not just legacy dispatch.
+**Resolved.** The phase-2 strategy kill removed every strategy that read the canonical model,
+which was the premise for expecting `pm-model` to fall out. It did not. The traced answer:
+`pm-model` is not strategy-coupled at all, and is not removable without changing engine output.
 
-pm-model removal deferred to Plan 2 engine extraction; live refs:
-`crates/pm-app/src/runner.rs:24,412,730,740,780-798,819` (RunnerConfig.shared_model_state,
-canonical model eval in `run_backtest`, `side_edge_vs_mid`),
-`crates/pm-app/src/walkforward.rs:13` (imports feeding `run_one_strategy`),
-`crates/pm-app/src/main.rs:2719` (`RunnerConfig.model_market_context`, `run` subcommand),
-`crates/pm-strategy/src/lib.rs:14,63,67,132` (`Ctx.model_output`/`model_attribution`,
-`Strategy::on_event_scored` return type), plus the crate deps in `Cargo.toml`,
-`crates/pm-app/Cargo.toml`, and `crates/pm-strategy/Cargo.toml`.
+What was re-traced after `exo_fade` and `MayJuneFade` were deleted
+(`crates/pm-strategy/src/exo_fade.rs`, `regime.rs`, the `StratId` variants), leaving `StratId =
+{Noop, Fixture}`:
 
-**What would answer it:** Plan 2's engine extraction needs to decide whether the canonical model
-evaluation stays a mandatory part of the runner loop or becomes optional/pluggable. Until that
-decision is made, `pm-model` cannot be deleted without changing runner behavior on the exo_fade
-path, which is out of scope for phase-1 cleanup.
+- The `Ctx.model_output` / `Ctx.model_attribution` fields WERE removable and are gone (they were
+  write-only workspace-wide; see the phase-2 Ctx slim).
+- What remains is not strategy plumbing. `pm-model` backs the meta-calibration walk-forward layer
+  (`OnlineMetaCalibrator`, `MetaTrainingSample`, `MetaTrainingConfig`, `MetaTrainingStats`,
+  `MetaFeatureWeight` in `crates/pm-backtest/src/{engine,scorecard,accounting,portfolio,config}.rs`),
+  the model gate (`enforce_model_gate` and its rejection counters), and the ~40-column decision-log
+  feature stack (`crates/pm-backtest/src/fills.rs::DecisionLogRow`). `crates/pm-app/src/main.rs`
+  carries the meta CLI surface. None of that is specific to a strategy: it is the research layer
+  the engine emits for offline analysis.
+- `Strategy::on_event_scored` still returns `Option<pm_model::ModelOutput>` and keeps
+  `pm-strategy -> pm-model`. No shipped strategy overrides it; it survives because it is the seam
+  six `pm_backtest::fills` tests use to drive a controlled `ModelOutput` through the model gate and
+  the decision log. Removing it would delete that coverage with nothing to replace it.
+
+**Why it cannot simply be deleted:** the walk-forward summary JSON carries `meta_calibration`, the
+`run_config.shared` meta/model keys, `per_strategy.model_fill_quality`, and the per-market
+`orders_rejected_model_gate*` counters. Deleting the eval wholesale changes that shape, which would
+diverge the pinned golden anchor (`tests/golden/day-2026-06-25-fixture.sha256`). The anchor is not
+re-recordable to accommodate a refactor.
+
+**If someone still wants it gone,** it is a scoped piece of work in its own right, not a byproduct
+of removing strategies: retire the meta-calibration research layer and the decision-log feature
+stack as a deliberate, separately-reviewed behavior change, re-anchor the golden in that same
+change, and only then drop the crate.

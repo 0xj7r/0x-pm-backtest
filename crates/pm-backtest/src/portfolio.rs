@@ -17,7 +17,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::config::{MarketHandle, WalkForwardConfig, spot_cache_key, spot_symbol_for_market};
-use crate::engine::StratId;
 
 fn metrics_path(cache_dir: &Path, symbol: &str, date: &str) -> PathBuf {
     cache_dir.join(format!(
@@ -357,25 +356,14 @@ pub fn spot_symbol_override(configured: &str) -> Option<String> {
 }
 
 
-fn needs_perp_for_strategies(strategies: &[StratId]) -> bool {
-    strategies
-        .iter()
-        .any(|s| matches!(s, StratId::ExoFade | StratId::MayJuneFade))
-}
-
-
-/// Resolve the perp symbol for walk-forward exo_fade parity with the alpha path.
+/// Resolve the perp symbol for the walk-forward run.
+///
+/// Only an explicit `--perp-symbol` selects one now. The implicit fallback to
+/// `--spot-symbol` existed so the fade strategies got a perp complex without
+/// being asked; with no strategy consuming perp data, an implicit fetch would
+/// be pure cost.
 pub fn resolve_perp_symbol(cfg: &WalkForwardConfig) -> Option<String> {
-    if let Some(sym) = &cfg.perp_symbol {
-        return Some(sym.clone());
-    }
-    if needs_perp_for_strategies(&cfg.strategies)
-        && !cfg.spot_symbol.eq_ignore_ascii_case("auto")
-        && !cfg.spot_symbol.is_empty()
-    {
-        return Some(cfg.spot_symbol.clone());
-    }
-    None
+    cfg.perp_symbol.clone()
 }
 
 

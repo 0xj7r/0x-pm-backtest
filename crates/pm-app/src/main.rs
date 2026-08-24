@@ -712,9 +712,10 @@ enum Cmd {
         directional_tilt_strength: f64,
         /// Comma-separated active strategy IDs.
         ///
-        /// Active set by default: `exo_fade` (canonical quant implementation).
-        /// Also available: `noop` (baseline, emits no orders).
-        #[arg(long, default_value = "exo_fade")]
+        /// There are no deployable strategies. `noop` (the default) emits no
+        /// orders and exercises the loader and accounting path; `fixture` is
+        /// test-only plumbing and needs `--allow-fixture`.
+        #[arg(long, default_value = "noop")]
         strategies: String,
         /// Permit `--strategies fixture`, the deterministic test-only strategy
         /// that anchors the golden replay gate. It is not a deployable
@@ -958,7 +959,7 @@ enum Cmd {
         #[arg(long)]
         markets: PathBuf,
         /// Strategy key inside `per_strategy`.
-        #[arg(long, default_value = "exo_fade")]
+        #[arg(long, default_value = "noop")]
         strategy: String,
         /// Optional JSON output path for the computed summary.
         #[arg(long)]

@@ -7,7 +7,7 @@
 //! computes nothing about fills: the caller realizes the order (the sim
 //! book-walk in the backtest, a marketable IOC live). Keeping the decision in
 //! one pure function is what guarantees that the backtest and the live agent
-//! make byte-identical decisions, proven by the `exo_fade_equivalence` test.
+//! make byte-identical decisions.
 //!
 //! The function is ported character-for-character from `execute()` L354-457 so
 //! the backtest refactor changes nothing (provable by a before/after diff). The

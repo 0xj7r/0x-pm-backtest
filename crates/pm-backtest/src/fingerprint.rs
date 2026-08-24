@@ -75,7 +75,7 @@ mod tests {
         SampleCfg {
             spot_symbol: "BTCUSDT".to_string(),
             starting_cash_usdc: 1000.0,
-            strategies: vec!["exo_fade".to_string()],
+            strategies: vec!["noop".to_string()],
             nested: NestedCfg {
                 threshold: 0.12,
                 enabled: true,
@@ -115,12 +115,12 @@ mod tests {
         let ordered = r#"{
             "spot_symbol": "BTCUSDT",
             "starting_cash_usdc": 1000.0,
-            "strategies": ["exo_fade"],
+            "strategies": ["noop"],
             "nested": { "threshold": 0.12, "enabled": true }
         }"#;
         let reversed = r#"{
             "nested": { "enabled": true, "threshold": 0.12 },
-            "strategies": ["exo_fade"],
+            "strategies": ["noop"],
             "starting_cash_usdc": 1000.0,
             "spot_symbol": "BTCUSDT"
         }"#;

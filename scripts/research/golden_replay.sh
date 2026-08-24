@@ -1,18 +1,16 @@
 #!/usr/bin/env bash
 # Pinned-tape golden harness: replays a fixed day (2026-06-25) through the
 # walk-forward runner with a fixed, canonical config and hashes the normalized
-# output. Used as a byte-for-byte regression gate by engine refactors: `check`
-# must print GOLDEN: IDENTICAL after any change that is supposed to be
-# behavior-preserving.
+# output. `check` must print GOLDEN: IDENTICAL after any change that is
+# supposed to be behavior-preserving.
 #
-# Two variants:
-#   exo    (default) - the legacy exo_fade replay. Retires with the strategy.
-#   fixture          - the same day and config replayed through the
-#                      deterministic test-only `fixture` strategy
-#                      (pm-strategy::fixture::ThresholdFadeStrategy), which
-#                      actually submits orders and takes fills. This is the
-#                      durable anchor: it survives the strategy kill, so it
-#                      gates the engine rather than any tradeable logic.
+# The replay runs the `fixture` strategy
+# (pm-strategy::fixture::ThresholdFadeStrategy): deterministic, test-only, and
+# not deployable. That is the point. A golden anchored to a tradeable strategy
+# only gates the engine for as long as that strategy lives, and the exo_fade
+# variant this harness used to carry submitted zero orders on the pinned day,
+# so it gated almost none of the order/fill/settlement path. The fixture
+# submits 126 orders across the day's 288 markets and all of them fill.
 #
 # Flag notes (verified against `./target/release/pm-app walk-forward --help`):
 #   --fee-curve-rate exists (added with constraint 2) and defaults to the
@@ -20,13 +18,18 @@
 #     the canonical default. maker_rebate_bps=10.0 / taker_fee_bps=0.0 remain
 #     fixed in code; the curve fee is charged on taker fills on top of those.
 #   --latency-ms does not exist; the equivalent flag is --taker-latency-ms.
-#   --allow-fixture is required for the fixture variant; without it the CLI
-#     rejects the id, which is what keeps it from being deployable.
+#   --allow-fixture is required; without it the CLI rejects the strategy id,
+#     which is what keeps the fixture from being deployable.
 #
 # Usage: golden_replay.sh {record|check} [fixture]
-#   record - run the replay, normalize the output, write its sha256 to the
-#            variant's hash file under tests/golden/, and keep the full JSON
-#            for inspection.
+#   The trailing `fixture` is optional and is the only accepted variant; it is
+#   spelled out at call sites that want to be explicit about what is replayed.
+#
+#   record - run the replay, normalize the output, write its sha256 to
+#            tests/golden/day-2026-06-25-fixture.sha256, and keep the full JSON
+#            for inspection. Only after an INTENTIONAL behavior change: this
+#            hash is the anchor and must not be re-recorded to make a refactor
+#            pass.
 #   check  - run the replay again, normalize, and compare against the
 #            committed hash. Prints GOLDEN: IDENTICAL (exit 0) or
 #            GOLDEN: DIVERGED (exit 1).
@@ -36,26 +39,21 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 MODE="${1:-}"
-VARIANT="${2:-exo}"
+VARIANT="${2:-fixture}"
 if [[ "$MODE" != "record" && "$MODE" != "check" ]]; then
   echo "usage: $0 {record|check} [fixture]" >&2
   exit 2
 fi
-if [[ "$VARIANT" != "exo" && "$VARIANT" != "fixture" ]]; then
-  echo "usage: $0 {record|check} [fixture]" >&2
+if [[ "$VARIANT" != "fixture" ]]; then
+  echo "error: unknown variant '$VARIANT'; the only variant is 'fixture' (the exo_fade variant retired with the strategy)" >&2
   exit 2
 fi
 
 BIN=./target/release/pm-app
 MARKETS_MANIFEST=/tmp/golden-markets.jsonl
 
-if [[ "$VARIANT" == "fixture" ]]; then
-  STRATEGY_ARGS=(--strategies fixture --allow-fixture)
-  BASENAME=day-2026-06-25-fixture
-else
-  STRATEGY_ARGS=(--strategies exo_fade)
-  BASENAME=day-2026-06-25
-fi
+STRATEGY_ARGS=(--strategies fixture --allow-fixture)
+BASENAME=day-2026-06-25-fixture
 
 OUT_MARKETS="/tmp/golden-run-$VARIANT.jsonl"
 OUT_SUMMARY="/tmp/golden-run-$VARIANT.json"

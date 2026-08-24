@@ -1697,14 +1697,8 @@ dependencies = [
 name = "pm-strategy"
 version = "0.1.0"
 dependencies = [
- "chrono",
- "pm-alpha",
  "pm-model",
- "pm-risk",
  "pm-types",
- "serde",
- "thiserror 2.0.18",
- "tracing",
 ]
 
 [[package]]

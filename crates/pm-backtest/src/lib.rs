@@ -15,4 +15,5 @@ pub mod fingerprint;
 pub mod jitter;
 pub mod portfolio;
 pub mod scorecard;
+pub mod settlement;
 pub mod validate;

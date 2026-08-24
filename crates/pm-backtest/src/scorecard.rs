@@ -18,6 +18,7 @@ use crate::engine::{MetaSampleLimits, StratId, evaluate_meta_calibration, filter
 use crate::fingerprint::config_fingerprint;
 use crate::jitter::JitterReport;
 use crate::portfolio::{SharedRunConfig, VolatilityBand};
+use crate::settlement::SettlementEra;
 
 mod summary;
 pub use summary::{
@@ -64,6 +65,21 @@ pub struct WalkForwardSummary {
     /// (omitted from JSON) unless `--bankroll` was passed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sizing: Option<SizingRealism>,
+    /// Per-settlement-era breakdown (market counts, net P&L, label-vs-model
+    /// disagreement count). `None` (omitted from JSON) unless at least one
+    /// market lacks an outcome label or `--era-diagnostics` is passed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub era_breakdown: Option<Vec<EraBreakdown>>,
+}
+
+/// Per-era summary: how many markets settled under the era, their net P&L, and
+/// how often the era-model outcome disagreed with the outcome label.
+#[derive(Debug, Clone, Serialize)]
+pub struct EraBreakdown {
+    pub era: SettlementEra,
+    pub markets: usize,
+    pub net_pnl_usdc: f64,
+    pub disagreements: usize,
 }
 
 /// Canonical set of validated backtest windows. A run is labeled `"VALIDATED"`
@@ -774,14 +790,26 @@ pub fn binary_log_loss(p: f32, observed: bool) -> f32 {
     if observed { -p.ln() } else { -(1.0 - p).ln() }
 }
 
-/// The summary watermark for a run: `"FANTASY"` when the config carries an
-/// explicit fantasy grant, `None` for truthful runs. Mirrors
-/// [`crate::validate::validate_latency`]'s granted-fantasy return value.
-pub fn fantasy_watermark(cfg: &WalkForwardConfig) -> Option<String> {
+/// The summary watermark for a run, combining every applicable marker:
+/// `"FANTASY"` when the config carries an explicit fantasy grant, and
+/// `"MIXED-BASIS"` when a Binance spot tape is run against an Official strike
+/// under `--allow-mixed-basis`. Multiple markers are comma-separated (e.g.
+/// `"FANTASY,MIXED-BASIS"`). `None` for an unmarked truthful same-basis run.
+pub fn run_watermark(cfg: &WalkForwardConfig) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
     if cfg.fantasy {
-        Some("FANTASY".to_string())
-    } else {
+        parts.push("FANTASY");
+    }
+    if cfg.allow_mixed_basis
+        && cfg.spot_source == crate::config::SpotSource::Binance
+        && cfg.strike_source == crate::config::StrikeSource::Official
+    {
+        parts.push("MIXED-BASIS");
+    }
+    if parts.is_empty() {
         None
+    } else {
+        Some(parts.join(","))
     }
 }
 
@@ -795,7 +823,7 @@ pub fn write_portfolio_checkpoint(
 ) -> Result<()> {
     let mut summary = aggregate(results, &cfg.strategies);
     summary.config_fingerprint = Some(config_fingerprint(cfg));
-    summary.watermark = fantasy_watermark(cfg);
+    summary.watermark = run_watermark(cfg);
     summary.run_config = Some(summary_run_config(cfg));
     if let Some(report) = meta_report {
         let mut report = report.clone();
@@ -1101,6 +1129,7 @@ pub fn aggregate(results: &[MarketResult], strategies: &[StratId]) -> WalkForwar
         window_label: None,
         validation: "UNVALIDATED".to_string(),
         sizing: None,
+        era_breakdown: None,
     }
 }
 

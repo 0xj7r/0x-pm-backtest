@@ -24,7 +24,7 @@ use pm_shadow as shadow;
 mod prep_cache;
 
 use pm_backtest::accounting::pretty_print;
-use pm_backtest::config::{RunnerConfig, WalkForwardConfig};
+use pm_backtest::config::{RunnerConfig, SpotSource, StrikeSource, WalkForwardConfig};
 use pm_backtest::engine::{StratId, run_backtest, run_walkforward};
 use pm_backtest::scorecard::{
     print_result_summary, print_summary, summarize_markets_jsonl, write_market_results_jsonl_atomic,
@@ -925,6 +925,21 @@ enum Cmd {
         /// clip the sizing implies, and the 5-share floor/ruin flag.
         #[arg(long)]
         bankroll: Option<f64>,
+        /// Source of the strike (price-to-beat) used for outcome resolution.
+        /// `binance_proxy` (default) uses the Binance open price; `official`
+        /// uses the Polymarket resolution price, which lives on a different
+        /// basis and is rejected with a Binance spot tape unless
+        /// `--allow-mixed-basis` is also set.
+        #[arg(long, default_value = "binance_proxy")]
+        strike_source: String,
+        /// Permit a Binance spot tape with an Official strike. The run
+        /// proceeds but is watermarked `"MIXED-BASIS"` in the summary.
+        #[arg(long, default_value_t = false)]
+        allow_mixed_basis: bool,
+        /// Force per-era breakdown and label-vs-model disagreement reporting
+        /// even when every market carries an outcome label.
+        #[arg(long, default_value_t = false)]
+        era_diagnostics: bool,
     },
     /// Summarize a walk-forward `markets.jsonl` result file.
     SummarizeMarkets {
@@ -1585,6 +1600,9 @@ async fn main() -> Result<()> {
             window_label,
             validated_set_complete,
             bankroll,
+            strike_source,
+            allow_mixed_basis,
+            era_diagnostics,
         } => {
             walk_forward(
                 markets,
@@ -1659,6 +1677,9 @@ async fn main() -> Result<()> {
                 window_label,
                 validated_set_complete,
                 bankroll,
+                strike_source,
+                allow_mixed_basis,
+                era_diagnostics,
             )
             .await
         }
@@ -2268,6 +2289,9 @@ async fn walk_forward(
     window_label: Option<String>,
     validated_set_complete: bool,
     bankroll: Option<f64>,
+    strike_source: String,
+    allow_mixed_basis: bool,
+    era_diagnostics: bool,
 ) -> Result<()> {
     if let Some(path) = &profile {
         tracing::warn!(
@@ -2344,9 +2368,39 @@ async fn walk_forward(
         pm_backtest::accounting::validate_outcome_labels(&markets)?;
     }
 
-    // Truthful-latency floor: reject sub-floor runs unless --fantasy grants a
-    // watermarked override. Checked before any market is fetched or run.
-    let watermark = pm_backtest::validate::validate_latency(taker_latency_ms, fantasy)?;
+    // Truthful-latency floor, era-aware: reject runs modeling less total
+    // latency than the truthful floor or the era's venue taker delay, unless
+    // --fantasy grants a watermarked override. The venue-delay history is not
+    // monotonic (0ms, then 250ms, then 50ms), so validate against whichever
+    // market close in the run carries the LARGEST venue delay.
+    let strictest_close = markets
+        .iter()
+        .map(|m| m.close_ts)
+        .max_by_key(|ts| pm_backtest::settlement::venue_taker_delay_ms(*ts))
+        .unwrap_or(0);
+    let latency_watermark = pm_backtest::validate::validate_latency_for_era(
+        taker_latency_ms,
+        fantasy,
+        strictest_close,
+    )?;
+    // Mixed price-basis refusal: a Binance spot tape against an Official strike
+    // compares prices on different bases (see the basis doctrine in
+    // docs/PROD.md) and is rejected unless --allow-mixed-basis watermarks it.
+    let strike_source = match strike_source.as_str() {
+        "binance_proxy" => StrikeSource::BinanceProxy,
+        "official" => StrikeSource::Official,
+        other => {
+            return Err(anyhow!(
+                "unknown --strike-source {other} (expected binance_proxy or official)"
+            ));
+        }
+    };
+    let basis_watermark =
+        pm_backtest::config::validate_basis(SpotSource::Binance, strike_source, allow_mixed_basis)?;
+    let watermark = match (latency_watermark, basis_watermark) {
+        (Some(a), Some(b)) => Some(format!("{a},{b}")),
+        (a, b) => a.or(b),
+    };
     // Fantasy runs watermark their output filenames so they are unmistakable.
     let out_markets = out_markets.map(|p| apply_fantasy_prefix(&p, fantasy));
     let out_summary = out_summary.map(|p| apply_fantasy_prefix(&p, fantasy));
@@ -2380,6 +2434,10 @@ async fn walk_forward(
         jitter,
         jitter_latency_spread_ms,
         jitter_seed,
+        spot_source: SpotSource::Binance,
+        strike_source,
+        allow_mixed_basis,
+        era_diagnostics,
         window_label: window_label.clone(),
         replay_event_cache_dir,
         load_pm_trades,

@@ -196,6 +196,84 @@ pub fn parse_close_ts(slug: &str) -> Option<i64> {
     slug.rsplit('-').next().and_then(|t| t.parse::<i64>().ok())
 }
 
+/// Source of the spot tape used to drive beliefs and (under TWAP eras) settle
+/// outcomes. Binance is the only supported spot source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SpotSource {
+    Binance,
+}
+
+impl Default for SpotSource {
+    fn default() -> Self {
+        SpotSource::Binance
+    }
+}
+
+/// Source of the strike (price-to-beat) used for outcome resolution. Binance
+/// proxy (the open price) is the validated default; Official is the Polymarket
+/// resolution price, which lives on a different basis and must not be silently
+/// mixed with a Binance spot tape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum StrikeSource {
+    BinanceProxy,
+    Official,
+}
+
+impl Default for StrikeSource {
+    fn default() -> Self {
+        StrikeSource::BinanceProxy
+    }
+}
+
+/// Validate the spot/strike price-basis pair. Mixing a Binance spot tape with
+/// an Official strike is rejected (it compares prices on different bases; see
+/// the basis doctrine in `docs/PROD.md`) unless `allow_mixed` is set, in which
+/// case the run proceeds and is watermarked `"MIXED-BASIS"`. Same-basis pairs
+/// return `Ok(None)`.
+pub fn validate_basis(
+    spot: SpotSource,
+    strike: StrikeSource,
+    allow_mixed: bool,
+) -> Result<Option<String>> {
+    if spot == SpotSource::Binance && strike == StrikeSource::Official {
+        if allow_mixed {
+            return Ok(Some("MIXED-BASIS".to_string()));
+        }
+        return Err(anyhow!(
+            "mixed price basis: Binance spot tape with an Official strike compares prices on \
+             different bases (see docs/PROD.md basis doctrine). \
+             Pass --allow-mixed-basis to override and watermark the run."
+        ));
+    }
+    Ok(None)
+}
+
+#[cfg(test)]
+mod basis_tests {
+    use super::*;
+
+    #[test]
+    fn mixed_basis_is_rejected() {
+        // Binance + Official without the override is an error naming the basis.
+        let err = validate_basis(SpotSource::Binance, StrikeSource::Official, false).unwrap_err();
+        assert!(err.to_string().contains("basis"));
+        // With the override it is watermarked MIXED-BASIS.
+        assert_eq!(
+            validate_basis(SpotSource::Binance, StrikeSource::Official, true).unwrap().as_deref(),
+            Some("MIXED-BASIS")
+        );
+        // Same-basis pairs are accepted unwatermarked.
+        assert_eq!(
+            validate_basis(SpotSource::Binance, StrikeSource::BinanceProxy, false).unwrap(),
+            None
+        );
+        assert_eq!(
+            validate_basis(SpotSource::Binance, StrikeSource::BinanceProxy, true).unwrap(),
+            None
+        );
+    }
+}
+
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct WalkForwardConfig {
@@ -362,6 +440,22 @@ pub struct WalkForwardConfig {
     pub checkpoint_markets_out: Option<PathBuf>,
     /// Optional summary JSON path used for portfolio checkpoints.
     pub checkpoint_summary_out: Option<PathBuf>,
+    /// Source of the spot tape driving beliefs and TWAP settlement. Skipped
+    /// from the config fingerprint so adding it does not perturb golden hashes.
+    #[serde(skip)]
+    pub spot_source: SpotSource,
+    /// Source of the strike used for outcome resolution. Skipped from the
+    /// fingerprint (see [`Self::spot_source`]).
+    #[serde(skip)]
+    pub strike_source: StrikeSource,
+    /// Permit a Binance spot tape with an Official strike (watermarks the run
+    /// `"MIXED-BASIS"`). Skipped from the fingerprint.
+    #[serde(skip)]
+    pub allow_mixed_basis: bool,
+    /// Force per-era breakdown and label-vs-model disagreement reporting even
+    /// when every market carries an outcome label. Skipped from the fingerprint.
+    #[serde(skip)]
+    pub era_diagnostics: bool,
 }
 
 
@@ -435,6 +529,10 @@ impl Default for WalkForwardConfig {
             decision_log_every_n: 1,
             checkpoint_markets_out: None,
             checkpoint_summary_out: None,
+            spot_source: SpotSource::default(),
+            strike_source: StrikeSource::default(),
+            allow_mixed_basis: false,
+            era_diagnostics: false,
         }
     }
 }

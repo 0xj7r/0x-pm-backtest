@@ -8,7 +8,7 @@ use pm_model::{MetaFeatures, MetaTrainingSample, ModelConfig, ModelState, edge_v
 use pm_risk::PortfolioState;
 use pm_strategy::regime::{WhipsawRiskSnapshot, classify_market_regime_cluster};
 use pm_strategy::{Ctx, Side, Strategy};
-use pm_types::{ReplayEvent, SpotHistory, TradeHistory};
+use pm_types::{Outcome, ReplayEvent, SpotHistory, TradeHistory};
 use std::io::Write;
 
 use crate::accounting::{BacktestReport, StrategyCounters, mark_to_market};
@@ -780,7 +780,8 @@ use std::sync::{Arc, Mutex};
 use crate::accounting::{MarketResult, StrategyMarketResult, market_close_ns, market_close_ts, market_duration_secs_from_slug, market_open_ns, outcome_label_resolved_yes, prior_market_range_mean};
 use crate::config::{MarketHandle, WalkForwardConfig, spot_symbol_for_market};
 use crate::portfolio::{LossStreakCooldownState, SpotCache, compounded_clip, daily_remaining_loss_budget_usdc, drawdown_clip_multiplier, load_walkforward_perp, market_volatility_range, model_market_context_for_cfg, model_market_context_for_slug, per_market_exposure_cap, spot_history_for_market, volatility_band};
-use crate::scorecard::{CalibrationBin, CalibrationBinAccumulator, MarketCalibrationAccumulator, MetaCalibrationReport, MetaCandidateEvaluation, MetaEvaluationSummary, PredictionDistribution, WalkForwardFoldSummary, WalkForwardSummary, aggregate, binary_log_loss, meta_calibration_report, prediction_distribution, summary_run_config, write_portfolio_checkpoint};
+use crate::scorecard::{CalibrationBin, CalibrationBinAccumulator, EraBreakdown, MarketCalibrationAccumulator, MetaCalibrationReport, MetaCandidateEvaluation, MetaEvaluationSummary, PredictionDistribution, WalkForwardFoldSummary, WalkForwardSummary, aggregate, binary_log_loss, meta_calibration_report, prediction_distribution, summary_run_config, write_portfolio_checkpoint};
+use crate::settlement::{MarketDuration, SettlementEra, resolve_outcome, settlement_era};
 use crate::fingerprint::config_fingerprint;
 use crate::jitter::{build_jitter_report, jittered_run_latencies};
 
@@ -1245,6 +1246,7 @@ pub async fn run_walkforward(
     if use_folds {
         summary.fold_summaries = fold_summaries;
     }
+    summary.era_breakdown = compute_era_breakdown(cfg, &results, markets, &spot_map_top);
     Ok((results, summary))
 }
 
@@ -2277,7 +2279,10 @@ async fn run_markets(
                         .expect("outcome labels are validated before replay"),
                 )
             } else {
-                None
+                // No outcome label: the era model resolves the market from the
+                // spot tape. Falls back to book-derived resolution (None) when
+                // the spot tape is unavailable.
+                era_model_resolved_yes(&spot, market_close_ts(&m), &m.slug)
             };
 
             let runner_cfg = RunnerConfig {
@@ -2635,7 +2640,10 @@ async fn run_portfolio(
                     .expect("outcome labels are validated before replay"),
             )
         } else {
-            None
+            // No outcome label: the era model resolves the market from the spot
+            // tape under the era's settlement rule. Falls back to book-derived
+            // resolution (None) when the spot tape is unavailable.
+            era_model_resolved_yes(&spot, market_close_ts(&m), &m.slug)
         };
 
         let mut per_strategy = HashMap::new();
@@ -2883,6 +2891,7 @@ async fn run_portfolio(
         }
         summary.meta_calibration = meta_report;
     }
+    summary.era_breakdown = compute_era_breakdown(cfg, &results, markets, spot_map);
     Ok((results, summary))
 }
 
@@ -2893,6 +2902,99 @@ fn model_state_with_snapshot(snapshot: Option<&OnlineMetaCalibratorSnapshot>) ->
         state.load_meta_calibrator_snapshot(snapshot.clone());
     }
     state
+}
+
+/// Era-model outcome for a single market: resolve Up/Down from the spot tape
+/// under the market's settlement era, using the spot price at market open as
+/// the strike (price-to-beat). Returns `None` when the spot tape lacks an open
+/// price or any in-window print, so callers fall back to the book-derived
+/// outcome. The TWAP window is the era's settlement window (30s/60s); the
+/// snapshot era samples the final 60s.
+fn era_model_resolved_yes(spot: &SpotHistory, close_ts_s: i64, slug: &str) -> Option<bool> {
+    let duration = MarketDuration::from_slug(slug);
+    let era = settlement_era(close_ts_s, duration);
+    let close_ns = close_ts_s.saturating_mul(1_000_000_000);
+    let open_ns = close_ns.saturating_sub(market_duration_secs_from_slug(slug) * 1_000_000_000);
+    let strike = spot.price_at_or_before(open_ns)?;
+    let window_secs = match era {
+        SettlementEra::Twap30 => 30,
+        SettlementEra::Twap60 => 60,
+        SettlementEra::Snapshot => 60,
+    };
+    let start_ns = close_ns.saturating_sub(window_secs * 1_000_000_000);
+    let tape: Vec<(i64, f64)> = spot
+        .range(start_ns, close_ns)
+        .iter()
+        .map(|t| (t.ts_ns / 1_000_000_000, t.price))
+        .collect();
+    if tape.is_empty() {
+        return None;
+    }
+    Some(resolve_outcome(era, &tape, close_ts_s, strike) == Outcome::Yes)
+}
+
+fn era_index(era: SettlementEra) -> usize {
+    match era {
+        SettlementEra::Snapshot => 0,
+        SettlementEra::Twap30 => 1,
+        SettlementEra::Twap60 => 2,
+    }
+}
+
+/// Build the per-era breakdown for a finished run. Returns `None` (omitted
+/// from the summary JSON) when every market carries an outcome label and
+/// `--era-diagnostics` was not requested: the labeled-run case where the era
+/// model is not the resolver and disagreement reporting is not asked for.
+fn compute_era_breakdown(
+    cfg: &WalkForwardConfig,
+    results: &[MarketResult],
+    markets: &[MarketHandle],
+    spot_map: &HashMap<String, Arc<SpotHistory>>,
+) -> Option<Vec<EraBreakdown>> {
+    let any_unlabeled = results
+        .iter()
+        .any(|r| outcome_label_resolved_yes(&r.outcome_label).is_none());
+    if !cfg.era_diagnostics && cfg.use_outcome_label && !any_unlabeled {
+        return None;
+    }
+
+    let market_by_slug: HashMap<&str, &MarketHandle> =
+        markets.iter().map(|m| (m.slug.as_str(), m)).collect();
+    let empty_spot = Arc::new(SpotHistory::default());
+
+    let mut markets_n = [0usize; 3];
+    let mut pnl = [0.0f64; 3];
+    let mut disagreements = [0usize; 3];
+    for r in results {
+        let era = settlement_era(r.close_ts, MarketDuration::from_slug(&r.slug));
+        let i = era_index(era);
+        markets_n[i] += 1;
+        pnl[i] += r.per_strategy.values().map(|s| s.pnl_usdc).sum::<f64>();
+        let label_yes = outcome_label_resolved_yes(&r.outcome_label);
+        let spot_arc = market_by_slug
+            .get(r.slug.as_str())
+            .map(|m| spot_history_for_market(spot_map, &empty_spot, cfg, m));
+        let era_model =
+            spot_arc.as_ref().and_then(|s| era_model_resolved_yes(s, r.close_ts, &r.slug));
+        if let (Some(em), Some(ly)) = (era_model, label_yes) {
+            if em != ly {
+                disagreements[i] += 1;
+            }
+        }
+    }
+
+    Some(
+        [SettlementEra::Snapshot, SettlementEra::Twap30, SettlementEra::Twap60]
+            .iter()
+            .enumerate()
+            .map(|(i, &era)| EraBreakdown {
+                era,
+                markets: markets_n[i],
+                net_pnl_usdc: pnl[i],
+                disagreements: disagreements[i],
+            })
+            .collect(),
+    )
 }
 
 #[cfg(test)]

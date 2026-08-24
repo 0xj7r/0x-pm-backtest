@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 pub mod exo_fade;
+pub mod fixture;
 pub mod regime;
 #[path = "archive/trivial.rs"]
 pub mod trivial;
@@ -137,4 +138,5 @@ pub trait Strategy {
 }
 
 pub use exo_fade::{ExoFadeConfig, ExoFadeGateStats, ExoFadeStrategy};
+pub use fixture::ThresholdFadeStrategy;
 pub use trivial::NoopStrategy;

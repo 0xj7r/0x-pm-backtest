@@ -18,6 +18,40 @@ bash scripts/research/golden_replay.sh check     # the regression gate; run this
 
 `check` exits 1 and prints `GOLDEN: DIVERGED` on any mismatch.
 
+## Two variants: the fixture anchor is the durable one
+
+The harness takes an optional second argument selecting which strategy the
+day is replayed through:
+
+```
+bash scripts/research/golden_replay.sh check            # exo variant  -> day-2026-06-25.sha256
+bash scripts/research/golden_replay.sh check fixture    # fixture variant -> day-2026-06-25-fixture.sha256
+```
+
+The `exo` variant hashes an `exo_fade` replay and dies with that strategy.
+The `fixture` variant replays the same day and the same config through
+`fixture` (`pm_strategy::fixture::ThresholdFadeStrategy`), a deterministic
+test-only strategy that is not deployable: the CLI rejects the id unless
+`--allow-fixture` is also passed.
+
+The fixture variant is the anchor that outlives the strategies. It exists
+because a golden that depends on a tradeable strategy can only gate the
+engine for as long as that strategy is alive, and because `exo_fade` on
+2026-06-25 submits zero orders, so the exo hash gates almost none of the
+order/fill/settlement path. The fixture submits 126 orders across the day's
+288 markets, all of which fill as takers (3149.42 shares, mean slippage
+15.00 bps), so the hash covers order submission, depth-weighted taker
+fills, the taker fee curve, mark-to-market, settlement, and per-strategy
+aggregation. It is deliberately a loser (-$65.95 over the day): it is
+plumbing, not alpha, and no one should mistake it for a strategy.
+
+The rule (`crates/pm-strategy/src/fixture.rs`): after a 16-event warmup,
+once per market, buy the cheap side at a fixed 25-share clip when the YES
+mid sits outside a fixed 0.35/0.65 band, then hold to resolution. No spot,
+no trade tape, no model, no config surface. It reads only `event.yes_mid`
+and `ctx.events_seen`, so it is insensitive to `Ctx` fields being removed,
+which is exactly what makes it a stable anchor across the engine slimming.
+
 ## What is hashed
 
 The script runs `pm-app walk-forward` against the day's market manifest
@@ -122,3 +156,23 @@ the engine should be fixed by normalizing the harness's hashing (sorting,
 key-ordering, stripping truly volatile fields), not by special-casing the
 harness around a bug, and not by changing engine internals unless the
 engine change is itself the reviewed unit of work.
+
+## Fixture anchor recorded 2026-08-24
+
+`tests/golden/day-2026-06-25-fixture.sha256` was recorded on 2026-08-24 at
+the pre-kill tree (the exo variant still `GOLDEN: IDENTICAL` at hash
+`41313410e8a700ca40dd467b0fb62d767b202fda536f2af66b084b9d94f1f83a`, GATE B
+still PASS), so the anchor is pinned to known-good engine behavior before
+anything was deleted:
+
+```
+7edbce58530c588860752e53578a32a466831d6943113a78acf394a7e5356263
+```
+
+Determinism was proved the same way as the exo variant: `record fixture`
+followed by two independent `check fixture` runs, both `GOLDEN: IDENTICAL`.
+
+From that commit onward the fixture hash is the gate, and it must NOT be
+re-recorded to make a refactor pass. A divergence after the anchor means
+the engine's observable behavior changed and needs bisecting, not a new
+hash.

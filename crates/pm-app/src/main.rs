@@ -716,6 +716,11 @@ enum Cmd {
         /// Also available: `noop` (baseline, emits no orders).
         #[arg(long, default_value = "exo_fade")]
         strategies: String,
+        /// Permit `--strategies fixture`, the deterministic test-only strategy
+        /// that anchors the golden replay gate. It is not a deployable
+        /// strategy; without this flag the id is rejected.
+        #[arg(long, default_value_t = false)]
+        allow_fixture: bool,
         #[arg(long, default_value = "64")]
         max_concurrent_fetches: usize,
         /// Research-speed replay thinning in milliseconds. 0 keeps every raw event.
@@ -1548,6 +1553,7 @@ async fn main() -> Result<()> {
             perp_cache_dir,
             directional_tilt_strength,
             strategies,
+            allow_fixture,
             max_concurrent_fetches,
             replay_sample_ms,
             taker_latency_ms,
@@ -1627,6 +1633,7 @@ async fn main() -> Result<()> {
             perp_cache_dir,
             directional_tilt_strength,
             strategies,
+            allow_fixture,
             max_concurrent_fetches,
             replay_sample_ms,
             taker_latency_ms,
@@ -2240,6 +2247,7 @@ async fn walk_forward(
     perp_cache_dir: Option<PathBuf>,
     directional_tilt_strength: f64,
     strategies_csv: String,
+    allow_fixture: bool,
     max_concurrent_fetches: usize,
     replay_sample_ms: u64,
     taker_latency_ms: u64,
@@ -2427,7 +2435,7 @@ async fn walk_forward(
     let out_markets = out_markets.map(|p| apply_fantasy_prefix(&p, fantasy));
     let out_summary = out_summary.map(|p| apply_fantasy_prefix(&p, fantasy));
 
-    let strategies = parse_strategies(&strategies_csv)?;
+    let strategies = parse_strategies(&strategies_csv, allow_fixture)?;
 
     let store = if let Some(ref dir) = local_cache_dir {
         tracing::info!(?dir, "using local cache");
@@ -2644,7 +2652,7 @@ fn apply_fantasy_prefix(path: &std::path::Path, fantasy: bool) -> std::path::Pat
     }
 }
 
-fn parse_strategies(csv: &str) -> Result<Vec<StratId>> {
+fn parse_strategies(csv: &str, allow_fixture: bool) -> Result<Vec<StratId>> {
     let mut out = Vec::new();
     for token in csv.split(',').map(str::trim) {
         let id = StratId::from_name(token).ok_or_else(|| {
@@ -2653,6 +2661,11 @@ fn parse_strategies(csv: &str) -> Result<Vec<StratId>> {
                 StratId::all_names().join(", ")
             )
         })?;
+        if id.is_fixture() && !allow_fixture {
+            return Err(anyhow!(
+                "strategy {token} is test-only plumbing for the golden replay gate and is not deployable; pass --allow-fixture to run it"
+            ));
+        }
         out.push(id);
     }
 
@@ -3054,7 +3067,27 @@ mod tests {
 
     #[test]
     fn parse_strategies_rejects_unknown_names() {
-        assert!(parse_strategies("reactive_directional").is_err());
+        assert!(parse_strategies("reactive_directional", false).is_err());
+    }
+
+    #[test]
+    fn parse_strategies_rejects_the_fixture_without_the_allow_flag() {
+        let err = parse_strategies("fixture", false).unwrap_err().to_string();
+        assert!(err.contains("--allow-fixture"), "unexpected error: {err}");
+        assert!(parse_strategies("noop,fixture", false).is_err());
+    }
+
+    #[test]
+    fn parse_strategies_accepts_the_fixture_behind_the_allow_flag() {
+        assert_eq!(
+            parse_strategies("fixture", true).unwrap(),
+            vec![StratId::Fixture]
+        );
+    }
+
+    #[test]
+    fn parse_strategies_allow_fixture_does_not_widen_the_deployable_set() {
+        assert!(parse_strategies("reactive_directional", true).is_err());
     }
 
     // CONFIG PARITY GATE (deep-review F1). The clap layer and the shell flag

@@ -767,7 +767,7 @@ pub fn run_backtest<S: Strategy>(
 
 use pm_model::{MetaTrainingConfig, MetaTrainingStats, ModelMarketContext, OnlineMetaCalibrator, OnlineMetaCalibratorSnapshot};
 use pm_risk::PortfolioLimits;
-use pm_strategy::{ExoFadeStrategy, NoopStrategy, exo_fade::ExoFadeConfig};
+use pm_strategy::{ExoFadeStrategy, NoopStrategy, ThresholdFadeStrategy, exo_fade::ExoFadeConfig};
 use pm_telonex_loader::{
     Channel, TelonexStore, load_book_snapshot_async, load_pm_trades_async, resolve_pm_trades_day,
 };
@@ -802,19 +802,23 @@ pub enum StratId {
     ExoFade,
     MayJuneFade,
     Noop,
+    /// Test-only deterministic fixture that anchors the golden replay gate.
+    /// Not deployable: the CLI rejects it unless `--allow-fixture` is passed.
+    Fixture,
 }
 
 
 impl StratId {
     pub const ACTIVE: [Self; 3] = [Self::ExoFade, Self::MayJuneFade, Self::Noop];
 
-    pub const ALL: [Self; 3] = [Self::ExoFade, Self::MayJuneFade, Self::Noop];
+    pub const ALL: [Self; 4] = [Self::ExoFade, Self::MayJuneFade, Self::Noop, Self::Fixture];
 
     pub fn from_name(value: &str) -> Option<Self> {
         match value {
             "exo_fade" => Some(Self::ExoFade),
             "mayjune_fade" => Some(Self::MayJuneFade),
             "noop" => Some(Self::Noop),
+            "fixture" => Some(Self::Fixture),
             _ => None,
         }
     }
@@ -824,7 +828,13 @@ impl StratId {
             StratId::ExoFade => "exo_fade",
             StratId::MayJuneFade => "mayjune_fade",
             StratId::Noop => "noop",
+            StratId::Fixture => "fixture",
         }
+    }
+
+    /// True for ids that are test plumbing rather than a runnable strategy.
+    pub fn is_fixture(self) -> bool {
+        matches!(self, StratId::Fixture)
     }
 
     pub fn all_names() -> Vec<&'static str> {
@@ -2501,6 +2511,10 @@ fn run_one_strategy(
         }
         StratId::Noop => {
             let mut s = NoopStrategy;
+            run_backtest(events, spot, trades, &mut s, runner_cfg)?
+        }
+        StratId::Fixture => {
+            let mut s = ThresholdFadeStrategy::new();
             run_backtest(events, spot, trades, &mut s, runner_cfg)?
         }
     };

@@ -1,9 +1,18 @@
 #!/usr/bin/env bash
 # Pinned-tape golden harness: replays a fixed day (2026-06-25) through the
-# exo_fade walk-forward runner with a fixed, canonical config and hashes the
-# normalized output. Used as a byte-for-byte regression gate by later engine
-# extraction tasks: `check` must print GOLDEN: IDENTICAL after any refactor
-# that is supposed to be behavior-preserving.
+# walk-forward runner with a fixed, canonical config and hashes the normalized
+# output. Used as a byte-for-byte regression gate by engine refactors: `check`
+# must print GOLDEN: IDENTICAL after any change that is supposed to be
+# behavior-preserving.
+#
+# Two variants:
+#   exo    (default) - the legacy exo_fade replay. Retires with the strategy.
+#   fixture          - the same day and config replayed through the
+#                      deterministic test-only `fixture` strategy
+#                      (pm-strategy::fixture::ThresholdFadeStrategy), which
+#                      actually submits orders and takes fills. This is the
+#                      durable anchor: it survives the strategy kill, so it
+#                      gates the engine rather than any tradeable logic.
 #
 # Flag notes (verified against `./target/release/pm-app walk-forward --help`):
 #   --fee-curve-rate exists (added with constraint 2) and defaults to the
@@ -11,11 +20,13 @@
 #     the canonical default. maker_rebate_bps=10.0 / taker_fee_bps=0.0 remain
 #     fixed in code; the curve fee is charged on taker fills on top of those.
 #   --latency-ms does not exist; the equivalent flag is --taker-latency-ms.
+#   --allow-fixture is required for the fixture variant; without it the CLI
+#     rejects the id, which is what keeps it from being deployable.
 #
-# Usage: golden_replay.sh {record|check}
-#   record - run the replay, normalize the output, write its sha256 to
-#            tests/golden/day-2026-06-25.sha256, and keep the full JSON at
-#            /tmp/golden-run.json for inspection.
+# Usage: golden_replay.sh {record|check} [fixture]
+#   record - run the replay, normalize the output, write its sha256 to the
+#            variant's hash file under tests/golden/, and keep the full JSON
+#            for inspection.
 #   check  - run the replay again, normalize, and compare against the
 #            committed hash. Prints GOLDEN: IDENTICAL (exit 0) or
 #            GOLDEN: DIVERGED (exit 1).
@@ -25,17 +36,33 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 MODE="${1:-}"
+VARIANT="${2:-exo}"
 if [[ "$MODE" != "record" && "$MODE" != "check" ]]; then
-  echo "usage: $0 {record|check}" >&2
+  echo "usage: $0 {record|check} [fixture]" >&2
+  exit 2
+fi
+if [[ "$VARIANT" != "exo" && "$VARIANT" != "fixture" ]]; then
+  echo "usage: $0 {record|check} [fixture]" >&2
   exit 2
 fi
 
 BIN=./target/release/pm-app
 MARKETS_MANIFEST=/tmp/golden-markets.jsonl
-OUT_MARKETS=/tmp/golden-run.jsonl
-OUT_SUMMARY=/tmp/golden-run.json
-NORMALIZED=/tmp/golden-run.normalized.json
-HASH_FILE=tests/golden/day-2026-06-25.sha256
+
+if [[ "$VARIANT" == "fixture" ]]; then
+  STRATEGY_ARGS=(--strategies fixture --allow-fixture)
+  BASENAME=day-2026-06-25-fixture
+else
+  STRATEGY_ARGS=(--strategies exo_fade)
+  BASENAME=day-2026-06-25
+fi
+
+OUT_MARKETS="/tmp/golden-run-$VARIANT.jsonl"
+OUT_SUMMARY="/tmp/golden-run-$VARIANT.json"
+NORMALIZED="/tmp/golden-run-$VARIANT.normalized.json"
+SORTED_MARKETS="/tmp/golden-run-$VARIANT.markets.sorted.json"
+NORMALIZED_SUMMARY="/tmp/golden-run-$VARIANT.summary.normalized.json"
+HASH_FILE="tests/golden/$BASENAME.sha256"
 
 if [[ ! -x "$BIN" ]]; then
   echo "error: $BIN not found or not executable; run: cargo build --release -p pm-app" >&2
@@ -52,12 +79,12 @@ if [[ "$MARKET_COUNT" -eq 0 ]]; then
   echo "error: manifest filter matched zero markets for date 2026-06-25 (check the manifest's date encoding)" >&2
   exit 1
 fi
-echo "day manifest: $MARKET_COUNT markets" >&2
+echo "day manifest: $MARKET_COUNT markets ($VARIANT variant)" >&2
 
 # Step 2: run the canonical replay.
 "$BIN" walk-forward \
   --markets "$MARKETS_MANIFEST" \
-  --strategies exo_fade \
+  "${STRATEGY_ARGS[@]}" \
   --starting-cash 1000 \
   --max-clip-usdc 50 \
   --spot-symbol BTCUSDT \
@@ -77,18 +104,18 @@ echo "day manifest: $MARKET_COUNT markets" >&2
 # to "UNVALIDATED") unrelated to replay bytes, so it is stripped as well;
 # the skip-serializing-if optional blocks (jitter, window_label, sizing)
 # stay None in this non-jitter, no-bankroll run and never reach the JSON.
-jq -c -S '.' "$OUT_MARKETS" | jq -s -c 'sort_by(.asset_id)' > /tmp/golden-run.markets.sorted.json
-jq -S 'del(.config_fingerprint, .validation, .run_config.shared.checkpoint_markets_out, .run_config.shared.checkpoint_summary_out)' "$OUT_SUMMARY" > /tmp/golden-run.summary.normalized.json
+jq -c -S '.' "$OUT_MARKETS" | jq -s -c 'sort_by(.asset_id)' > "$SORTED_MARKETS"
+jq -S 'del(.config_fingerprint, .validation, .run_config.shared.checkpoint_markets_out, .run_config.shared.checkpoint_summary_out)' "$OUT_SUMMARY" > "$NORMALIZED_SUMMARY"
 
 jq -n -c \
-  --slurpfile markets /tmp/golden-run.markets.sorted.json \
-  --slurpfile summary /tmp/golden-run.summary.normalized.json \
+  --slurpfile markets "$SORTED_MARKETS" \
+  --slurpfile summary "$NORMALIZED_SUMMARY" \
   '{markets: $markets[0], summary: $summary[0]}' > "$NORMALIZED"
 
 HASH=$(shasum -a 256 "$NORMALIZED" | awk '{print $1}')
 
 if [[ "$MODE" == "record" ]]; then
-  echo "$HASH  day-2026-06-25.normalized.json" > "$HASH_FILE"
+  echo "$HASH  $BASENAME.normalized.json" > "$HASH_FILE"
   echo "recorded hash: $HASH"
   exit 0
 fi

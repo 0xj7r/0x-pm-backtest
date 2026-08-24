@@ -247,7 +247,7 @@ here too, for the same "presentation travels with its data type" rule as
 | `ModelFillQualitySummary` (struct) | walkforward.rs:1098 | pm-backtest::scorecard | |
 | `ModelFillQuality` (struct) | walkforward.rs:1109 | pm-backtest::scorecard | |
 | `FillTagAggregate` (struct) | walkforward.rs:1118 | pm-backtest::scorecard | |
-| `FillTagAccumulator` (struct, private) | walkforward.rs:1142 | pm-backtest::scorecard | name collision with result_summary.rs's own `FillTagAccumulator` (tranche 5); different field sets (this one has an extra `wins` field), both module-private so no compile collision once each lands in its own submodule, flagged as pre-existing near-duplicate tech debt, not touched (verbatim-move rule) |
+| `FillTagAccumulator` (struct, private) | walkforward.rs:1142 | pm-backtest::scorecard | name collision with result_summary.rs's own `FillTagAccumulator` (tranche 5); different field sets (this one has two extra fields, `wins` and `total_pnl_usdc`), both module-private so no compile collision once each lands in its own submodule, flagged as pre-existing near-duplicate tech debt, not touched (verbatim-move rule) |
 | `ModelFillQualityAccumulator` (struct) | walkforward.rs:1168 | pm-backtest::scorecard | |
 | `ModelFillQualityBucket` (struct) | walkforward.rs:1179 | pm-backtest::scorecard | |
 | `impl ModelFillQualityAccumulator` | walkforward.rs:1187 | pm-backtest::scorecard | |

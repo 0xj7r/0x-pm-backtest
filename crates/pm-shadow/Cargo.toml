@@ -13,6 +13,7 @@ publish = false
 [dependencies]
 pm-types          = { workspace = true }
 pm-alpha          = { workspace = true }
+pm-strategy       = { workspace = true }
 anyhow            = { workspace = true }
 chrono            = { workspace = true }
 futures           = { workspace = true }

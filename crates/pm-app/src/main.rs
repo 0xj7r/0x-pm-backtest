@@ -43,21 +43,26 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
-    /// LOG-ONLY live shadow of the validated pm-alpha fade: streams Binance
-    /// spot + Polymarket books, computes the belief at 1s cadence and logs
+    /// LOG-ONLY live twin: streams Binance spot + Polymarket books, runs a
+    /// `pm_strategy::Strategy` at the configured cadence and logs
     /// WOULD_ENTER/QUOTE_PROBE/WOULD_EXIT/SUMMARY as JSONL. Places NO orders.
+    ///
+    /// The flags here are engine concerns only. Entry thresholds, gates and
+    /// sizing belong to the strategy's own config, and the only strategy that
+    /// ships is `noop`, so today's stream is entry-free by construction.
     Shadow {
         /// Market family slug prefix.
         #[arg(long, default_value = "btc-updown-5m-")]
         slug_prefix: String,
-        /// Entry edge threshold (frozen shadow-final: 0.12).
-        #[arg(long, default_value = "0.12")]
-        edge_threshold: f64,
-        /// Trailing realized-vol window in seconds (frozen: 3600).
+        /// Strategy driving the twin. Only `noop` is accepted: the live twin
+        /// runs deployable strategies, and there are none yet.
+        #[arg(long, default_value = "noop")]
+        strategy: String,
+        /// Trailing realized-vol window in seconds.
         #[arg(long, default_value = "3600")]
         vol_lookback_s: u32,
-        /// Mark-to-book exit horizon after entry, seconds (frozen: 0 =
-        /// hold to redemption).
+        /// Mark-to-book exit horizon after entry, seconds (0 = hold to
+        /// redemption; the engine measures settlement instead of an exit).
         #[arg(long, default_value = "0")]
         exit_after_s: u32,
         /// Quote-existence probe delay after entry, milliseconds.
@@ -67,109 +72,15 @@ enum Cmd {
         #[arg(long)]
         out_dir: PathBuf,
         /// Weight on the basis-adjusted perp last in the effective-spot
-        /// blend (frozen: 0.75; 0 = spot-only, disables the futures feed).
+        /// blend (0 = spot-only, disables the futures feed).
         #[arg(long, default_value = "0.75")]
         perp_price_weight: f64,
-        /// LATE-FAVOURITE LANE mode: buy the >= align-min-mid favourite in
-        /// the final entry window and HOLD to expiry (no sell exit). Off by
-        /// default: the fade behaviour is byte-identical without this flag.
-        #[arg(long)]
-        lane_late_fav: bool,
-        /// Lane mode: minimum side book mid to qualify as the favourite
-        /// (frozen: 0.55; the late-fav lane passes 0.85 explicitly).
-        #[arg(long, default_value = "0.55")]
-        align_min_mid: f64,
-        /// Lane mode: entries only within this many seconds of close
-        /// (frozen: 0 = off; the late-fav lane passes 120 explicitly).
-        #[arg(long, default_value = "0")]
-        enter_within_close_s: u32,
-        /// Entry deadline before close, seconds (frozen: 90; propagated
-        /// into the decide gate by sync_decide_cfg, so a wrong default
-        /// here IS a config drift - config-consistency-audit M-1).
-        #[arg(long, default_value = "90")]
-        stop_before_close_s: u32,
-        /// Minimum belief sigma_bar_bps to enter (a vol FLOOR, applies to
-        /// fade and lane). Frozen fade-hold: 3.0; lane passes 4.0.
-        #[arg(long, default_value = "3.0")]
-        min_entry_sigma_bps: f64,
-        /// Fade re-entry: re-arm once both sides' edges drop below this
-        /// (frozen: 0.08; 0 = off = single entry per market).
-        #[arg(long, default_value = "0.08")]
-        rearm_edge: f64,
-        /// Fade re-entry: max entries per market (frozen: 2).
-        #[arg(long, default_value = "2")]
-        max_clips: u32,
-        /// Vol estimator: "realized" (rolling) or "ewma" (validated combo).
+        /// Vol estimator: "realized" (rolling) or "ewma".
         #[arg(long, default_value = "realized")]
         vol_estimator: String,
         /// EWMA half-life seconds (only when --vol-estimator ewma).
         #[arg(long, default_value = "600.0")]
         ewma_halflife_s: f64,
-        /// Skip UTC-Saturday entries (frozen: ON). Bare `--skip-saturday`
-        /// still parses; pass `--skip-saturday=false` to trade Saturdays.
-        #[arg(
-            long,
-            default_value_t = true,
-            action = clap::ArgAction::Set,
-            num_args = 0..=1,
-            require_equals = true,
-            default_missing_value = "true"
-        )]
-        skip_saturday: bool,
-        /// Vol-responsive sizing reference (bps): clip = SHADOW_NOTIONAL *
-        /// clamp(sigma_bar_bps/ref, lo, hi). 0 = off (flat, behaviour unchanged).
-        #[arg(long, default_value = "0.0")]
-        vol_sizing_ref_bps: f64,
-        #[arg(long, default_value = "0.5")]
-        vol_sizing_lo: f64,
-        #[arg(long, default_value = "2.0")]
-        vol_sizing_hi: f64,
-        /// Skip when entry ask is below this (0 = off). Validated live: 0.45.
-        #[arg(long, default_value = "0.0")]
-        min_entry_ask: f64,
-        /// Skip when entry ask exceeds this (1.0 = off).
-        #[arg(long, default_value = "1.0")]
-        max_entry_ask: f64,
-        /// Skip when spot return over this lookback (seconds) disagrees with side (0 = off).
-        #[arg(long, default_value = "0")]
-        skip_spot_misalign_s: u32,
-        /// Skip when 60/300/600/900s spot all disagree with entry side.
-        #[arg(long)]
-        skip_spot_against_all: bool,
-        /// No entries until this many seconds after window open (0 = off).
-        #[arg(long, default_value = "0")]
-        min_secs_from_open: u32,
-        /// Decision-quality gate: min seconds the belief held its side (0 = off).
-        #[arg(long, default_value = "0.0")]
-        min_belief_dwell_s: f64,
-        /// Skip when the entered side's belief exceeds this (1.0 = off).
-        #[arg(long, default_value = "1.0")]
-        max_p_side: f64,
-        /// Skip when decision-time regime is calm_low_vol.
-        #[arg(long)]
-        skip_calm: bool,
-        /// Take entries only in calm_low_vol windows.
-        #[arg(long)]
-        only_calm: bool,
-        /// Skip when decision-time regime is expanded_mixed.
-        #[arg(long)]
-        skip_expanded_mixed: bool,
-        /// Skip when decision-time regime is expanded_high_flip.
-        #[arg(long)]
-        skip_expanded_high_flip: bool,
-        /// Pause entries after this many consecutive resolved losses (0 = off).
-        #[arg(long, default_value = "0")]
-        pause_after_consec_losses: u32,
-        /// Skip model-book gap favourites (p_side>open-fav-p-min, ask<open-fav-ask-max).
-        #[arg(long)]
-        skip_open_fav_gap: bool,
-        #[arg(long, default_value = "0.90")]
-        open_fav_p_min: f64,
-        #[arg(long, default_value = "0.60")]
-        open_fav_ask_max: f64,
-        /// Gate window from market open (300 = full 5m window for prod_gap_full).
-        #[arg(long, default_value = "5")]
-        open_fav_secs: u32,
         /// Decision evaluation cadence in ms (default 1000 = harness-matched;
         /// 100 = fast mode). Does not change decision logic, only when it runs.
         #[arg(long, default_value = "1000")]
@@ -894,41 +805,14 @@ fn init_tracing() {
 fn shadow_args_from_cmd(cmd: Cmd) -> Option<shadow::ShadowArgs> {
     let Cmd::Shadow {
         slug_prefix,
-        edge_threshold,
+        strategy,
         vol_lookback_s,
         exit_after_s,
         latency_probe_ms,
         out_dir,
         perp_price_weight,
-        lane_late_fav,
-        align_min_mid,
-        enter_within_close_s,
-        stop_before_close_s,
-        min_entry_sigma_bps,
-        rearm_edge,
-        max_clips,
         vol_estimator,
         ewma_halflife_s,
-        skip_saturday,
-        vol_sizing_ref_bps,
-        vol_sizing_lo,
-        vol_sizing_hi,
-        min_entry_ask,
-        max_entry_ask,
-        skip_spot_misalign_s,
-        skip_spot_against_all,
-        min_secs_from_open,
-        min_belief_dwell_s,
-        max_p_side,
-        skip_calm,
-        only_calm,
-        skip_expanded_mixed,
-        skip_expanded_high_flip,
-        pause_after_consec_losses,
-        skip_open_fav_gap,
-        open_fav_p_min,
-        open_fav_ask_max,
-        open_fav_secs,
         decide_interval_ms,
         decide_on_event,
     } = cmd
@@ -937,41 +821,14 @@ fn shadow_args_from_cmd(cmd: Cmd) -> Option<shadow::ShadowArgs> {
     };
     Some(shadow::ShadowArgs {
         slug_prefix,
-        edge_threshold,
+        strategy,
         vol_lookback_s,
         exit_after_s,
         latency_probe_ms,
         out_dir,
         perp_price_weight,
-        lane_late_fav,
-        align_min_mid,
-        enter_within_close_s,
-        stop_before_close_s,
-        min_entry_sigma_bps,
-        rearm_edge,
-        max_clips,
         vol_estimator,
         ewma_halflife_s,
-        skip_saturday,
-        vol_sizing_ref_bps,
-        vol_sizing_lo,
-        vol_sizing_hi,
-        min_entry_ask,
-        max_entry_ask,
-        skip_spot_misalign_s,
-        skip_spot_against_all,
-        min_secs_from_open,
-        min_belief_dwell_s,
-        max_p_side,
-        skip_calm,
-        only_calm,
-        skip_expanded_mixed,
-        skip_expanded_high_flip,
-        pause_after_consec_losses,
-        skip_open_fav_gap,
-        open_fav_p_min,
-        open_fav_ask_max,
-        open_fav_secs,
         decide_interval_ms,
         decide_on_event,
     })
@@ -2512,9 +2369,9 @@ mod tests {
     }
 
     // CONFIG PARITY GATE (deep-review F1). The clap layer and the shell flag
-    // files are both potential shadow configs; these tests pin BOTH to the
-    // Rust canon (frozen_/gated_/recommended_shadow_final_args). If one of
-    // these fails, fix the clap default or the flags file, never the test.
+    // file are both potential shadow configs; these tests pin BOTH to the Rust
+    // canon (`default_shadow_args`). If one of these fails, fix the clap
+    // default or the flags file, never the test.
 
     fn parse_shadow_args(argv: &[String]) -> shadow::ShadowArgs {
         // The Cmd enum is large enough that clap parsing overflows the
@@ -2534,37 +2391,40 @@ mod tests {
     }
 
     #[test]
-    fn shadow_clap_defaults_equal_frozen_canon() {
+    fn shadow_clap_defaults_equal_engine_canon() {
         // Minimal invocation: only the required arg. Every default the CLI
-        // fills in must equal the frozen constant, field for field, with NO
+        // fills in must equal the library canon, field for field, with NO
         // whitelist. A default that must differ is a bug in the default.
         let argv: Vec<String> = ["pm-app", "shadow", "--out-dir", "shadow-final"]
             .iter()
             .map(|s| s.to_string())
             .collect();
         let args = parse_shadow_args(&argv);
-        let frozen = shadow::frozen_shadow_final_args(PathBuf::from("shadow-final"));
+        let canon = shadow::default_shadow_args(PathBuf::from("shadow-final"));
         assert_eq!(
-            args, frozen,
-            "shadow clap defaults drifted from frozen_shadow_final_args; \
+            args, canon,
+            "shadow clap defaults drifted from default_shadow_args; \
              align the clap default, do not whitelist"
         );
     }
 
     #[test]
-    fn shadow_clap_skip_saturday_optout_still_parses() {
-        let argv: Vec<String> = [
-            "pm-app",
-            "shadow",
-            "--out-dir",
-            "shadow-final",
-            "--skip-saturday=false",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-        let args = parse_shadow_args(&argv);
-        assert!(!args.skip_saturday);
+    fn shadow_cli_no_longer_accepts_strategy_parameters() {
+        // The fade's gate flags are gone with the strategy. A launcher still
+        // passing one must fail loudly rather than be silently ignored.
+        for dead in ["--edge-threshold=0.12", "--min-entry-ask=0.45", "--skip-saturday"] {
+            let argv: Vec<String> = ["pm-app", "shadow", "--out-dir", "o", dead]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            let parsed = std::thread::Builder::new()
+                .stack_size(16 * 1024 * 1024)
+                .spawn(move || Cli::try_parse_from(&argv).is_ok())
+                .expect("spawn parse thread")
+                .join()
+                .expect("parse thread panicked");
+            assert!(!parsed, "{dead} must be rejected, not ignored");
+        }
     }
 
     // Shell SSOT parsing: extract the exec argv from a foreground launcher
@@ -2704,36 +2564,19 @@ mod tests {
     }
 
     #[test]
-    fn shadow_final_launcher_flags_equal_gated_canon() {
+    fn shadow_launcher_flags_equal_engine_canon() {
         let argv = launcher_argv(
             "shadow_final_foreground.sh",
-            "shadow_final_gated_flags.sh",
-            "SHADOW_FINAL_GATED_FLAGS",
+            "shadow_flags.sh",
+            "SHADOW_FLAGS",
         );
         let args = parse_shadow_args(&argv);
-        let expected = shadow::gated_shadow_final_args(args.out_dir.clone());
+        let expected = shadow::default_shadow_args(args.out_dir.clone());
         assert_eq!(
             args, expected,
-            "shadow_final_foreground.sh + shadow_final_gated_flags.sh no longer \
-             render gated_shadow_final_args; update the flags file AND the Rust \
-             canon together (with backtest evidence per PROD.md)"
-        );
-    }
-
-    #[test]
-    fn shadow_recommended_launcher_flags_equal_recommended_canon() {
-        let argv = launcher_argv(
-            "shadow_recommended_foreground.sh",
-            "shadow_recommended_flags.sh",
-            "SHADOW_RECOMMENDED_FLAGS",
-        );
-        let args = parse_shadow_args(&argv);
-        let expected = shadow::recommended_shadow_final_args(args.out_dir.clone());
-        assert_eq!(
-            args, expected,
-            "shadow_recommended_foreground.sh + shadow_recommended_flags.sh no \
-             longer render recommended_shadow_final_args; update the flags file \
-             AND the Rust canon together"
+            "shadow_final_foreground.sh + shadow_flags.sh no longer render \
+             default_shadow_args; update the flags file AND the Rust canon \
+             together"
         );
     }
 }

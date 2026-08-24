@@ -1,34 +1,41 @@
-//! `shadow` subcommand: run the validated pm-alpha fade LIVE in LOG-ONLY mode.
+//! `shadow` subcommand: run a `pm_strategy::Strategy` LIVE in LOG-ONLY mode.
 //!
 //! Zero orders, zero capital. This module contains NO order-placement code by
 //! construction: it has no signer, no CLOB REST client, and never sends
-//! anything on a websocket except subscriptions and pings. It mirrors the
-//! entry semantics of `pm_alpha::harness::replay::execute` (edge vs the real
-//! Up/Down touch asks, first threshold crossing per market, 1s cadence) and
-//! logs WOULD_ENTER / QUOTE_PROBE / WOULD_EXIT / SUMMARY records as JSONL.
+//! anything on a websocket except subscriptions and pings.
+//!
+//! The engine is strategy-agnostic. It owns the feeds, the rolling books, the
+//! belief model, the entry/probe/exit/resolution bookkeeping and the JSONL
+//! stream; the strategy owns the decision. Each decide pass hands every live
+//! market's book to `Strategy::on_event` as a `ReplayEvent` (the same type the
+//! backtest replays) and turns any returned buy order into a WOULD_ENTER,
+//! after which the engine's QUOTE_PROBE / WOULD_EXIT / RESOLUTION machinery
+//! measures what that entry would have realized.
+//!
+//! With `NoopStrategy` (the only shipped strategy) the stream is well-formed
+//! and entry-free: config, summaries and venue lead-lag records only.
 
 mod tape;
 pub use tape::{BookLevel, TapeEvent, TapeStore};
 
 use anyhow::{Context, Result};
-use pm_alpha::harness::{EntryMode, Side as HarnessSide};
 use pm_alpha::{
     calibrator::{exo_features, EXO_FEATURES},
-    decide_entry, dir_features, frozen_fade_decide_config, harness::spot_ret_bps, regime,
-    AlphaModel, AlphaModelConfig, DecideConfig, DecisionInputs, EntryAction, EntryState,
-    EntryStateDelta, ExoState, MarketMeta, PerpState, SessionGateState, Token, VolEstimator,
-    DIR_FEATURES,
+    dir_features, harness::spot_ret_bps, regime, AlphaModel, AlphaModelConfig, ExoState,
+    MarketMeta, PerpState, Token, VolEstimator, DIR_FEATURES,
 };
-use pm_types::{SpotHistory, SpotTick};
+use pm_strategy::{
+    regime::WhipsawRiskSnapshot, Ctx, NoopStrategy, Side as StratSide, Strategy,
+};
+use pm_types::{MarketId, ReplayEvent, ReplayFlags, SpotHistory, SpotTick, TradeHistory};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 
 /// Spot ticks retained in the rolling buffer (>= 2h required for vol3600).
 const SPOT_KEEP_SECS: i64 = 7_800;
-/// Mirror of the harness entry deadline (`stop_before_close_s` default).
+/// Engine entry deadline: the twin never opens inside the last 90s of a
+/// window, so every logged entry has room for its probe and exit measurement.
 const STOP_BEFORE_CLOSE_S: i64 = 90;
-/// Clip notional for the realistic laddered-fill telemetry (harness default).
-const SHADOW_NOTIONAL_USDC: f64 = 50.0;
 /// Passive-exit probe: how long the measure-only resting ask waits for a
 /// crossing bid before converting against the book (matches the harness
 /// midtimeout variant).
@@ -47,7 +54,9 @@ const FUNDING_SERIES_CAP: usize = 120;
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShadowArgs {
     pub slug_prefix: String,
-    pub edge_threshold: f64,
+    /// Strategy to drive the twin (see [`strategy_from_name`]). Only `noop`
+    /// ships, so the default stream is entry-free by construction.
+    pub strategy: String,
     pub vol_lookback_s: u32,
     pub exit_after_s: u32,
     pub latency_probe_ms: u64,
@@ -55,64 +64,10 @@ pub struct ShadowArgs {
     /// Weight on the basis-adjusted perp last in the effective-spot blend
     /// (0 disables the futures feed entirely).
     pub perp_price_weight: f64,
-    /// Late-favourite lane mode: buy the >= `align_min_mid` favourite inside
-    /// the final entry window and HOLD to expiry (no sell exit).
-    pub lane_late_fav: bool,
-    /// Lane mode: minimum side book mid to qualify as the favourite.
-    pub align_min_mid: f64,
-    /// Lane mode: entries permitted only once time-to-close drops to this.
-    pub enter_within_close_s: u32,
-    /// Lane mode entry deadline before close (fade mode keeps the 90s const).
-    pub stop_before_close_s: u32,
-    /// Lane mode: minimum belief sigma_bar_bps to enter (a vol FLOOR; the
-    /// lane's edge lives in vol, calm tape prices favourites fairly).
-    pub min_entry_sigma_bps: f64,
-    /// Fade mode re-entry: once entered, re-arm only after BOTH sides' touch
-    /// edges drop below this (0 = off = single entry per market).
-    pub rearm_edge: f64,
-    /// Fade mode: max entries per market when re-arming is active.
-    pub max_clips: u32,
-    /// Vol estimator: "realized" (rolling) or "ewma" (validated combo).
+    /// Vol estimator: "realized" (rolling) or "ewma".
     pub vol_estimator: String,
     /// EWMA half-life seconds (only used when vol_estimator == "ewma").
     pub ewma_halflife_s: f64,
-    /// Skip UTC-Saturday entries (finalized-candidate behaviour).
-    pub skip_saturday: bool,
-    /// Vol-responsive sizing reference (bps): clip notional scales by
-    /// clamp(sigma_bar_bps/ref, lo, hi). 0 = off (flat, behaviour unchanged).
-    pub vol_sizing_ref_bps: f64,
-    pub vol_sizing_lo: f64,
-    pub vol_sizing_hi: f64,
-    /// Skip when entry ask is below this (0 = off). Live candidate: 0.45.
-    pub min_entry_ask: f64,
-    /// Skip when entry ask exceeds this (1.0 = off).
-    pub max_entry_ask: f64,
-    /// Skip when spot return over this lookback (seconds) disagrees with side (0 = off).
-    pub skip_spot_misalign_s: u32,
-    /// Skip when 60/300/600/900s spot all disagree with entry side.
-    pub skip_spot_against_all: bool,
-    /// No entries until this many seconds after window open (0 = off).
-    pub min_secs_from_open: u32,
-    /// Decision-quality gate: min seconds the belief held its side (0 = off).
-    pub min_belief_dwell_s: f64,
-    /// Skip when the entered side's belief exceeds this (1.0 = off).
-    pub max_p_side: f64,
-    /// Skip when decision-time regime is `calm_low_vol`.
-    pub skip_calm: bool,
-    /// Take entries only in `calm_low_vol`.
-    pub only_calm: bool,
-    /// Skip when decision-time regime is `expanded_mixed`.
-    pub skip_expanded_mixed: bool,
-    /// Skip when decision-time regime is `expanded_high_flip`.
-    pub skip_expanded_high_flip: bool,
-    /// Pause entries after this many consecutive resolved losses (0 = off).
-    pub pause_after_consec_losses: u32,
-    /// Skip model-book gap favourites (p_side > open_fav_p_min, ask < open_fav_ask_max).
-    pub skip_open_fav_gap: bool,
-    pub open_fav_p_min: f64,
-    pub open_fav_ask_max: f64,
-    /// Gate window from market open (300 = full 5m window for prod_gap_full).
-    pub open_fav_secs: u32,
     /// Decision evaluation cadence in ms (default 1000 = harness-matched;
     /// 100 = fast mode). Does not change decision logic, only when it runs.
     pub decide_interval_ms: u64,
@@ -122,80 +77,43 @@ pub struct ShadowArgs {
     pub decide_on_event: bool,
 }
 
-/// Frozen leading config validated on backtest + the `shadow-final` live twin.
+/// Engine defaults for the live twin.
 ///
-/// Field-for-field match with `pm_alpha::frozen_fade_decide_config` shadow
-/// parameters and the alpha harness scripts: edge 0.12, perp 0.75, vol3600
-/// realized, hold-to-redemption, rearm 0.08, max_clips 2, sigma floor 3.0,
-/// skip-Saturday, 90s pre-close stop.
-pub fn frozen_shadow_final_args(out_dir: PathBuf) -> ShadowArgs {
+/// Everything here is infrastructure: which markets to watch, which belief
+/// model to run, how often to decide, how the probes are timed. There is no
+/// entry threshold, no gate and no sizing rule, because those belong to the
+/// strategy. The pm-app clap defaults are pinned to this function so the CLI
+/// and the library cannot drift.
+pub fn default_shadow_args(out_dir: PathBuf) -> ShadowArgs {
     ShadowArgs {
         slug_prefix: "btc-updown-5m-".to_string(),
-        edge_threshold: 0.12,
+        strategy: "noop".to_string(),
         vol_lookback_s: 3600,
         exit_after_s: 0,
         latency_probe_ms: 150,
         out_dir,
         perp_price_weight: 0.75,
-        lane_late_fav: false,
-        align_min_mid: 0.55,
-        enter_within_close_s: 0,
-        stop_before_close_s: 90,
-        min_entry_sigma_bps: 3.0,
-        rearm_edge: 0.08,
-        max_clips: 2,
         vol_estimator: "realized".to_string(),
         ewma_halflife_s: 600.0,
-        skip_saturday: true,
-        vol_sizing_ref_bps: 0.0,
-        vol_sizing_lo: 0.5,
-        vol_sizing_hi: 2.0,
-        min_entry_ask: 0.0,
-        max_entry_ask: 1.0,
-        skip_spot_misalign_s: 0,
-        skip_spot_against_all: false,
-        min_secs_from_open: 0,
-        min_belief_dwell_s: 0.0,
-        max_p_side: 1.0,
-        skip_calm: false,
-        only_calm: false,
-        skip_expanded_mixed: false,
-        skip_expanded_high_flip: false,
-        pause_after_consec_losses: 0,
-        skip_open_fav_gap: false,
-        open_fav_p_min: 0.90,
-        open_fav_ask_max: 0.60,
-        open_fav_secs: 5,
         decide_interval_ms: 1000,
         decide_on_event: false,
     }
 }
 
-/// Validated live gate package: mom30 + lottery-band floor + prod_gap_full.
-/// Regime stand-down gates (skip_calm / skip_expanded_mixed) are deliberately
-/// NOT part of this package: fit on Jun 14-19 live tape, they blocked 99% of
-/// entries out-of-sample Jun 20-30 (see docs/postmortem-2026-06-16 follow-up).
-pub fn gated_shadow_final_args(out_dir: PathBuf) -> ShadowArgs {
-    let mut args = frozen_shadow_final_args(out_dir);
-    args.skip_spot_misalign_s = 30;
-    args.min_entry_ask = 0.45;
-    args.skip_open_fav_gap = true;
-    args.open_fav_p_min = 0.88;
-    args.open_fav_ask_max = 0.62;
-    args.open_fav_secs = 300;
-    args
-}
-
-/// Recommended config: the gated package MINUS `min_entry_ask` (0.45 -> 0.0).
-/// docs/deployed-config-negative-2026-07.md: the lottery-band floor alone
-/// blocked the cheap-underdog fades (the payoff tail) and flipped the June
-/// backtest negative; this profile keeps the open-fav + spot-misalign gates.
-/// SSOT twin of scripts/ops/shadow_recommended_flags.sh (enforced by the
-/// pm-app shell-vs-Rust parity test).
-pub fn recommended_shadow_final_args(out_dir: PathBuf) -> ShadowArgs {
-    let mut args = gated_shadow_final_args(out_dir);
-    args.min_entry_ask = 0.0;
-    args
+/// Strategies the live twin will drive, by name.
+///
+/// The fixture strategy is deliberately absent: it is golden-replay plumbing
+/// that keys its one-shot latch off a replayed tape, and pointing it at live
+/// feeds would produce entries that mean nothing. A live twin runs deployable
+/// strategies only, and there are none yet.
+pub fn strategy_from_name(name: &str) -> Result<Box<dyn Strategy + Send>> {
+    match name {
+        "noop" => Ok(Box::new(NoopStrategy)),
+        other => anyhow::bail!(
+            "unknown shadow strategy {other:?}; the only strategy the live twin \
+             will drive is `noop` (no deployable strategy exists yet)"
+        ),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,24 +142,26 @@ pub struct Touch {
 #[derive(Debug, serde::Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LogEvent {
-    /// Startup config fingerprint: the FIRST event of every stream's JSONL.
-    /// `decide_config_canon` is `DecideConfig::canon()` for the RESOLVED
-    /// decide config (post `sync_decide_cfg`), so the matched replay can
-    /// derive its invocation from the stream's own log and refuse to compare
-    /// mismatched fingerprints (deep-review F2).
+    /// Startup config: the FIRST event of every stream's JSONL, so a reader
+    /// can derive the run's invocation from the stream itself and refuse to
+    /// compare mismatched configs (deep-review F2).
+    ///
+    /// `config_fingerprint` covers the whole resolved [`ShadowConfig`],
+    /// including the belief-model params that sit outside any gate: the
+    /// fingerprint must cover the model, not just the decision layer.
+    /// `strategy` names what produced the decisions; the strategy's own
+    /// parameters are its to publish once a strategy has any.
     Config {
         ts_utc: String,
         slug_prefix: String,
         out_dir: String,
+        strategy: String,
         decide_interval_ms: u64,
         decide_on_event: bool,
-        /// Belief-model params: outside DecideConfig but decision-relevant
-        /// (verify finding: fingerprint must cover the model, not just gates).
         perp_price_weight: f64,
         vol_lookback_s: u32,
         vol_estimator: String,
-        max_clips: u32,
-        decide_config_canon: String,
+        config_fingerprint: String,
     },
     WouldEnter {
         ts_utc: String,
@@ -458,6 +378,21 @@ impl Ladder {
         Some((self.best_bid()?.price + self.best_ask()?.price) / 2.0)
     }
 
+    /// Top-`TAPE_DEPTH` ladder in `ReplayEvent` form: bids best-first
+    /// (descending), asks best-first (ascending), zero-padded when the book is
+    /// thinner than the tape depth.
+    fn tape_levels(&self) -> ([pm_types::BookLevel; pm_types::TAPE_DEPTH], [pm_types::BookLevel; pm_types::TAPE_DEPTH]) {
+        let mut bids = [pm_types::BookLevel::default(); pm_types::TAPE_DEPTH];
+        let mut asks = [pm_types::BookLevel::default(); pm_types::TAPE_DEPTH];
+        for (slot, (k, size)) in bids.iter_mut().zip(self.bids.iter().rev()) {
+            *slot = pm_types::BookLevel { price: key_price(*k) as f32, size: *size as f32 };
+        }
+        for (slot, (k, size)) in asks.iter_mut().zip(self.asks.iter()) {
+            *slot = pm_types::BookLevel { price: key_price(*k) as f32, size: *size as f32 };
+        }
+        (bids, asks)
+    }
+
     /// Displayed ask size at prices same-or-better than `limit_price`,
     /// looking only at the top 5 ask levels.
     pub fn ask_size_at_or_below(&self, limit_price: f64) -> f64 {
@@ -530,20 +465,30 @@ pub struct MarketWindow {
     pub condition_id: Option<String>,
     /// True strike from Gamma/crypto-price (`openPrice`); None until present.
     pub gamma_strike: Option<f64>,
-    /// First threshold crossing only: one shadow entry per market.
+    /// Whether this market has taken at least one entry.
     pub entered: bool,
-    /// Entries taken so far (re-entry bookkeeping; equals 0 or 1 unless
-    /// `rearm_edge`/`max_clips` enable laddering).
+    /// Entries taken so far. The engine does not cap this: how often to enter
+    /// a market is the strategy's decision, not the twin's.
     pub n_clips: u32,
-    /// Shared SSOT entry state (rearm + clip cooldown); fed to `decide_entry`.
-    pub entry: EntryState,
-    /// Deferred `decide_entry` delta when live execution commits after submit.
-    pub pending_commit: Option<EntryStateDelta>,
+    /// An entry decided but not yet confirmed filled by live execution
+    /// (`defer_entry_commit`); `commit_entry` clears or keeps it.
+    pub pending_commit: bool,
     /// Belief-dwell telemetry: last tick when sign(p_exo - 0.5) flipped (or
     /// first belief). Logged on would_enter; NOT a decision input.
     pub belief_flip_ns: Option<i64>,
     /// Sign of the last observed belief (p_exo > 0.5).
     pub belief_up: Option<bool>,
+    /// Stable per-market id handed to the strategy as `ReplayEvent.market_id`.
+    /// Assigned by [`ShadowCore::upsert_market`]; the caller's value is
+    /// ignored, so feed code never has to invent one.
+    pub id: MarketId,
+    /// Observed `max(yes_mid) - min(yes_mid)` so far (live-safe: only ticks
+    /// already seen). Feeds `Ctx::market_yes_range_so_far`.
+    pub yes_mid_lo: f32,
+    pub yes_mid_hi: f32,
+    /// Decide passes this market has been handed to the strategy. Feeds
+    /// `Ctx::events_seen`, which is per-market in the backtest runner too.
+    pub events_seen: u64,
 }
 
 /// Rolling per-venue price prints on the local receipt clock, plus
@@ -663,8 +608,8 @@ struct PendingTrade {
     side: Side,
     token: String,
     entry_touch_price: f64,
-    /// Belief vol at entry, retained for vol-responsive clip sizing at probe.
-    sigma_bar_bps: f64,
+    /// Notional the strategy asked for, used by the probe's laddered walk.
+    target_notional: f64,
     probe_due_ns: i64,
     probe_done: bool,
     exit_due_ns: i64,
@@ -697,21 +642,14 @@ struct SummaryStats {
 /// An executable entry derived from a `WouldEnter` decision: the engine's
 /// decision plus the venue token to buy. Live execution consumes these over a
 /// channel; the decision itself (slug/side/p_exo/touch_price) is produced by the
-/// UNCHANGED `decide()` so live entries are identical to shadow's by construction.
-/// Sizing (clip notional) and the marketable limit are live-execution concerns
-/// applied by the consumer, not the engine.
-
-/// Side-oriented belief for live IOC orders.
+/// The belief on the entered side: `p_exo` is always P(up), so a Down entry
+/// reads the complement. Entry telemetry only; the strategy decides the side.
 pub fn p_side_for_entry(p_exo: f64, side: &str) -> f64 {
     if side == "up" {
         p_exo
     } else {
         1.0 - p_exo
     }
-}
-
-pub fn marketable_limit_for_entry(p_exo: f64, side: &str, min_marginal_edge: f64) -> f64 {
-    p_side_for_entry(p_exo, side) - min_marginal_edge
 }
 
 #[derive(Debug, Clone)]
@@ -736,8 +674,15 @@ pub struct ExecIntent {
     pub down_index_set: u64,
 }
 
+/// The live twin's engine state.
+///
+/// One `ShadowCore` drives ONE strategy instance across every concurrently
+/// open market, unlike the backtest runner which gives each market its own
+/// instance. A strategy that keeps per-market state must therefore key it by
+/// `ReplayEvent::market_id`; the shipped `NoopStrategy` keeps none.
 pub struct ShadowCore {
     cfg: ShadowConfig,
+    strategy: Box<dyn Strategy + Send>,
     model: AlphaModel,
     spot: VecDeque<SpotTick>,
     spot_last_receipt_ms: Option<i64>,
@@ -749,6 +694,7 @@ pub struct ShadowCore {
     pending: Vec<PendingTrade>,
     resolutions: Vec<ResolutionWatch>,
     next_entry_id: u64,
+    next_market_id: u32,
     stats: SummaryStats,
     /// Measure-only cross-venue buffers: Binance on its ARRIVAL clock as the
     /// reference, plus each candidate fast-trigger venue.
@@ -761,65 +707,28 @@ pub struct ShadowCore {
     oi_series: Vec<(i64, f64)>,
     /// Funding events (ts_ns, rate); populated from Binance REST.
     funding_series: Vec<(i64, f64)>,
-    /// Cross-market loss streak for `pause_after_consec_losses`.
-    session: SessionGateState,
     /// Set whenever a decision input mutates (spot/perp/book/oi/funding);
     /// read only by the event-driven decide trigger, cleared after a decide.
     inputs_dirty: bool,
 }
 
+/// Engine configuration for the live twin.
+///
+/// Infrastructure only: which belief model to run, how the measure-only
+/// probes are timed, and which strategy is driving. Entry thresholds, gates,
+/// re-entry rules and clip sizing are deliberately absent — those were the
+/// dead fade's parameters and they belong to a strategy's own config, which
+/// travels with the strategy rather than with the twin that hosts it.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ShadowConfig {
-    pub edge_threshold: f64,
+    /// Name of the driving strategy, for the stream's config record and the
+    /// fingerprint (swapping strategies must change the fingerprint).
+    pub strategy: String,
     pub vol_lookback_s: u32,
     pub exit_after_s: u32,
     pub latency_probe_ms: u64,
     pub perp_price_weight: f64,
-    pub lane_late_fav: bool,
-    pub align_min_mid: f64,
-    pub enter_within_close_s: u32,
-    pub stop_before_close_s: u32,
-    pub min_entry_sigma_bps: f64,
-    pub rearm_edge: f64,
-    pub max_clips: u32,
     pub vol_estimator: VolEstimator,
-    /// Skip entries on UTC Saturday (the structurally dead day: thin weekend
-    /// liquidity, breakeven hit rate). The finalized candidate sits out Sat.
-    pub skip_saturday: bool,
-    /// Vol-responsive clip sizing reference (bps): the clip notional scales by
-    /// clamp(sigma_bar_bps/ref, lo, hi). 0 = off (flat clips, unchanged path).
-    pub vol_sizing_ref_bps: f64,
-    pub vol_sizing_lo: f64,
-    pub vol_sizing_hi: f64,
-    pub min_entry_ask: f64,
-    pub max_entry_ask: f64,
-    pub skip_spot_misalign_s: u32,
-    pub skip_spot_against_all: bool,
-    pub min_secs_from_open: u32,
-    pub min_belief_dwell_s: f64,
-    pub max_p_side: f64,
-    pub skip_calm: bool,
-    pub only_calm: bool,
-    pub skip_expanded_mixed: bool,
-    pub skip_expanded_high_flip: bool,
-    pub pause_after_consec_losses: u32,
-    pub skip_open_fav_gap: bool,
-    pub open_fav_p_min: f64,
-    pub open_fav_ask_max: f64,
-    pub open_fav_secs: u32,
-    /// Shared `decide_entry` config — byte-identical to backtest harness.
-    /// Serialized via `canon()` (DecideConfig is not `Serialize`) so the
-    /// fingerprint still covers the decide layer.
-    #[serde(serialize_with = "serialize_decide_canon")]
-    pub decide_cfg: DecideConfig,
-}
-
-/// Serialize a `DecideConfig` as its `canon()` JSON, embedded as a value so the
-/// fingerprint's recursive key-sort canonicalizes it with the rest of the config.
-fn serialize_decide_canon<S: serde::Serializer>(cfg: &DecideConfig, s: S) -> Result<S::Ok, S::Error> {
-    let val: serde_json::Value =
-        serde_json::from_str(&cfg.canon()).unwrap_or(serde_json::Value::Null);
-    serde::Serialize::serialize(&val, s)
 }
 
 /// 16-hex sha256 prefix of the canonical (sorted-keys) JSON of a resolved
@@ -863,53 +772,32 @@ fn config_fingerprint<T: serde::Serialize>(cfg: &T) -> String {
         .to_string()
 }
 
-/// Build `ShadowConfig` from CLI/runtime args plus the frozen decide SSOT.
+/// Build `ShadowConfig` from CLI/runtime args.
 pub fn shadow_config_from_args(args: &ShadowArgs) -> ShadowConfig {
     ShadowConfig {
-        edge_threshold: args.edge_threshold,
+        strategy: args.strategy.clone(),
         vol_lookback_s: args.vol_lookback_s,
         exit_after_s: args.exit_after_s,
         latency_probe_ms: args.latency_probe_ms,
         perp_price_weight: args.perp_price_weight,
-        lane_late_fav: args.lane_late_fav,
-        align_min_mid: args.align_min_mid,
-        enter_within_close_s: args.enter_within_close_s,
-        stop_before_close_s: args.stop_before_close_s,
-        min_entry_sigma_bps: args.min_entry_sigma_bps,
-        rearm_edge: args.rearm_edge,
-        max_clips: args.max_clips,
         vol_estimator: match args.vol_estimator.as_str() {
             "ewma" => VolEstimator::Ewma {
                 halflife_s: args.ewma_halflife_s,
             },
             _ => VolEstimator::Realized,
         },
-        skip_saturday: args.skip_saturday,
-        vol_sizing_ref_bps: args.vol_sizing_ref_bps,
-        vol_sizing_lo: args.vol_sizing_lo,
-        vol_sizing_hi: args.vol_sizing_hi,
-        min_entry_ask: args.min_entry_ask,
-        max_entry_ask: args.max_entry_ask,
-        skip_spot_misalign_s: args.skip_spot_misalign_s,
-        skip_spot_against_all: args.skip_spot_against_all,
-        min_secs_from_open: args.min_secs_from_open,
-        min_belief_dwell_s: args.min_belief_dwell_s,
-        max_p_side: args.max_p_side,
-        skip_calm: args.skip_calm,
-        only_calm: args.only_calm,
-        skip_expanded_mixed: args.skip_expanded_mixed,
-        skip_expanded_high_flip: args.skip_expanded_high_flip,
-        pause_after_consec_losses: args.pause_after_consec_losses,
-        skip_open_fav_gap: args.skip_open_fav_gap,
-        open_fav_p_min: args.open_fav_p_min,
-        open_fav_ask_max: args.open_fav_ask_max,
-        open_fav_secs: args.open_fav_secs,
-        decide_cfg: frozen_fade_decide_config(SHADOW_NOTIONAL_USDC),
     }
 }
 
 impl ShadowCore {
-    pub fn new(cfg: ShadowConfig) -> Self {
+    /// Build a core driving `strategy`.
+    ///
+    /// `Box<dyn Strategy>` rather than a generic parameter: the core lives
+    /// behind `Arc<Mutex<_>>` and is threaded through every feed task, so a
+    /// type parameter would propagate across the whole `feeds` module for no
+    /// benefit. One virtual call per market per decide pass (1 Hz) is free.
+    /// `+ Send` because the core is shared across tokio feed tasks.
+    pub fn new(cfg: ShadowConfig, strategy: Box<dyn Strategy + Send>) -> Self {
         let model = AlphaModel {
             cfg: AlphaModelConfig {
                 vol_lookback_s: cfg.vol_lookback_s,
@@ -925,6 +813,7 @@ impl ShadowCore {
         };
         Self {
             cfg,
+            strategy,
             model,
             spot: VecDeque::new(),
             spot_last_receipt_ms: None,
@@ -936,13 +825,13 @@ impl ShadowCore {
             pending: Vec::new(),
             resolutions: Vec::new(),
             next_entry_id: 0,
+            next_market_id: 0,
             vbuf_binance: VenueBuf::default(),
             vbuf_kraken: VenueBuf::default(),
             vbuf_coinbase: VenueBuf::default(),
             perp_buf: VecDeque::new(),
             oi_series: Vec::new(),
             funding_series: Vec::new(),
-            session: SessionGateState::default(),
             stats: SummaryStats::default(),
             inputs_dirty: false,
         }
@@ -1134,7 +1023,7 @@ impl ShadowCore {
 
     /// Insert a discovered market or refresh its strike. Never resets
     /// `entered` for a market we already acted on.
-    pub fn upsert_market(&mut self, market: MarketWindow) {
+    pub fn upsert_market(&mut self, mut market: MarketWindow) {
         match self.markets.get_mut(&market.slug) {
             Some(existing) => {
                 if existing.gamma_strike.is_none() {
@@ -1145,39 +1034,30 @@ impl ShadowCore {
                 }
             }
             None => {
+                market.id = MarketId(self.next_market_id);
+                self.next_market_id = self.next_market_id.saturating_add(1);
                 self.markets.insert(market.slug.clone(), market);
             }
         }
     }
 
-    /// Apply a deferred entry commit after live execution fills (restore on miss).
+    /// Apply a deferred entry commit after live execution fills (keep pending
+    /// on a miss so the next fill attempt still commits).
+    ///
+    /// Only the engine's own bookkeeping is deferred. The strategy has already
+    /// advanced its internal state by the time the order is submitted and the
+    /// trait has no rollback hook, so a strategy whose entries must be
+    /// exactly-once has to reconcile that itself. Nothing shipped does.
     pub fn commit_entry(&mut self, slug: &str, filled: bool) {
-        let pending = match self.markets.get_mut(slug) {
-            Some(m) => m.pending_commit.take(),
-            None => return,
-        };
-        let Some(delta) = pending else {
-            return;
-        };
-        if !filled {
-            if let Some(m) = self.markets.get_mut(slug) {
-                m.pending_commit = Some(delta);
-            }
-            return;
-        }
         let Some(m) = self.markets.get_mut(slug) else {
             return;
         };
-        if let Some(armed) = delta.set_armed {
-            m.entry.armed = armed;
+        if !m.pending_commit || !filled {
+            return;
         }
-        if let Some(ns) = delta.set_next_entry_ns {
-            m.entry.next_entry_ns = ns;
-        }
-        if delta.inc_clips {
-            m.n_clips = m.n_clips.saturating_add(1);
-            m.entered = true;
-        }
+        m.pending_commit = false;
+        m.n_clips = m.n_clips.saturating_add(1);
+        m.entered = true;
     }
 
     fn basis_mom_60s_bps(perp: Option<&PerpState>, spot: &SpotHistory, now_ns: i64) -> f64 {
@@ -1347,52 +1227,23 @@ impl ShadowCore {
         })
     }
 
-    fn sync_decide_cfg(&mut self) {
-        self.cfg.decide_cfg.edge_threshold = self.cfg.edge_threshold;
-        self.cfg.decide_cfg.min_entry_sigma_bps = self.cfg.min_entry_sigma_bps;
-        self.cfg.decide_cfg.skip_saturday = self.cfg.skip_saturday;
-        self.cfg.decide_cfg.rearm_edge = self.cfg.rearm_edge;
-        self.cfg.decide_cfg.stop_before_close_s = self.cfg.stop_before_close_s;
-        self.cfg.decide_cfg.vol_sizing_ref_bps = self.cfg.vol_sizing_ref_bps;
-        self.cfg.decide_cfg.vol_sizing_lo = self.cfg.vol_sizing_lo;
-        self.cfg.decide_cfg.vol_sizing_hi = self.cfg.vol_sizing_hi;
-        self.cfg.decide_cfg.min_entry_ask = self.cfg.min_entry_ask;
-        self.cfg.decide_cfg.max_entry_ask = self.cfg.max_entry_ask;
-        self.cfg.decide_cfg.skip_spot_misalign_s = self.cfg.skip_spot_misalign_s;
-        self.cfg.decide_cfg.skip_spot_against_all = self.cfg.skip_spot_against_all;
-        self.cfg.decide_cfg.min_secs_from_open = self.cfg.min_secs_from_open;
-        self.cfg.decide_cfg.min_belief_dwell_s = self.cfg.min_belief_dwell_s;
-        self.cfg.decide_cfg.max_p_side = self.cfg.max_p_side;
-        self.cfg.decide_cfg.skip_calm = self.cfg.skip_calm;
-        self.cfg.decide_cfg.only_calm = self.cfg.only_calm;
-        self.cfg.decide_cfg.skip_expanded_mixed = self.cfg.skip_expanded_mixed;
-        self.cfg.decide_cfg.skip_expanded_high_flip = self.cfg.skip_expanded_high_flip;
-        self.cfg.decide_cfg.pause_after_consec_losses = self.cfg.pause_after_consec_losses;
-        self.cfg.decide_cfg.skip_open_fav_gap = self.cfg.skip_open_fav_gap;
-        self.cfg.decide_cfg.open_fav_p_min = self.cfg.open_fav_p_min;
-        self.cfg.decide_cfg.open_fav_ask_max = self.cfg.open_fav_ask_max;
-        self.cfg.decide_cfg.open_fav_secs = self.cfg.open_fav_secs;
-        if self.cfg.lane_late_fav {
-            self.cfg.decide_cfg.enter_within_close_s = self.cfg.enter_within_close_s;
-            self.cfg.decide_cfg.entry_mode = EntryMode::Aligned;
-            self.cfg.decide_cfg.align_min_mid = self.cfg.align_min_mid;
-        } else {
-            self.cfg.decide_cfg.enter_within_close_s = 0;
-            self.cfg.decide_cfg.entry_mode = EntryMode::Fade;
-        }
-    }
-
-    /// The decide config this stream actually runs: CLI/runtime values
-    /// propagated over the frozen SSOT exactly as `decide()` will apply them.
-    /// This is what the startup config fingerprint must report; the raw
-    /// `frozen_fade_decide_config` would hide CLI overrides (class C1/M-1).
-    pub fn resolved_decide_cfg(&mut self) -> DecideConfig {
-        self.sync_decide_cfg();
-        self.cfg.decide_cfg
-    }
-
+    /// One decision pass over every live window.
+    ///
+    /// The engine derives the belief and the book snapshot; the strategy makes
+    /// the call. Each open market is handed to `Strategy::on_event` as a
+    /// `ReplayEvent` built from its Up (YES) ladder, exactly the type the
+    /// backtest replays, and every returned BUY becomes a WOULD_ENTER that the
+    /// probe/exit/resolution machinery then measures.
+    ///
+    /// `on_event` rather than `on_event_scored`: the scored variant overrides
+    /// the backtest runner's `pm_model` evaluation, and this twin has no
+    /// `pm_model` gate to override. Its belief is pm-alpha's, computed here as
+    /// entry telemetry.
+    ///
+    /// Sell orders are ignored (with a warning): the stream models an entry
+    /// and the exit the engine measures for it, so there is no strategy-held
+    /// position for a sell to close.
     pub fn decide(&mut self, now_ns: i64, defer_entry_commit: bool) -> Vec<LogEvent> {
-        self.sync_decide_cfg();
         let spot = self.spot_history();
         let perp = self.perp_state();
         // Warm-up gate: with a partially-filled buffer (post-restart) the
@@ -1405,32 +1256,25 @@ impl ShadowCore {
                     >= self.cfg.vol_lookback_s as i64 * 1_000_000_000 => {}
             _ => return Vec::new(),
         }
+        let whipsaw = if spot.is_empty() {
+            WhipsawRiskSnapshot::default()
+        } else {
+            WhipsawRiskSnapshot::from_history(now_ns, &spot)
+        };
+        // The twin has no Polymarket trade tape; strategies that need one must
+        // wait for a feed rather than silently read an empty history as calm.
+        let trades = TradeHistory::default();
         let mut out = Vec::new();
         let mut entries: Vec<PendingTrade> = Vec::new();
-        let lane = self.cfg.lane_late_fav;
-        let rearm_active = !lane && self.cfg.rearm_edge > 0.0 && self.cfg.max_clips > 1;
 
         for m in self.markets.values_mut() {
             let open_ns = m.open_ts_s * 1_000_000_000;
             let close_ns = m.close_ts_s * 1_000_000_000;
-            // Lane mode trades the very last seconds (configurable deadline);
-            // the fade keeps the validated 90s constant exactly.
-            let stop_before_s = if lane {
-                self.cfg.stop_before_close_s as i64
-            } else {
-                STOP_BEFORE_CLOSE_S
-            };
-            let deadline_ns = close_ns - stop_before_s * 1_000_000_000;
-            let exhausted = if rearm_active {
-                m.n_clips >= self.cfg.max_clips
-            } else {
-                m.entered
-            };
-            if exhausted || now_ns < open_ns || now_ns >= deadline_ns {
-                continue;
-            }
-            if lane && now_ns < close_ns - self.cfg.enter_within_close_s as i64 * 1_000_000_000
-            {
+            // Engine safety rail, not a strategy parameter: the twin never
+            // opens inside the last 90s, because an entry it cannot probe and
+            // measure before close is a record with nothing behind it.
+            let deadline_ns = close_ns - STOP_BEFORE_CLOSE_S * 1_000_000_000;
+            if now_ns < open_ns || now_ns >= deadline_ns || m.pending_commit {
                 continue;
             }
             // The strike must share the belief state's price basis: gamma's
@@ -1471,254 +1315,215 @@ impl ShadowCore {
                 m.belief_up = Some(up_now);
                 m.belief_flip_ns = Some(now_ns);
             }
-            let (Some(up_ask), Some(down_ask)) = (
-                self.books.get(&m.up_token).and_then(Ladder::best_ask),
-                self.books.get(&m.down_token).and_then(Ladder::best_ask),
-            ) else {
+            let (Some(up_book), Some(down_book)) =
+                (self.books.get(&m.up_token), self.books.get(&m.down_token))
+            else {
+                continue;
+            };
+            let (Some(up_ask), Some(down_ask)) = (up_book.best_ask(), down_book.best_ask()) else {
                 continue;
             };
 
-            let (side, edge, touch) = if lane {
-                // Favourite selection by the side's OWN book mid: mids sum to
-                // ~1, so at most one side clears a >0.5 align_min_mid. Skip
-                // the market when neither qualifies.
-                let up_mid = self.books.get(&m.up_token).and_then(Ladder::mid);
-                let down_mid = self.books.get(&m.down_token).and_then(Ladder::mid);
-                let up_q = up_mid.is_some_and(|x| x >= self.cfg.align_min_mid);
-                let down_q = down_mid.is_some_and(|x| x >= self.cfg.align_min_mid);
-                let side = match (up_q, down_q) {
-                    (true, false) => Side::Up,
-                    (false, true) => Side::Down,
-                    (true, true) if up_mid >= down_mid => Side::Up,
-                    (true, true) => Side::Down,
-                    (false, false) => continue,
-                };
-                let (p_side, touch) = match side {
-                    Side::Up => (ev.p, up_ask),
-                    Side::Down => (1.0 - ev.p, down_ask),
-                };
-                (side, p_side - touch.price, touch)
-            } else {
-                // Fade lane: single SSOT `decide_entry` (identical to backtest harness).
-                let up_mid = self.books.get(&m.up_token).and_then(Ladder::mid);
-                let inputs = DecisionInputs {
-                    p_exo: ev.p,
-                    dir_p_up: None,
-                    dir_model_active: false,
-                    yes_ask: up_ask.price,
-                    no_buy: down_ask.price,
-                    mid: up_mid.unwrap_or((up_ask.price + (1.0 - down_ask.price)) / 2.0),
-                    sigma_bar_bps: ev.raw.sigma_bar_bps,
-                    basis_mom_60s_bps: Self::basis_mom_60s_bps(perp.as_ref(), &spot, now_ns),
-                    regime_at_decision: regime::classify(&spot, now_ns),
-                    clip_index: m.n_clips,
-                    spot_ret_10s_bps: pm_alpha::harness::spot_ret_bps(&spot, now_ns, 10),
-                    spot_ret_30s_bps: pm_alpha::harness::spot_ret_bps(&spot, now_ns, 30),
-                    spot_ret_60s_bps: pm_alpha::harness::spot_ret_bps(&spot, now_ns, 60),
-                    spot_ret_120s_bps: pm_alpha::harness::spot_ret_bps(&spot, now_ns, 120),
-                    spot_ret_300s_bps: pm_alpha::harness::spot_ret_bps(&spot, now_ns, 300),
-                    spot_ret_600s_bps: pm_alpha::harness::spot_ret_bps(&spot, now_ns, 600),
-                    spot_ret_900s_bps: pm_alpha::harness::spot_ret_bps(&spot, now_ns, 900),
-                    belief_dwell_s: m
-                        .belief_flip_ns
-                        .map(|f| (now_ns.saturating_sub(f)).max(0) as f64 / 1e9),
-                };
-                let (decision, delta) = decide_entry(
-                    &inputs,
-                    now_ns,
-                    open_ns,
-                    close_ns,
-                    &m.entry,
-                    Some(&self.session),
-                    &self.cfg.decide_cfg,
-                );
+            let (bids, asks) = up_book.tape_levels();
+            let yes_mid = up_book
+                .mid()
+                .unwrap_or((up_ask.price + (1.0 - down_ask.price)) / 2.0);
+            let event = ReplayEvent {
+                ts_ns: now_ns,
+                market_id: m.id,
+                yes_mid: yes_mid as f32,
+                yes_bid: up_book.best_bid().map(|t| t.price).unwrap_or(0.0) as f32,
+                yes_ask: up_ask.price as f32,
+                // Live books carry no traded-volume field; the tape's is a
+                // per-event print size the feed does not give us.
+                volume: 0.0,
+                bids,
+                asks,
+                spot_price: state.spot_now().unwrap_or(0.0) as f32,
+                flags: ReplayFlags::BOOK_UPDATE,
+            };
+            m.events_seen = m.events_seen.saturating_add(1);
+            m.yes_mid_lo = m.yes_mid_lo.min(event.yes_mid);
+            m.yes_mid_hi = m.yes_mid_hi.max(event.yes_mid);
+            let ctx = Ctx {
+                events_seen: m.events_seen,
+                // The twin holds no capital by construction.
+                cash_usdc: 0.0,
+                market_yes_range_so_far: (m.yes_mid_hi - m.yes_mid_lo).max(0.0),
+                regime_path_efficiency: whipsaw.path_efficiency,
+                regime_reversal_pressure: whipsaw.reversal_pressure,
+                regime_sign_flip_rate: whipsaw.sign_flip_rate,
+                regime_realized_vol_180s_bps: whipsaw.realized_vol_180s_bps,
+                market_close_ns: close_ns,
+            };
+            let output = self.strategy.on_event(&event, &ctx, &spot, &trades);
+            if output.orders.is_empty() {
+                continue;
+            }
 
-                if let Some(armed) = delta.set_armed {
-                    if decision.action != EntryAction::Enter {
-                        m.entry.armed = armed;
+            let mut clip_index = m.n_clips;
+            let mut took_entry = false;
+            for req in output.orders {
+                let side = match req.side {
+                    StratSide::BuyYes => Side::Up,
+                    StratSide::BuyNo => Side::Down,
+                    StratSide::SellYes | StratSide::SellNo => {
+                        tracing::warn!(
+                            slug = %m.slug,
+                            tag = req.tag,
+                            "shadow ignored a sell order: the twin logs entries and \
+                             measures their exits, it holds no strategy position"
+                        );
+                        continue;
                     }
-                }
-
-                if decision.action != EntryAction::Enter {
-                    continue;
-                }
-
-                let side = match decision.side {
-                    HarnessSide::Yes => Side::Up,
-                    HarnessSide::No => Side::Down,
-                };
-                let edge = match side {
-                    Side::Up => ev.p - up_ask.price,
-                    Side::Down => (1.0 - ev.p) - down_ask.price,
                 };
                 let touch = match side {
                     Side::Up => up_ask,
                     Side::Down => down_ask,
                 };
+                let p_side = p_side_for_entry(ev.p, side.as_str());
+                let edge = p_side - touch.price;
+                // `limit_price` is quoted in YES terms; the NO leg inverts it.
+                // A market order is marketable at the touch by definition.
+                let marketable_limit = match (req.limit_price, side) {
+                    (Some(lp), Side::Up) => lp as f64,
+                    (Some(lp), Side::Down) => 1.0 - lp as f64,
+                    (None, _) => touch.price,
+                };
+                let target_notional = req.shares * touch.price;
+                clip_index = clip_index.saturating_add(1);
+                took_entry = true;
 
-                if defer_entry_commit {
-                    m.pending_commit = Some(delta);
-                } else {
-                    if let Some(armed) = delta.set_armed {
-                        m.entry.armed = armed;
-                    }
-                    if let Some(ns) = delta.set_next_entry_ns {
-                        m.entry.next_entry_ns = ns;
-                    }
-                    if delta.inc_clips {
-                        m.n_clips = m.n_clips.saturating_add(1);
-                        m.entered = true;
-                    }
-                }
-
-                (side, edge, touch)
-            };
-            if lane {
-                if edge < self.cfg.edge_threshold {
-                    continue;
-                }
-                if ev.raw.sigma_bar_bps < self.cfg.min_entry_sigma_bps {
-                    continue;
-                }
-                if self.cfg.skip_saturday {
-                    use chrono::Datelike;
-                    if chrono::DateTime::from_timestamp_nanos(now_ns).weekday()
-                        == chrono::Weekday::Sat
-                    {
-                        continue;
-                    }
-                }
-                m.entered = true;
-                m.n_clips += 1;
-                m.entry.armed = false;
-            }
-            let entry_id = self.next_entry_id;
-            self.next_entry_id += 1;
-            self.stats.entries_total += 1;
-            let p_side = p_side_for_entry(ev.p, side.as_str());
-            let marketable_limit =
-                marketable_limit_for_entry(ev.p, side.as_str(), self.cfg.decide_cfg.min_marginal_edge);
-            let (
-                p_down,
-                edge_up,
-                edge_down,
-                spot_ret_10s_bps,
-                spot_ret_30s_bps,
-                spot_ret_60s_bps,
-                spot_ret_120s_bps,
-                spot_ret_300s_bps,
-                spot_ret_600s_bps,
-                spot_ret_900s_bps,
-                model_book_gap,
-                secs_from_open,
-                delta_bps,
-                exo_features,
-                dir_features,
-                regime,
-            ) = entry_decision_telemetry(
-                &state,
-                &ev.raw,
-                self.cfg.vol_lookback_s,
-                &spot,
-                now_ns,
-                open_ns,
-                ev.p,
-                p_side,
-                touch.price,
-                up_ask.price,
-                down_ask.price,
-            );
-            let token_id = match side {
-                Side::Up => m.up_token.clone(),
-                Side::Down => m.down_token.clone(),
-            };
-            let basis_d60 = Self::basis_mom_60s_bps(perp.as_ref(), &spot, now_ns);
-            let flow = BinanceFlowTelemetry::compute(&spot, now_ns, side, basis_d60);
-            out.push(LogEvent::WouldEnter {
-                ts_utc: ts_utc(now_ns),
-                slug: m.slug.clone(),
-                side: side.as_str(),
-                p_exo: ev.p,
-                p_side,
-                p_down,
-                edge_up,
-                edge_down,
-                spot_ret_10s_bps,
-                spot_ret_30s_bps,
-                spot_ret_60s_bps,
-                spot_ret_120s_bps,
-                spot_ret_300s_bps,
-                spot_ret_600s_bps,
-                spot_ret_900s_bps,
-                model_book_gap,
-                secs_from_open,
-                belief_dwell_s: m
-                    .belief_flip_ns
-                    .map(|f| (now_ns.saturating_sub(f)) as f64 / 1e9),
-                delta_bps,
-                exo_features,
-                dir_features,
-                regime,
-                binance_flow_imbal_5s: flow.flow_imbal_5s,
-                binance_flow_imbal_15s: flow.flow_imbal_15s,
-                binance_flow_imbal_30s: flow.flow_imbal_30s,
-                binance_adverse_vol_5s: flow.adverse_vol_5s,
-                binance_adverse_vol_15s: flow.adverse_vol_15s,
-                binance_adverse_vol_30s: flow.adverse_vol_30s,
-                basis_d60_bps: flow.basis_d60_bps,
-                touch_price: touch.price,
-                touch_size: touch.size,
-                edge,
-                marketable_limit_price: marketable_limit,
-                strike,
-                strike_source,
-                sigma_bar_bps: ev.raw.sigma_bar_bps,
-                lane: if lane { "late_fav" } else { "fade" },
-                clip: m.n_clips,
-                token_id: token_id.clone(),
-                target_notional: self.cfg.decide_cfg.notional_usdc,
-                close_ts_s: m.close_ts_s,
-                condition_id: m.condition_id.clone(),
-                up_index_set: m.up_index_set,
-                down_index_set: m.down_index_set,
-            });
-            entries.push(PendingTrade {
-                entry_id,
-                slug: m.slug.clone(),
-                side,
-                token: match side {
+                let entry_id = self.next_entry_id;
+                self.next_entry_id += 1;
+                self.stats.entries_total += 1;
+                let (
+                    p_down,
+                    edge_up,
+                    edge_down,
+                    spot_ret_10s_bps,
+                    spot_ret_30s_bps,
+                    spot_ret_60s_bps,
+                    spot_ret_120s_bps,
+                    spot_ret_300s_bps,
+                    spot_ret_600s_bps,
+                    spot_ret_900s_bps,
+                    model_book_gap,
+                    secs_from_open,
+                    delta_bps,
+                    exo_features,
+                    dir_features,
+                    regime,
+                ) = entry_decision_telemetry(
+                    &state,
+                    &ev.raw,
+                    self.cfg.vol_lookback_s,
+                    &spot,
+                    now_ns,
+                    open_ns,
+                    ev.p,
+                    p_side,
+                    touch.price,
+                    up_ask.price,
+                    down_ask.price,
+                );
+                let token_id = match side {
                     Side::Up => m.up_token.clone(),
                     Side::Down => m.down_token.clone(),
-                },
-                entry_touch_price: touch.price,
-                sigma_bar_bps: ev.raw.sigma_bar_bps,
-                probe_due_ns: now_ns + self.cfg.latency_probe_ms as i64 * 1_000_000,
-                probe_done: false,
-                // Harness exits require a tick at or before close; clamp.
-                exit_due_ns: (now_ns + self.cfg.exit_after_s as i64 * 1_000_000_000)
-                    .min(close_ns),
-                // Lane entries and exit_after_s == 0 HOLD to expiry: the exit
-                // is pre-marked done so no WouldExit is ever emitted; the
-                // ResolutionWatch settles the full laddered position.
-                exit_done: lane || self.cfg.exit_after_s == 0,
-                ladder_avg_cost: None,
-                ladder_shares: None,
-                passive_level: None,
-                passive_deadline_ns: 0,
-                passive_done: true,
-            });
-            self.resolutions.push(ResolutionWatch {
-                entry_id,
-                slug: m.slug.clone(),
-                side,
-                entry_touch_price: touch.price,
-                open_ts_s: m.open_ts_s,
-                close_ts_s: m.close_ts_s,
-                attempts: 0,
-                next_attempt_ns: close_ns + 15_000_000_000,
-                ladder_avg_cost: None,
-                ladder_unsold: 0.0,
-            });
+                };
+                let basis_d60 = Self::basis_mom_60s_bps(perp.as_ref(), &spot, now_ns);
+                let flow = BinanceFlowTelemetry::compute(&spot, now_ns, side, basis_d60);
+                out.push(LogEvent::WouldEnter {
+                    ts_utc: ts_utc(now_ns),
+                    slug: m.slug.clone(),
+                    side: side.as_str(),
+                    p_exo: ev.p,
+                    p_side,
+                    p_down,
+                    edge_up,
+                    edge_down,
+                    spot_ret_10s_bps,
+                    spot_ret_30s_bps,
+                    spot_ret_60s_bps,
+                    spot_ret_120s_bps,
+                    spot_ret_300s_bps,
+                    spot_ret_600s_bps,
+                    spot_ret_900s_bps,
+                    model_book_gap,
+                    secs_from_open,
+                    belief_dwell_s: m
+                        .belief_flip_ns
+                        .map(|f| (now_ns.saturating_sub(f)) as f64 / 1e9),
+                    delta_bps,
+                    exo_features,
+                    dir_features,
+                    regime,
+                    binance_flow_imbal_5s: flow.flow_imbal_5s,
+                    binance_flow_imbal_15s: flow.flow_imbal_15s,
+                    binance_flow_imbal_30s: flow.flow_imbal_30s,
+                    binance_adverse_vol_5s: flow.adverse_vol_5s,
+                    binance_adverse_vol_15s: flow.adverse_vol_15s,
+                    binance_adverse_vol_30s: flow.adverse_vol_30s,
+                    basis_d60_bps: flow.basis_d60_bps,
+                    touch_price: touch.price,
+                    touch_size: touch.size,
+                    edge,
+                    marketable_limit_price: marketable_limit,
+                    strike,
+                    strike_source,
+                    sigma_bar_bps: ev.raw.sigma_bar_bps,
+                    lane: req.tag,
+                    clip: clip_index,
+                    token_id: token_id.clone(),
+                    target_notional,
+                    close_ts_s: m.close_ts_s,
+                    condition_id: m.condition_id.clone(),
+                    up_index_set: m.up_index_set,
+                    down_index_set: m.down_index_set,
+                });
+                entries.push(PendingTrade {
+                    entry_id,
+                    slug: m.slug.clone(),
+                    side,
+                    token: token_id,
+                    entry_touch_price: touch.price,
+                    target_notional,
+                    probe_due_ns: now_ns + self.cfg.latency_probe_ms as i64 * 1_000_000,
+                    probe_done: false,
+                    // Harness exits require a tick at or before close; clamp.
+                    exit_due_ns: (now_ns + self.cfg.exit_after_s as i64 * 1_000_000_000)
+                        .min(close_ns),
+                    // exit_after_s == 0 HOLDS to expiry: the exit is pre-marked
+                    // done so no WouldExit is ever emitted; the ResolutionWatch
+                    // settles the full laddered position.
+                    exit_done: self.cfg.exit_after_s == 0,
+                    ladder_avg_cost: None,
+                    ladder_shares: None,
+                    passive_level: None,
+                    passive_deadline_ns: 0,
+                    passive_done: true,
+                });
+                self.resolutions.push(ResolutionWatch {
+                    entry_id,
+                    slug: m.slug.clone(),
+                    side,
+                    entry_touch_price: touch.price,
+                    open_ts_s: m.open_ts_s,
+                    close_ts_s: m.close_ts_s,
+                    attempts: 0,
+                    next_attempt_ns: close_ns + 15_000_000_000,
+                    ladder_avg_cost: None,
+                    ladder_unsold: 0.0,
+                });
+            }
+            if took_entry {
+                if defer_entry_commit {
+                    m.pending_commit = true;
+                } else {
+                    m.n_clips = clip_index;
+                    m.entered = true;
+                }
+            }
         }
         self.pending.extend(entries);
         out
@@ -1786,7 +1591,16 @@ impl ShadowCore {
             .iter()
             .position(|w| w.entry_id == entry_id)?;
         let w = self.resolutions.swap_remove(idx);
-        self.session.observe_trade(won);
+        // The trait's `market_mid` is YES-terms; a Down entry's touch is the
+        // NO price, so invert it back. `resolved_yes` is the market's outcome,
+        // which is our win only when we were on the Up side.
+        let entry_yes_price = match w.side {
+            Side::Up => w.entry_touch_price,
+            Side::Down => 1.0 - w.entry_touch_price,
+        };
+        let resolved_yes = won == matches!(w.side, Side::Up);
+        self.strategy
+            .on_market_resolved(entry_yes_price as f32, resolved_yes);
         let settle = if won {
             1.0 - w.entry_touch_price
         } else {
@@ -1819,13 +1633,7 @@ impl ShadowCore {
                     .map(|l| l.ask_size_at_or_below(p.entry_touch_price))
                     .unwrap_or(0.0);
                 let still_quoted = remaining_size > 0.0;
-                let mult = if self.cfg.vol_sizing_ref_bps > 0.0 {
-                    (p.sigma_bar_bps / self.cfg.vol_sizing_ref_bps)
-                        .clamp(self.cfg.vol_sizing_lo, self.cfg.vol_sizing_hi)
-                } else {
-                    1.0
-                };
-                let ladder_fill = ladder.and_then(|l| l.fill_buy(SHADOW_NOTIONAL_USDC * mult));
+                let ladder_fill = ladder.and_then(|l| l.fill_buy(p.target_notional));
                 if let Some((avg, shares)) = ladder_fill {
                     p.ladder_avg_cost = Some(avg);
                     p.ladder_shares = Some(shares);
@@ -2100,27 +1908,25 @@ pub async fn run_shadow_with_sink(
     );
 
     let defer_entry_commit = intent_tx.is_some();
+    let strategy = strategy_from_name(&args.strategy)?;
     let core = std::sync::Arc::new(std::sync::Mutex::new(ShadowCore::new(
-        shadow_cfg,
+        shadow_cfg, strategy,
     )));
 
-    // FIRST event of every stream: the resolved config fingerprint, so the
-    // matched replay derives its invocation from the log itself (F2) and any
-    // clap-default drift is visible in the stream, not just the launcher.
-    let config_event = {
-        let mut core = core.lock().expect("shadow core poisoned");
-        LogEvent::Config {
-            ts_utc: ts_utc(now_unix_ns()),
-            slug_prefix: args.slug_prefix.clone(),
-            out_dir: args.out_dir.display().to_string(),
-            decide_interval_ms: args.decide_interval_ms,
-            decide_on_event: args.decide_on_event,
-            perp_price_weight: args.perp_price_weight,
-            vol_lookback_s: args.vol_lookback_s,
-            vol_estimator: format!("{:?}", args.vol_estimator).to_lowercase(),
-            max_clips: args.max_clips,
-            decide_config_canon: core.resolved_decide_cfg().canon(),
-        }
+    // FIRST event of every stream: the resolved config, so a reader derives
+    // the run's invocation from the log itself (F2) and any clap-default
+    // drift is visible in the stream, not just the launcher.
+    let config_event = LogEvent::Config {
+        ts_utc: ts_utc(now_unix_ns()),
+        slug_prefix: args.slug_prefix.clone(),
+        out_dir: args.out_dir.display().to_string(),
+        strategy: args.strategy.clone(),
+        decide_interval_ms: args.decide_interval_ms,
+        decide_on_event: args.decide_on_event,
+        perp_price_weight: args.perp_price_weight,
+        vol_lookback_s: args.vol_lookback_s,
+        vol_estimator: args.vol_estimator.clone(),
+        config_fingerprint: config_fingerprint.clone(),
     };
     tracing::info!(
         event = %serde_json::to_string(&config_event).unwrap_or_default(),
@@ -2241,6 +2047,7 @@ pub async fn run_shadow_with_sink(
                             p_side,
                             touch_price,
                             marketable_limit_price,
+                            target_notional,
                             clip,
                             edge,
                             sigma_bar_bps,
@@ -2262,8 +2069,8 @@ pub async fn run_shadow_with_sink(
                                     p_side: *p_side,
                                     touch_price: *touch_price,
                                     marketable_limit_price: *marketable_limit_price,
-                                    target_notional: core.cfg.decide_cfg.notional_usdc,
-                                    hold_to_redemption: core.cfg.decide_cfg.exit_after_s == 0,
+                                    target_notional: *target_notional,
+                                    hold_to_redemption: core.cfg.exit_after_s == 0,
                                     clip: *clip,
                                     edge: *edge,
                                     sigma_bar_bps: *sigma_bar_bps,
@@ -2463,7 +2270,7 @@ mod bootstrap {
 /// Live data feeds. Read-only consumers of public endpoints: the only
 /// outbound payloads are websocket subscriptions and pings.
 mod feeds {
-    use super::{EntryState, MarketWindow, ShadowCore, now_unix_ms};
+    use super::{MarketId, MarketWindow, ShadowCore, now_unix_ms};
     use anyhow::{Context, Result};
     use futures::{SinkExt, StreamExt};
     use serde_json::Value;
@@ -3108,13 +2915,14 @@ mod feeds {
             gamma_strike,
             entered: false,
             n_clips: 0,
-            entry: EntryState {
-                armed: true,
-                next_entry_ns: i64::MIN,
-            },
-            pending_commit: None,
+            pending_commit: false,
             belief_flip_ns: None,
             belief_up: None,
+            // Overwritten with a real id by `ShadowCore::upsert_market`.
+            id: MarketId(0),
+            yes_mid_lo: f32::INFINITY,
+            yes_mid_hi: f32::NEG_INFINITY,
+            events_seen: 0,
         })
     }
 
@@ -3367,52 +3175,163 @@ mod feeds {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pm_alpha::frozen_fade_decide_config;
+    use pm_strategy::{OrderRequest, StrategyOutput};
+    use std::collections::HashSet;
 
     const NS: i64 = 1_000_000_000;
 
-    #[test]
-    fn marketable_limit_uses_p_side_on_down_not_p_exo() {
-        // Live log shape: ENTER DOWN p_up=0.319 touch=0.51 edge=0.171
-        let p_exo = 0.319;
-        assert!((p_side_for_entry(p_exo, "down") - 0.681).abs() < 1e-9);
-        let limit = marketable_limit_for_entry(p_exo, "down", 0.04);
-        assert!(
-            (limit - 0.641).abs() < 1e-9,
-            "limit must be p_side - min_marginal, got {limit}"
-        );
-        assert!(
-            limit > 0.51,
-            "DOWN IOC cap must clear touch=0.51; old bug used p_exo-0.04=0.279"
-        );
+    /// Engine-test strategy: a fixed buy per market, so the tests exercise the
+    /// twin's entry/probe/exit/settle machinery rather than any decision rule.
+    /// The shipped `NoopStrategy` would make every one of these tests vacuous.
+    struct StubEntry {
+        side: StratSide,
+        shares: f64,
+        limit_price: Option<f32>,
+        once: bool,
+        seen: HashSet<u32>,
+    }
+
+    impl StubEntry {
+        fn buy_yes() -> Box<dyn Strategy + Send> {
+            Box::new(Self {
+                side: StratSide::BuyYes,
+                shares: 100.0,
+                limit_price: None,
+                once: true,
+                seen: HashSet::new(),
+            })
+        }
+        fn buy_no_limited(limit_price: f32) -> Box<dyn Strategy + Send> {
+            Box::new(Self {
+                side: StratSide::BuyNo,
+                shares: 100.0,
+                limit_price: Some(limit_price),
+                once: true,
+                seen: HashSet::new(),
+            })
+        }
+        fn sell_yes() -> Box<dyn Strategy + Send> {
+            Box::new(Self {
+                side: StratSide::SellYes,
+                shares: 100.0,
+                limit_price: None,
+                once: true,
+                seen: HashSet::new(),
+            })
+        }
+        fn buy_yes_every_pass() -> Box<dyn Strategy + Send> {
+            Box::new(Self {
+                side: StratSide::BuyYes,
+                shares: 100.0,
+                limit_price: None,
+                once: false,
+                seen: HashSet::new(),
+            })
+        }
+    }
+
+    impl Strategy for StubEntry {
+        fn on_event(
+            &mut self,
+            event: &ReplayEvent,
+            _ctx: &Ctx,
+            _spot: &SpotHistory,
+            _trades: &TradeHistory,
+        ) -> StrategyOutput {
+            if self.once && !self.seen.insert(event.market_id.0) {
+                return StrategyOutput::hold();
+            }
+            StrategyOutput::one(OrderRequest {
+                side: self.side,
+                shares: self.shares,
+                max_depth: 5,
+                limit_price: self.limit_price,
+                tag: "stub_entry",
+            })
+        }
+    }
+
+    /// Records every `Ctx` it is handed, for the context-plumbing test.
+    #[derive(Default)]
+    struct CtxRecorder {
+        seen: std::sync::Arc<std::sync::Mutex<Vec<(u32, Ctx)>>>,
+    }
+
+    impl Strategy for CtxRecorder {
+        fn on_event(
+            &mut self,
+            event: &ReplayEvent,
+            ctx: &Ctx,
+            _spot: &SpotHistory,
+            _trades: &TradeHistory,
+        ) -> StrategyOutput {
+            self.seen
+                .lock()
+                .expect("recorder poisoned")
+                .push((event.market_id.0, *ctx));
+            StrategyOutput::hold()
+        }
     }
 
     #[test]
-    fn frozen_shadow_final_args_matches_fade_ssot() {
-        let args = frozen_shadow_final_args(PathBuf::from("shadow-final"));
-        let decide = frozen_fade_decide_config(50.0);
-        assert_eq!(args.edge_threshold, decide.edge_threshold);
-        assert_eq!(args.min_entry_sigma_bps, decide.min_entry_sigma_bps);
-        assert_eq!(args.rearm_edge, decide.rearm_edge);
-        assert_eq!(args.max_clips, 2);
-        assert_eq!(args.exit_after_s, decide.exit_after_s);
-        assert_eq!(args.stop_before_close_s, decide.stop_before_close_s);
-        assert!(args.skip_saturday);
-        assert!((args.perp_price_weight - 0.75).abs() < f64::EPSILON);
+    fn p_side_for_entry_reads_the_complement_on_down() {
+        // Live log shape: ENTER DOWN p_up=0.319 touch=0.51.
+        assert!((p_side_for_entry(0.319, "down") - 0.681).abs() < 1e-9);
+        assert!((p_side_for_entry(0.319, "up") - 0.319).abs() < 1e-9);
+    }
+
+    #[test]
+    fn default_shadow_args_carry_no_strategy_parameters() {
+        let args = default_shadow_args(PathBuf::from("shadow-final"));
+        assert_eq!(args.strategy, "noop");
         assert_eq!(args.vol_lookback_s, 3600);
+        assert_eq!(args.exit_after_s, 0);
+        assert_eq!(args.latency_probe_ms, 150);
+        assert!((args.perp_price_weight - 0.75).abs() < f64::EPSILON);
         assert_eq!(args.vol_estimator, "realized");
-        assert!(!args.lane_late_fav);
-        assert_eq!(args.skip_spot_misalign_s, 0);
-        assert_eq!(args.min_entry_ask, 0.0);
         assert_eq!(args.decide_interval_ms, 1000);
+        assert!(!args.decide_on_event);
+        // The config the engine actually runs is these values and nothing
+        // else: no threshold, no gate, no clip size to drift against a
+        // strategy's own config.
+        let cfg = shadow_config_from_args(&args);
+        let json = serde_json::to_value(&cfg).unwrap();
+        let mut keys: Vec<&str> = json.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                "exit_after_s",
+                "latency_probe_ms",
+                "perp_price_weight",
+                "strategy",
+                "vol_estimator",
+                "vol_lookback_s",
+            ]
+        );
     }
 
     #[test]
-    fn frozen_args_decide_on_event_default_off() {
-        let args = frozen_shadow_final_args(PathBuf::from("shadow-final"));
-        assert!(!args.decide_on_event);
-        let gated = gated_shadow_final_args(PathBuf::from("shadow-final"));
-        assert!(!gated.decide_on_event);
+    fn strategy_from_name_accepts_noop_and_refuses_everything_else() {
+        assert!(strategy_from_name("noop").is_ok());
+        let err = match strategy_from_name("fixture") {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("fixture must not be drivable live"),
+        };
+        assert!(err.contains("fixture"), "{err}");
+        assert!(err.contains("noop"), "{err}");
+        assert!(matches!(strategy_from_name("exo_fade"), Err(_)));
+    }
+
+    #[test]
+    fn ewma_args_resolve_to_the_ewma_estimator() {
+        let mut args = default_shadow_args(PathBuf::from("out"));
+        args.vol_estimator = "ewma".to_string();
+        args.ewma_halflife_s = 900.0;
+        match shadow_config_from_args(&args).vol_estimator {
+            VolEstimator::Ewma { halflife_s } => assert_eq!(halflife_s, 900.0),
+            other => panic!("expected ewma, got {other:?}"),
+        }
     }
 
     #[test]
@@ -3451,132 +3370,58 @@ mod tests {
     }
 
     #[test]
-    fn gated_shadow_final_args_enables_mom30_and_lottery_floor_without_regime_gates() {
-        let args = gated_shadow_final_args(PathBuf::from("shadow-final"));
-        assert_eq!(args.skip_spot_misalign_s, 30);
-        assert!((args.min_entry_ask - 0.45).abs() < f64::EPSILON);
-        assert!(args.skip_open_fav_gap);
-        assert!((args.open_fav_p_min - 0.88).abs() < f64::EPSILON);
-        assert!((args.open_fav_ask_max - 0.62).abs() < f64::EPSILON);
-        assert_eq!(args.open_fav_secs, 300);
-        assert!(!args.skip_calm);
-        assert!(!args.skip_expanded_mixed);
-        assert!(!args.skip_expanded_high_flip);
-        let cfg = shadow_config_from_args(&args);
-        assert_eq!(cfg.skip_spot_misalign_s, 30);
-        assert!((cfg.min_entry_ask - 0.45).abs() < f64::EPSILON);
-        assert!(cfg.skip_open_fav_gap);
-        assert_eq!(cfg.open_fav_secs, 300);
-        assert!(!cfg.skip_calm);
-        assert!(!cfg.skip_expanded_mixed);
-        assert!(!cfg.skip_expanded_high_flip);
-    }
-
-    #[test]
-    fn recommended_args_differ_from_gated_in_exactly_min_entry_ask() {
-        let gated = gated_shadow_final_args(PathBuf::from("shadow-final"));
-        let rec = recommended_shadow_final_args(PathBuf::from("shadow-final"));
-        assert_ne!(rec, gated, "recommended must actually drop a gate");
-        assert_eq!(rec.min_entry_ask, 0.0);
-        // Restoring the single dropped field must make them byte-equal:
-        // proves exactly one field differs (PartialEq covers every field).
-        let mut gated_minus_floor = gated;
-        gated_minus_floor.min_entry_ask = 0.0;
-        assert_eq!(rec, gated_minus_floor);
-    }
-
-    #[test]
     fn config_event_serializes_to_contract_shape() {
-        let mut core = ShadowCore::new(shadow_config_from_args(&gated_shadow_final_args(
-            PathBuf::from("shadow-final"),
-        )));
+        let args = default_shadow_args(PathBuf::from("shadow-final"));
+        let cfg = shadow_config_from_args(&args);
         let event = LogEvent::Config {
             ts_utc: "2026-07-10T00:00:00.000Z".to_string(),
-            slug_prefix: "btc-updown-5m-".to_string(),
-            out_dir: "shadow-final".to_string(),
-            decide_interval_ms: 1000,
-            decide_on_event: false,
-            perp_price_weight: 0.75,
-            vol_lookback_s: 3600,
-            vol_estimator: "realized".to_string(),
-            max_clips: 2,
-            decide_config_canon: core.resolved_decide_cfg().canon(),
+            slug_prefix: args.slug_prefix.clone(),
+            out_dir: args.out_dir.display().to_string(),
+            strategy: args.strategy.clone(),
+            decide_interval_ms: args.decide_interval_ms,
+            decide_on_event: args.decide_on_event,
+            perp_price_weight: args.perp_price_weight,
+            vol_lookback_s: args.vol_lookback_s,
+            vol_estimator: args.vol_estimator.clone(),
+            config_fingerprint: config_fingerprint(&cfg),
         };
         let line = serde_json::to_string(&event).unwrap();
         let v: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(v["type"], "config");
         assert_eq!(v["slug_prefix"], "btc-updown-5m-");
         assert_eq!(v["out_dir"], "shadow-final");
+        assert_eq!(v["strategy"], "noop");
         assert_eq!(v["decide_interval_ms"], 1000);
         assert_eq!(v["decide_on_event"], false);
-        // The canon reflects the RESOLVED config: gated overrides visible.
-        let canon: serde_json::Value =
-            serde_json::from_str(v["decide_config_canon"].as_str().unwrap()).unwrap();
-        assert_eq!(canon["min_entry_ask"], 0.45);
-        assert_eq!(canon["skip_spot_misalign_s"], 30);
-        assert_eq!(canon["stop_before_close_s"], 90);
-        assert_eq!(canon["edge_threshold"], 0.12);
-        assert_eq!(canon["entry_mode"], "fade");
+        // Plain name, not a Debug-quoted one: readers match on it.
+        assert_eq!(v["vol_estimator"], "realized");
+        assert_eq!(v["config_fingerprint"].as_str().unwrap().len(), 16);
+    }
+
+    #[test]
+    fn config_fingerprint_changes_when_the_strategy_changes() {
+        let args = default_shadow_args(PathBuf::from("out"));
+        let base = config_fingerprint(&shadow_config_from_args(&args));
+        let mut other = args.clone();
+        other.strategy = "some_future_strategy".to_string();
+        assert_ne!(base, config_fingerprint(&shadow_config_from_args(&other)));
     }
 
     fn cfg() -> ShadowConfig {
-        let mut decide_cfg = frozen_fade_decide_config(50.0);
-        decide_cfg.edge_threshold = 0.16;
-        decide_cfg.min_entry_sigma_bps = 0.0;
-        decide_cfg.skip_saturday = false;
-        decide_cfg.rearm_edge = 0.0;
         ShadowConfig {
-            edge_threshold: 0.16,
+            strategy: "stub".to_string(),
             vol_lookback_s: 1800,
             exit_after_s: 30,
             latency_probe_ms: 150,
             perp_price_weight: 0.0,
-            lane_late_fav: false,
-            align_min_mid: 0.85,
-            enter_within_close_s: 120,
-            stop_before_close_s: 5,
-            min_entry_sigma_bps: 0.0,
-            rearm_edge: 0.0,
-            max_clips: 1,
             vol_estimator: VolEstimator::Realized,
-            skip_saturday: false,
-            vol_sizing_ref_bps: 0.0,
-            vol_sizing_lo: 0.5,
-            vol_sizing_hi: 2.0,
-            min_entry_ask: 0.0,
-            max_entry_ask: 1.0,
-            skip_spot_misalign_s: 0,
-            skip_spot_against_all: false,
-            min_secs_from_open: 0,
-            min_belief_dwell_s: 0.0,
-            max_p_side: 1.0,
-            skip_calm: false,
-            only_calm: false,
-            skip_expanded_mixed: false,
-            skip_expanded_high_flip: false,
-            pause_after_consec_losses: 0,
-            skip_open_fav_gap: false,
-            open_fav_p_min: 0.90,
-            open_fav_ask_max: 0.60,
-            open_fav_secs: 5,
-            decide_cfg,
-        }
-    }
-
-    /// The validated late-favourite lane config (thr 0.02, window
-    /// [close-120s, close-5s], favourite mid >= 0.85, sigma floor 4bps).
-    fn lane_cfg() -> ShadowConfig {
-        ShadowConfig {
-            edge_threshold: 0.02,
-            lane_late_fav: true,
-            ..cfg()
         }
     }
 
     /// Wavy spot tape: 0..2000s around 100k, enough history for the vol
     /// estimator. Receipt is exchange + 25ms so the median delta is known.
     fn core_with_spot() -> ShadowCore {
-        let mut core = ShadowCore::new(cfg());
+        let mut core = ShadowCore::new(cfg(), StubEntry::buy_yes());
         let mut price = 100_000.0;
         for s in 0..2000i64 {
             core.push_spot(s * 1_000, s * 1_000 + 25, price, 1.0, false);
@@ -3588,7 +3433,14 @@ mod tests {
     /// Tape that plateaus at `pre_open` through the 1800s open (so the
     /// Binance-proxy strike is exactly `pre_open`), then trades wavy ~100k.
     fn core_with_spot_strike(pre_open: f64) -> ShadowCore {
-        let mut core = ShadowCore::new(cfg());
+        core_with_spot_strike_driven_by(pre_open, StubEntry::buy_yes())
+    }
+
+    fn core_with_spot_strike_driven_by(
+        pre_open: f64,
+        strategy: Box<dyn Strategy + Send>,
+    ) -> ShadowCore {
+        let mut core = ShadowCore::new(cfg(), strategy);
         let mut price = 100_000.0;
         for s in 0..2000i64 {
             if s <= 1800 {
@@ -3614,33 +3466,14 @@ mod tests {
             gamma_strike: strike,
             entered: false,
             n_clips: 0,
-            entry: EntryState {
-                armed: true,
-                next_entry_ns: i64::MIN,
-            },
-            pending_commit: None,
+            pending_commit: false,
             belief_flip_ns: None,
             belief_up: None,
+            id: MarketId(0),
+            yes_mid_lo: f32::INFINITY,
+            yes_mid_hi: f32::NEG_INFINITY,
+            events_seen: 0,
         }
-    }
-
-    /// Books for the late-favourite lane: each side quoted around its own
-    /// mid (bid = ask - 0.02), so `Ladder::mid` is ask - 0.01 per side.
-    fn set_lane_books(core: &mut ShadowCore, up_ask: f64, down_ask: f64) {
-        core.apply_book_snapshot(
-            "up-tok",
-            &[(up_ask - 0.02, 100.0)],
-            &[(up_ask, 50.0)],
-            Some(1_899_000),
-            1_899_040,
-        );
-        core.apply_book_snapshot(
-            "down-tok",
-            &[(down_ask - 0.02, 60.0)],
-            &[(down_ask, 70.0)],
-            Some(1_899_000),
-            1_899_040,
-        );
     }
 
     fn set_books(core: &mut ShadowCore, up_ask: f64, down_ask: f64) {
@@ -3660,9 +3493,10 @@ mod tests {
         );
     }
 
+
     #[test]
     fn ladder_tracks_snapshots_and_price_changes() {
-        let mut core = ShadowCore::new(cfg());
+        let mut core = ShadowCore::new(cfg(), StubEntry::buy_yes());
         core.apply_book_snapshot(
             "tok",
             &[(0.40, 10.0), (0.42, 5.0)],
@@ -3693,7 +3527,62 @@ mod tests {
     }
 
     #[test]
-    fn enters_up_side_once_on_threshold_crossing() {
+    fn tape_levels_are_best_first_and_zero_padded() {
+        let mut core = ShadowCore::new(cfg(), StubEntry::buy_yes());
+        core.apply_book_snapshot(
+            "tok",
+            &[(0.40, 10.0), (0.42, 5.0)],
+            &[(0.50, 7.0), (0.55, 9.0)],
+            Some(1_000),
+            1_030,
+        );
+        let (bids, asks) = core.books.get("tok").unwrap().tape_levels();
+        assert_eq!(bids[0].price, 0.42);
+        assert_eq!(bids[1].price, 0.40);
+        assert_eq!(bids[2], pm_types::BookLevel::default());
+        assert_eq!(asks[0].price, 0.50);
+        assert_eq!(asks[0].size, 7.0);
+        assert_eq!(asks[1].price, 0.55);
+        assert_eq!(asks[2], pm_types::BookLevel::default());
+    }
+
+    #[test]
+    fn noop_strategy_produces_an_entry_free_stream() {
+        let mut core = ShadowCore::new(cfg(), Box::new(NoopStrategy));
+        let mut price = 100_000.0;
+        for s in 0..2000i64 {
+            core.push_spot(s * 1_000, s * 1_000 + 25, price, 1.0, false);
+            price *= if s % 2 == 0 { 1.0001 } else { 0.9999 };
+        }
+        core.upsert_market(market(Some(99_000.0)));
+        set_books(&mut core, 0.10, 0.95);
+        // Wide-open dislocation, full warm buffer, inside the window: the only
+        // reason nothing enters is that the strategy asks for nothing.
+        assert!(core.decide(1900 * NS, false).is_empty());
+        assert!(core.poll_due(1901 * NS).is_empty());
+        assert_eq!(core.stats.entries_total, 0);
+        // The stream still carries a well-formed summary.
+        match core.summary(1901 * NS, 1_901_000) {
+            LogEvent::Summary { n_active_markets, n_entries_total, .. } => {
+                assert_eq!(n_active_markets, 1);
+                assert_eq!(n_entries_total, 0);
+            }
+            other => panic!("expected Summary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sell_orders_are_ignored() {
+        let mut core = core_with_spot_strike_driven_by(99_000.0, StubEntry::sell_yes());
+        core.upsert_market(market(None));
+        set_books(&mut core, 0.50, 0.50);
+        assert!(core.decide(1900 * NS, false).is_empty(), "the twin holds no position to sell");
+        assert_eq!(core.stats.entries_total, 0);
+        assert!(core.pending.is_empty());
+    }
+
+    #[test]
+    fn entry_from_a_buy_yes_order_carries_the_belief_telemetry() {
         let mut core = core_with_spot_strike(99_000.0); // proxy strike far below: p_up ~ 1
         core.upsert_market(market(None));
         set_books(&mut core, 0.50, 0.50);
@@ -3712,6 +3601,10 @@ mod tests {
                 strike_source,
                 touch_price,
                 touch_size,
+                lane,
+                clip,
+                target_notional,
+                marketable_limit_price,
                 ..
             } => {
                 assert_eq!(*side, "up");
@@ -3724,6 +3617,12 @@ mod tests {
                 assert!((*p_down - (1.0 - p_exo)).abs() < 1e-9);
                 assert!((*edge_up - *edge).abs() < 1e-9);
                 assert!(*edge_down < *edge_up);
+                // The order's own attribution and sizing reach the record.
+                assert_eq!(*lane, "stub_entry");
+                assert_eq!(*clip, 1);
+                assert!((*target_notional - 50.0).abs() < 1e-9, "100 sh @ 0.50");
+                // Market order: marketable at the touch by definition.
+                assert_eq!(*marketable_limit_price, 0.50);
             }
             other => panic!("expected WouldEnter, got {other:?}"),
         }
@@ -3746,14 +3645,16 @@ mod tests {
         } else {
             panic!("expected WouldEnter");
         }
-        // First crossing only: no duplicate entry on later passes.
+        // The stub enters once per market; later passes add nothing.
         assert!(core.decide(1901 * NS, false).is_empty());
         assert_eq!(core.stats.entries_total, 1);
     }
 
     #[test]
-    fn enters_down_side_using_real_down_book() {
-        let mut core = core_with_spot_strike(101_000.0); // proxy strike far above: p_up ~ 0
+    fn buy_no_prices_against_the_down_book_and_inverts_the_limit() {
+        // limit 0.30 in YES terms is a 0.70 cap on the NO leg.
+        let mut core =
+            core_with_spot_strike_driven_by(101_000.0, StubEntry::buy_no_limited(0.30));
         core.upsert_market(market(None));
         set_books(&mut core, 0.50, 0.50);
 
@@ -3766,11 +3667,14 @@ mod tests {
                 p_side,
                 marketable_limit_price,
                 touch_price,
+                token_id,
                 ..
             } => {
                 assert_eq!(*side, "down");
+                assert_eq!(token_id, "down-tok");
                 assert!(*p_exo < 0.1, "p_exo={p_exo}");
                 assert!((*p_side - (1.0 - p_exo)).abs() < 1e-9);
+                assert!((*marketable_limit_price - 0.70).abs() < 1e-6);
                 assert!(*marketable_limit_price > *touch_price);
             }
             other => panic!("expected WouldEnter, got {other:?}"),
@@ -3778,9 +3682,94 @@ mod tests {
     }
 
     #[test]
+    fn repeating_strategy_ladders_clips_without_an_engine_cap() {
+        let mut core =
+            core_with_spot_strike_driven_by(99_000.0, StubEntry::buy_yes_every_pass());
+        core.upsert_market(market(None));
+        set_books(&mut core, 0.50, 0.50);
+        for expected_clip in 1..=3u32 {
+            let events = core.decide((1900 + expected_clip as i64) * NS, false);
+            assert_eq!(events.len(), 1);
+            match &events[0] {
+                LogEvent::WouldEnter { clip, .. } => assert_eq!(*clip, expected_clip),
+                other => panic!("expected WouldEnter, got {other:?}"),
+            }
+        }
+        assert_eq!(core.stats.entries_total, 3);
+        assert_eq!(core.markets["btc-updown-5m-1800"].n_clips, 3);
+    }
+
+    #[test]
+    fn deferred_commit_holds_the_market_until_the_fill_confirms() {
+        let mut core =
+            core_with_spot_strike_driven_by(99_000.0, StubEntry::buy_yes_every_pass());
+        core.upsert_market(market(None));
+        set_books(&mut core, 0.50, 0.50);
+        assert_eq!(core.decide(1900 * NS, true).len(), 1);
+        let m = &core.markets["btc-updown-5m-1800"];
+        assert!(m.pending_commit && !m.entered && m.n_clips == 0);
+        // A pending entry blocks further passes even for an eager strategy.
+        assert!(core.decide(1901 * NS, true).is_empty());
+        // A miss keeps the commit pending for the next submit attempt.
+        core.commit_entry("btc-updown-5m-1800", false);
+        assert!(core.markets["btc-updown-5m-1800"].pending_commit);
+        core.commit_entry("btc-updown-5m-1800", true);
+        let m = &core.markets["btc-updown-5m-1800"];
+        assert!(!m.pending_commit && m.entered && m.n_clips == 1);
+    }
+
+    #[test]
+    fn ctx_and_event_carry_per_market_state() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut core = core_with_spot_strike_driven_by(
+            99_000.0,
+            Box::new(CtxRecorder { seen: seen.clone() }),
+        );
+        core.upsert_market(market(None));
+        set_books(&mut core, 0.50, 0.50);
+        core.decide(1900 * NS, false);
+        // Move the YES book so the observed mid range actually widens.
+        core.apply_book_snapshot(
+            "up-tok",
+            &[(0.60, 10.0)],
+            &[(0.64, 10.0)],
+            Some(1_900_500),
+            1_900_540,
+        );
+        core.decide(1901 * NS, false);
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0].0, seen[1].0, "same market keeps one id");
+        assert_eq!(seen[0].1.events_seen, 1);
+        assert_eq!(seen[1].1.events_seen, 2);
+        assert_eq!(seen[0].1.cash_usdc, 0.0, "the twin holds no capital");
+        assert_eq!(seen[0].1.market_close_ns, 2100 * NS);
+        // First pass sees a single mid, the second a widened range.
+        assert!(seen[0].1.market_yes_range_so_far.abs() < 1e-6);
+        assert!(seen[1].1.market_yes_range_so_far > 0.05);
+    }
+
+    #[test]
+    fn market_ids_are_assigned_by_the_core_and_unique() {
+        let mut core = core_with_spot();
+        core.upsert_market(market(None));
+        let mut second = market(None);
+        second.slug = "btc-updown-5m-2100".to_string();
+        second.id = MarketId(0);
+        core.upsert_market(second);
+        let a = core.markets["btc-updown-5m-1800"].id;
+        let b = core.markets["btc-updown-5m-2100"].id;
+        assert_ne!(a, b);
+        // Re-discovery of a known slug keeps the id it was given.
+        core.upsert_market(market(Some(100_123.0)));
+        assert_eq!(core.markets["btc-updown-5m-1800"].id, a);
+    }
+
+    #[test]
     fn no_entry_without_strike_and_proxy_used_when_spot_covers_open() {
         // Spot history starting AFTER the open: no proxy strike available.
-        let mut late = ShadowCore::new(cfg());
+        let mut late = ShadowCore::new(cfg(), StubEntry::buy_yes());
         let mut price = 100_000.0;
         for s in 1850..3900i64 {
             late.push_spot(s * 1_000, s * 1_000 + 25, price, 1.0, false);
@@ -3793,7 +3782,7 @@ mod tests {
         // Full history: proxy = last Binance trade at-or-before open.
         let mut core = core_with_spot();
         core.upsert_market(market(None));
-        set_books(&mut core, 0.10, 0.95); // cheap up ask so the fade fires
+        set_books(&mut core, 0.10, 0.95);
         let events = core.decide(1900 * NS, false);
         assert_eq!(events.len(), 1);
         match &events[0] {
@@ -3937,8 +3926,7 @@ mod tests {
         let due = core.resolutions_due(2116 * NS);
         assert_eq!(due.len(), 1);
         let w = &due[0];
-        // Spot 100k vs strike 99k => entry side was Up. A losing outcome
-        // settles at -entry; the watch is consumed.
+        // A losing outcome settles at -entry; the watch is consumed.
         let ev = core.apply_resolution(w.entry_id, false, 2200 * NS).unwrap();
         match ev {
             LogEvent::Resolution { won, settle_pnl_per_share, .. } => {
@@ -3969,7 +3957,7 @@ mod tests {
     fn ladder_fill_round_trip_accounting() {
         let mut core = core_with_spot_strike(99_000.0);
         core.upsert_market(market(None));
-        // $50 across 0.50 (50 sh) then 0.52: 100 sh @0.50? no — 50*0.50=$25,
+        // 100 sh @ 0.50 asked = $50 notional: 50 sh fill at 0.50 ($25), the
         // remaining $25 at 0.52 = 48.08 sh. Bids hold 60 sh @0.48.
         core.apply_book_snapshot(
             "up-tok",
@@ -4096,11 +4084,11 @@ mod tests {
 
     #[test]
     fn klines_bootstrap_clears_vol3600_warmup_immediately() {
-        let args = frozen_shadow_final_args(PathBuf::from("shadow-final"));
+        let args = default_shadow_args(PathBuf::from("shadow-final"));
         assert_eq!(args.vol_lookback_s, 3600);
 
-        // Partial post-restart buffer: warmup gate must block (even with huge edge).
-        let mut cold = ShadowCore::new(shadow_config_from_args(&args));
+        // Partial post-restart buffer: warmup gate must block.
+        let mut cold = ShadowCore::new(shadow_config_from_args(&args), StubEntry::buy_yes());
         push_klines_bootstrap(&mut cold, 30, 1740, 1_900_000);
         assert!(
             spot_buffer_span_s(&cold) < 3600,
@@ -4114,7 +4102,7 @@ mod tests {
         );
 
         // Live bootstrap geometry: 70×1m Binance klines (~4140s span).
-        let mut warm = ShadowCore::new(shadow_config_from_args(&args));
+        let mut warm = ShadowCore::new(shadow_config_from_args(&args), StubEntry::buy_yes());
         push_klines_bootstrap(&mut warm, 70, 4140, 1_900_000);
         assert!(
             vol_warmup_cleared(&warm, args.vol_lookback_s),
@@ -4124,9 +4112,9 @@ mod tests {
 
     #[test]
     fn warmup_gate_blocks_entries_until_buffer_spans_lookback() {
-        // Buffer covering less than vol_lookback_s: stand down even with a
-        // huge edge on the books (the post-restart off-model regime).
-        let mut core = ShadowCore::new(cfg());
+        // Buffer covering less than vol_lookback_s: stand down even with an
+        // eager strategy (the post-restart off-model regime).
+        let mut core = ShadowCore::new(cfg(), StubEntry::buy_yes());
         let mut price = 99_000.0;
         for s in 1000..2000i64 {
             core.push_spot(s * 1_000, s * 1_000 + 25, price, 1.0, false);
@@ -4189,7 +4177,7 @@ mod tests {
 
     #[test]
     fn summary_with_no_data_is_all_none() {
-        let core = ShadowCore::new(cfg());
+        let core = ShadowCore::new(cfg(), Box::new(NoopStrategy));
         match core.summary(0, 0) {
             LogEvent::Summary {
                 probe_still_quoted_rate,
@@ -4213,245 +4201,12 @@ mod tests {
 
     #[test]
     fn spot_buffer_prunes_beyond_two_hours() {
-        let mut core = ShadowCore::new(cfg());
+        let mut core = ShadowCore::new(cfg(), Box::new(NoopStrategy));
         for s in 0..9000i64 {
             core.push_spot(s * 1_000, s * 1_000 + 5, 100_000.0, 1.0, false);
         }
         let history = core.spot_history();
         let first = history.samples().first().unwrap().ts_ns / NS;
         assert!(first >= 8999 - SPOT_KEEP_SECS && first > 0);
-    }
-
-    // Late-favourite lane
-
-    /// Lane-config core whose spot tape extends through the close (lane
-    /// decisions happen seconds before expiry). Plateaus at `pre_open`
-    /// through the 1800s open, then trades a 3bp/s wave around 100k.
-    fn lane_core(pre_open: f64) -> ShadowCore {
-        let mut core = ShadowCore::new(lane_cfg());
-        let mut price = 100_000.0;
-        for s in 0..2100i64 {
-            if s <= 1800 {
-                core.push_spot(s * 1_000, s * 1_000 + 25, pre_open, 1.0, false);
-            } else {
-                core.push_spot(s * 1_000, s * 1_000 + 25, price, 1.0, false);
-                price *= if s % 2 == 0 { 1.0003 } else { 0.9997 };
-            }
-        }
-        core
-    }
-
-    #[test]
-    fn lane_enters_only_inside_entry_window() {
-        let mut core = lane_core(99_000.0); // strike far below: up is favourite
-        core.upsert_market(market(None));
-        set_lane_books(&mut core, 0.94, 0.08);
-        // 200s before close: outside the 120s entry window.
-        assert!(core.decide(1900 * NS, false).is_empty(), "before the window");
-        // 4s before close: past the 5s lane deadline.
-        assert!(core.decide(2096 * NS, false).is_empty(), "inside the stop buffer");
-        // 110s before close: inside [close-120, close-5).
-        let events = core.decide(1990 * NS, false);
-        assert_eq!(events.len(), 1);
-        match &events[0] {
-            LogEvent::WouldEnter { side, lane, edge, touch_price, .. } => {
-                assert_eq!(*side, "up");
-                assert_eq!(*lane, "late_fav");
-                assert_eq!(*touch_price, 0.94);
-                assert!(*edge >= 0.02, "edge={edge}");
-            }
-            other => panic!("expected WouldEnter, got {other:?}"),
-        }
-        // Still one entry per market.
-        assert!(core.decide(1991 * NS, false).is_empty());
-        assert_eq!(core.stats.entries_total, 1);
-    }
-
-    #[test]
-    fn lane_picks_favourite_side_by_mid() {
-        // Strike far above spot: belief favours Down, and the Down book
-        // (mid 0.93) is the >= 0.85 favourite.
-        let mut core = lane_core(101_000.0);
-        core.upsert_market(market(None));
-        set_lane_books(&mut core, 0.08, 0.94);
-        let events = core.decide(1990 * NS, false);
-        assert_eq!(events.len(), 1);
-        match &events[0] {
-            LogEvent::WouldEnter { side, touch_price, .. } => {
-                assert_eq!(*side, "down");
-                assert_eq!(*touch_price, 0.94);
-            }
-            other => panic!("expected WouldEnter, got {other:?}"),
-        }
-
-        // Neither mid qualifies: no entry even with a huge belief edge.
-        let mut none = lane_core(99_000.0);
-        none.upsert_market(market(None));
-        set_lane_books(&mut none, 0.50, 0.52); // mids 0.49 / 0.51
-        assert!(none.decide(1990 * NS, false).is_empty(), "no favourite -> stand down");
-    }
-
-    #[test]
-    fn lane_sigma_floor_blocks_low_vol_entries() {
-        // Floor above the tape's sigma: the otherwise-valid entry is vetoed.
-        let mut core = lane_core(99_000.0);
-        core.cfg.min_entry_sigma_bps = 1e6;
-        core.upsert_market(market(None));
-        set_lane_books(&mut core, 0.94, 0.08);
-        assert!(core.decide(1990 * NS, false).is_empty(), "sigma floor must block");
-        // Identical setup at the validated 4bps floor enters.
-        let mut core = lane_core(99_000.0);
-        core.upsert_market(market(None));
-        set_lane_books(&mut core, 0.94, 0.08);
-        assert_eq!(core.decide(1990 * NS, false).len(), 1);
-    }
-
-    #[test]
-    fn lane_holds_to_expiry_without_would_exit() {
-        let mut core = lane_core(99_000.0);
-        core.upsert_market(market(None));
-        set_lane_books(&mut core, 0.94, 0.08);
-        let entry_ns = 1990 * NS;
-        assert_eq!(core.decide(entry_ns, false).len(), 1);
-        // Probe telemetry still fires at +latency.
-        let probe = core.poll_due(entry_ns + 150_000_000);
-        assert_eq!(probe.len(), 1);
-        assert!(matches!(probe[0], LogEvent::QuoteProbe { .. }));
-        // No WouldExit at the fade horizon, at close, or far past close.
-        assert!(core.poll_due(entry_ns + 30 * NS).is_empty());
-        assert!(core.poll_due(2100 * NS).is_empty());
-        assert!(core.poll_due(10_000 * NS).is_empty());
-        assert!(core.pending.is_empty(), "lane trade completes at probe");
-    }
-
-    #[test]
-    fn lane_entries_settle_via_resolution() {
-        let mut core = lane_core(99_000.0);
-        core.upsert_market(market(None));
-        set_lane_books(&mut core, 0.94, 0.08);
-        let entry_ns = 1990 * NS;
-        assert_eq!(core.decide(entry_ns, false).len(), 1);
-        // Probe walks the ladder: $50 against 50 sh @0.94 fills all 50.
-        assert_eq!(core.poll_due(entry_ns + 150_000_000).len(), 1);
-
-        let due = core.resolutions_due(2116 * NS);
-        assert_eq!(due.len(), 1);
-        let w = &due[0];
-        match core.apply_resolution(w.entry_id, true, 2200 * NS).unwrap() {
-            LogEvent::Resolution { won, settle_pnl_per_share, ladder_settle_pnl_usd, .. } => {
-                assert!(won);
-                assert!((settle_pnl_per_share - (1.0 - 0.94)).abs() < 1e-12);
-                // Hold-to-expiry: the FULL laddered position settles (no
-                // exit walk ever sold shares).
-                assert!((ladder_settle_pnl_usd.unwrap() - 50.0 * (1.0 - 0.94)).abs() < 1e-9);
-            }
-            other => panic!("expected Resolution, got {other:?}"),
-        }
-        assert!(core.resolutions_due(2400 * NS).is_empty());
-    }
-
-    // Fade re-entry (rearm)
-
-    #[test]
-    fn rearm_disabled_keeps_single_entry() {
-        // max_clips > 1 without rearm_edge stays single-entry…
-        let mut core = core_with_spot_strike(99_000.0);
-        core.cfg.max_clips = 2;
-        core.upsert_market(market(None));
-        set_books(&mut core, 0.50, 0.50);
-        assert_eq!(core.decide(1900 * NS, false).len(), 1);
-        set_books(&mut core, 0.99, 0.99);
-        assert!(core.decide(1901 * NS, false).is_empty());
-        set_books(&mut core, 0.50, 0.50);
-        assert!(core.decide(1902 * NS, false).is_empty());
-
-        // …and rearm_edge without extra clips does too.
-        let mut core = core_with_spot_strike(99_000.0);
-        core.cfg.rearm_edge = 0.08;
-        core.upsert_market(market(None));
-        set_books(&mut core, 0.50, 0.50);
-        assert_eq!(core.decide(1900 * NS, false).len(), 1);
-        set_books(&mut core, 0.99, 0.99);
-        assert!(core.decide(1901 * NS, false).is_empty());
-        set_books(&mut core, 0.50, 0.50);
-        assert!(core.decide(1902 * NS, false).is_empty());
-    }
-
-    #[test]
-    fn rearm_blocks_reentry_while_dislocation_persists() {
-        let mut core = core_with_spot_strike(99_000.0);
-        core.cfg.rearm_edge = 0.08;
-        core.cfg.max_clips = 2;
-        core.upsert_market(market(None));
-        set_books(&mut core, 0.50, 0.50);
-        assert_eq!(core.decide(1900 * NS, false).len(), 1);
-        for s in 1901..1950i64 {
-            assert!(core.decide(s * NS, false).is_empty(), "disarmed while edge persists");
-        }
-        assert_eq!(core.stats.entries_total, 1);
-    }
-
-    #[test]
-    fn rearm_allows_second_entry_after_dislocation_closes() {
-        let mut core = core_with_spot_strike(99_000.0);
-        core.cfg.rearm_edge = 0.08;
-        core.cfg.max_clips = 2;
-        core.upsert_market(market(None));
-        set_books(&mut core, 0.50, 0.50);
-        assert_eq!(core.decide(1900 * NS, false).len(), 1);
-        // Dislocation closes (both edges < 0.08): the re-arm pass itself
-        // must NOT enter, only a later crossing may.
-        set_books(&mut core, 0.99, 0.99);
-        assert!(core.decide(1901 * NS, false).is_empty());
-        // It reopens: second clip (after the 5s clip cooldown from decide_entry).
-        set_books(&mut core, 0.50, 0.50);
-        let again = core.decide(1906 * NS, false);
-        assert_eq!(again.len(), 1);
-        match &again[0] {
-            LogEvent::WouldEnter { clip, lane, .. } => {
-                assert_eq!(*clip, 2);
-                assert_eq!(*lane, "fade");
-            }
-            other => panic!("expected WouldEnter, got {other:?}"),
-        }
-        // max_clips respected: a third close/reopen cycle is refused.
-        set_books(&mut core, 0.99, 0.99);
-        assert!(core.decide(1907 * NS, false).is_empty());
-        set_books(&mut core, 0.50, 0.50);
-        assert!(core.decide(1912 * NS, false).is_empty());
-        assert_eq!(core.stats.entries_total, 2);
-    }
-
-    #[test]
-    fn rearm_same_side_entries_settle_independently() {
-        let mut core = core_with_spot_strike(99_000.0);
-        core.cfg.rearm_edge = 0.08;
-        core.cfg.max_clips = 2;
-        core.upsert_market(market(None));
-        set_books(&mut core, 0.50, 0.50);
-        assert_eq!(core.decide(1900 * NS, false).len(), 1);
-        set_books(&mut core, 0.99, 0.99);
-        assert!(core.decide(1901 * NS, false).is_empty());
-        // Second Up entry at a different touch so the settles differ (post cooldown).
-        set_books(&mut core, 0.60, 0.99);
-        assert_eq!(core.decide(1906 * NS, false).len(), 1);
-
-        let due = core.resolutions_due(2116 * NS);
-        assert_eq!(due.len(), 2);
-        assert!(due.iter().all(|w| w.side == Side::Up));
-        let first_id = due[0].entry_id;
-        let mut settles: Vec<f64> = due
-            .iter()
-            .map(|w| match core.apply_resolution(w.entry_id, true, 2200 * NS).unwrap() {
-                LogEvent::Resolution { settle_pnl_per_share, .. } => settle_pnl_per_share,
-                other => panic!("expected Resolution, got {other:?}"),
-            })
-            .collect();
-        settles.sort_by(f64::total_cmp);
-        assert!((settles[0] - 0.40).abs() < 1e-12, "1 - 0.60 leg");
-        assert!((settles[1] - 0.50).abs() < 1e-12, "1 - 0.50 leg");
-        // Each entry id settles exactly once.
-        assert!(core.apply_resolution(first_id, true, 2300 * NS).is_none());
-        assert!(core.resolutions_due(2400 * NS).is_empty());
     }
 }

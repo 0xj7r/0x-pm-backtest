@@ -59,11 +59,8 @@ prescribed_tokens() {
   # Flag tokens the repo says the process must be running with, one per line.
   case "$1" in
     pm-shadow-final|pm-shadow-final-b|pm-shadow-15m)
-      ( source "$SCRIPT_DIR/shadow_final_gated_flags.sh" >/dev/null 2>&1
-        printf '%s\n' "${SHADOW_FINAL_GATED_FLAGS[@]}" ) ;;
-    pm-shadow-recommended)
-      ( source "$SCRIPT_DIR/shadow_recommended_flags.sh" >/dev/null 2>&1
-        printf '%s\n' "${SHADOW_RECOMMENDED_FLAGS[@]}" ) ;;
+      ( source "$SCRIPT_DIR/shadow_flags.sh" >/dev/null 2>&1
+        printf '%s\n' "${SHADOW_FLAGS[@]}" ) ;;
     *)
       grep -m1 '^ExecStart=' "$UNIT_DIR/$1.service" 2>/dev/null \
         | cut -d= -f2- | tr ' ' '\n' | sed '/^$/d' ;;

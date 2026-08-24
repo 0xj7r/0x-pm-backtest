@@ -891,6 +891,11 @@ enum Cmd {
         /// Summary JSON output.
         #[arg(long)]
         out_summary: Option<PathBuf>,
+        /// Permit runs below the truthful taker-latency floor (750ms). The run
+        /// proceeds but is watermarked `"FANTASY"` in the summary and the
+        /// `FANTASY-` prefix is applied to output filenames.
+        #[arg(long, default_value_t = false)]
+        fantasy: bool,
     },
     /// Summarize a walk-forward `markets.jsonl` result file.
     SummarizeMarkets {
@@ -1544,6 +1549,7 @@ async fn main() -> Result<()> {
             local_cache_dir,
             out_markets,
             out_summary,
+            fantasy,
         } => {
             walk_forward(
                 markets,
@@ -1611,6 +1617,7 @@ async fn main() -> Result<()> {
                 local_cache_dir,
                 out_markets,
                 out_summary,
+                fantasy,
             )
             .await
         }
@@ -2213,6 +2220,7 @@ async fn walk_forward(
     local_cache_dir: Option<PathBuf>,
     out_markets: Option<PathBuf>,
     out_summary: Option<PathBuf>,
+    fantasy: bool,
 ) -> Result<()> {
     if let Some(path) = &profile {
         tracing::warn!(
@@ -2289,6 +2297,13 @@ async fn walk_forward(
         pm_backtest::accounting::validate_outcome_labels(&markets)?;
     }
 
+    // Truthful-latency floor: reject sub-floor runs unless --fantasy grants a
+    // watermarked override. Checked before any market is fetched or run.
+    let watermark = pm_backtest::validate::validate_latency(taker_latency_ms, fantasy)?;
+    // Fantasy runs watermark their output filenames so they are unmistakable.
+    let out_markets = out_markets.map(|p| apply_fantasy_prefix(&p, fantasy));
+    let out_summary = out_summary.map(|p| apply_fantasy_prefix(&p, fantasy));
+
     let strategies = parse_strategies(&strategies_csv)?;
 
     let store = if let Some(ref dir) = local_cache_dir {
@@ -2314,9 +2329,14 @@ async fn walk_forward(
         max_concurrent_fetches,
         replay_sample_ms,
         taker_latency_ms,
+        fantasy,
         replay_event_cache_dir,
         load_pm_trades,
         use_outcome_label,
+        // Fee/rebate accounting is unconditional: fills.rs always applies
+        // `taker_fee_bps` on taker fills and `maker_rebate_bps` on maker fills.
+        // There is no fees_enabled/off-switch bypassing the application code;
+        // the values below are the only fee knob (audit: no skip path found).
         maker_rebate_bps: 10.0,
         taker_fee_bps: 0.0,
         portfolio_mode,
@@ -2403,9 +2423,14 @@ async fn walk_forward(
 
     tracing::info!(markets = markets.len(), "starting walk-forward");
     let started = Instant::now();
-    let (results, summary) = run_walkforward(&store, &markets, &wf_cfg).await?;
+    let (results, mut summary) = run_walkforward(&store, &markets, &wf_cfg).await?;
     let elapsed = started.elapsed().as_secs_f64();
     tracing::info!(elapsed_s = elapsed, "walk-forward complete");
+
+    // Stamp the fantasy watermark onto the final summary (truthful runs: None,
+    // omitted from JSON via skip_serializing_if). Matches the value returned
+    // by validate_latency so the on-disk watermark is authoritative.
+    summary.watermark = watermark.clone();
 
     print_summary(&summary);
 
@@ -2446,6 +2471,26 @@ async fn walk_forward(
         }
     }
     Ok(())
+}
+
+/// Prefix the FILENAME (not the directory) of an output path with `FANTASY-`
+/// when fantasy mode is active, so watermarked runs are unmistakable on disk.
+fn apply_fantasy_prefix(path: &std::path::Path, fantasy: bool) -> std::path::PathBuf {
+    if !fantasy {
+        return path.to_path_buf();
+    }
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if file_name.is_empty() {
+        return path.to_path_buf();
+    }
+    let prefixed = format!("FANTASY-{file_name}");
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join(prefixed),
+        _ => std::path::PathBuf::from(prefixed),
+    }
 }
 
 fn parse_strategies(csv: &str) -> Result<Vec<StratId>> {

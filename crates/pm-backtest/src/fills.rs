@@ -1253,6 +1253,7 @@ pub(crate) fn submit_maker_order(
     total_rebates: &mut f64,
     maker_rebate_bps: f64,
     taker_fee_bps: f64,
+    taker_fee_curve_rate: f64,
     taker_slippage_bps: f64,
     taker_latency_ms: u64,
     pending_takers: &mut Vec<PendingTakerOrder>,
@@ -1285,6 +1286,7 @@ pub(crate) fn submit_maker_order(
             counters,
             fills,
             taker_fee_bps,
+            taker_fee_curve_rate,
             taker_slippage_bps,
             taker_latency_ms,
             pending_takers,
@@ -1336,6 +1338,7 @@ pub(crate) fn submit_taker_order(
     counters: &mut StrategyCounters,
     fills: &mut Vec<Fill>,
     taker_fee_bps: f64,
+    taker_fee_curve_rate: f64,
     taker_slippage_bps: f64,
     taker_latency_ms: u64,
     pending_takers: &mut Vec<PendingTakerOrder>,
@@ -1352,6 +1355,7 @@ pub(crate) fn submit_taker_order(
             counters,
             fills,
             taker_fee_bps,
+            taker_fee_curve_rate,
             taker_slippage_bps,
             model_context,
         );
@@ -1376,6 +1380,7 @@ pub(crate) fn process_pending_takers(
     counters: &mut StrategyCounters,
     fills: &mut Vec<Fill>,
     taker_fee_bps: f64,
+    taker_fee_curve_rate: f64,
     taker_slippage_bps: f64,
 ) {
     let mut i = 0;
@@ -1395,6 +1400,7 @@ pub(crate) fn process_pending_takers(
             counters,
             fills,
             taker_fee_bps,
+            taker_fee_curve_rate,
             taker_slippage_bps,
             pending.model_context,
         );
@@ -1413,6 +1419,7 @@ pub(crate) fn apply_taker_order(
     counters: &mut StrategyCounters,
     fills: &mut Vec<Fill>,
     taker_fee_bps: f64,
+    taker_fee_curve_rate: f64,
     taker_slippage_bps: f64,
     model_context: Option<FillModelContext>,
 ) {
@@ -1455,7 +1462,8 @@ pub(crate) fn apply_taker_order(
         return;
     }
     let notional = fillable_shares * fill_price as f64;
-    let fee = notional * taker_fee_bps / 10_000.0;
+    let fee = notional * taker_fee_bps / 10_000.0
+        + curve_fee(taker_fee_curve_rate, fill_price as f64, fillable_shares);
 
     match req.side {
         Side::BuyYes | Side::BuyNo => {
@@ -1593,6 +1601,14 @@ pub(crate) fn depth_weighted_fill(event: &ReplayEvent, req: &OrderRequest) -> Op
     Some(((notional / filled) as f32, filled))
 }
 
+/// Polymarket crypto taker fee curve: `rate * p * (1-p)` per share, charged
+/// on every taker fill at that leg's own fill price. Mirrors
+/// `pm_alpha::harness::replay::curve_fee` (the validated venue shape).
+/// 0 rate charges exactly 0.
+pub(crate) fn curve_fee(rate: f64, price: f64, shares: f64) -> f64 {
+    rate * price * (1.0 - price) * shares
+}
+
 pub(crate) fn order_requires_model_gate(tag: &str) -> bool {
     !tag.starts_with("br2_participation_") && !tag.starts_with("pmm_")
 }
@@ -1673,6 +1689,119 @@ mod tests {
     }
 
     #[test]
+    fn curve_fee_at_half_is_175_cents_per_hundred_shares() {
+        assert!((curve_fee(0.07, 0.5, 1.0) - 0.0175).abs() < 1e-15);
+        assert!((curve_fee(0.07, 0.5, 100.0) - 1.75).abs() < 1e-12);
+    }
+
+    #[test]
+    fn curve_fee_vanishes_at_extremes() {
+        assert_eq!(curve_fee(0.0, 0.52, 96.0), 0.0);
+        assert_eq!(curve_fee(0.07, 0.0, 1.0), 0.0);
+        assert_eq!(curve_fee(0.07, 1.0, 1.0), 0.0);
+        assert!(curve_fee(0.07, 0.01, 1.0) < 0.001);
+        assert!(curve_fee(0.07, 0.99, 1.0) < 0.001);
+    }
+
+    #[test]
+    fn taker_fill_charges_curve_fee_and_maker_does_not() {
+        // Taker leg: BuyOnFirstEvent sweeps the ask as a taker fill. With
+        // taker_fee_curve_rate set, the fill's recorded fee (rebate_usdc is
+        // negative fee for taker fills) must equal curve_fee at that price.
+        let events = vec![
+            evt(300_000_000_000, 0.50, 0.51, 200.0),
+            evt(400_000_000_000, 0.50, 0.51, 200.0),
+        ];
+        let cfg = RunnerConfig {
+            starting_cash_usdc: 100.0,
+            market_open_ns: 300_000_000_000,
+            market_close_ns: 600_000_000_000,
+            resolved_yes: Some(true),
+            portfolio_limits: PortfolioLimits {
+                max_clip_usdc: 20.0,
+                ..Default::default()
+            },
+            taker_fee_curve_rate: 0.07,
+            ..Default::default()
+        };
+        let mut strat = BuyOnFirstEvent::new(10.0);
+        let rep = run_backtest(
+            &events,
+            &SpotHistory::default(),
+            &pm_types::TradeHistory::default(),
+            &mut strat,
+            &cfg,
+        )
+        .unwrap();
+        assert_eq!(rep.counters.orders_filled_taker, 1);
+        let fill = rep.fills.first().expect("expected taker fill");
+        assert!(!fill.maker);
+        let expected_fee = curve_fee(0.07, fill.price as f64, fill.shares);
+        assert!(expected_fee > 0.0);
+        assert!((fill.rebate_usdc - (-expected_fee)).abs() < 1e-9);
+
+        // Maker leg: same resting-order-crosses scenario as
+        // `maker_buy_yes_fills_when_book_crosses_down`, but with the curve
+        // rate set. Maker fills are untouched by taker fee accounting: the
+        // rebate is the ONLY cash adjustment on the fill (positive, not a
+        // reduced-by-curve-fee amount).
+        struct OneShot;
+        impl Strategy for OneShot {
+            fn on_event(
+                &mut self,
+                _e: &ReplayEvent,
+                ctx: &Ctx,
+                _spot: &SpotHistory,
+                _trades: &TradeHistory,
+            ) -> StrategyOutput {
+                if ctx.events_seen > 1 {
+                    return StrategyOutput::hold();
+                }
+                StrategyOutput::one(OrderRequest {
+                    side: Side::BuyYes,
+                    shares: 10.0,
+                    max_depth: 1,
+                    limit_price: Some(0.45),
+                    tag: "test_maker_buy",
+                })
+            }
+        }
+        let maker_events = vec![
+            evt(0, 0.50, 0.51, 200.0),
+            evt(500_000_000, 0.46, 0.47, 200.0),
+            evt(1_000_000_000, 0.44, 0.45, 200.0), // cross
+            evt(2_000_000_000, 0.30, 0.31, 200.0),
+        ];
+        let maker_cfg = RunnerConfig {
+            starting_cash_usdc: 100.0,
+            resolved_yes: Some(true),
+            portfolio_limits: PortfolioLimits {
+                max_clip_usdc: 10.0,
+                ..Default::default()
+            },
+            maker_rebate_bps: 10.0,
+            taker_fee_curve_rate: 0.07,
+            ..Default::default()
+        };
+        let mut maker_strat = OneShot;
+        let maker_rep = run_backtest(
+            &maker_events,
+            &SpotHistory::default(),
+            &pm_types::TradeHistory::default(),
+            &mut maker_strat,
+            &maker_cfg,
+        )
+        .unwrap();
+        assert_eq!(maker_rep.counters.orders_filled_maker, 1);
+        let maker_fill = maker_rep.fills.first().expect("expected maker fill");
+        assert!(maker_fill.maker);
+        // 10 sh @ 0.45 = 4.50 notional; rebate 10bp = 0.0045. Identical to the
+        // no-curve-rate case: the curve rate never applies to a maker fill.
+        assert!((maker_fill.rebate_usdc - 0.0045).abs() < 1e-9);
+        assert!((maker_rep.pnl_usdc - 5.5045).abs() < 1e-6, "pnl {}", maker_rep.pnl_usdc);
+    }
+
+    #[test]
     fn taker_buy_yes_can_sweep_deeper_book_levels() {
         let mut event = evt(0, 0.49, 0.50, 5.0);
         event.asks[1] = BookLevel {
@@ -1720,6 +1849,7 @@ mod tests {
             &mut shallow_fills,
             0.0,
             0.0,
+            0.0,
             None,
         );
 
@@ -1738,6 +1868,7 @@ mod tests {
             &mut deep_portfolio,
             &mut deep_counters,
             &mut deep_fills,
+            0.0,
             0.0,
             0.0,
             None,
@@ -1781,6 +1912,7 @@ mod tests {
             &mut portfolio,
             &mut counters,
             &mut fills,
+            0.0,
             0.0,
             0.0,
             None,
@@ -1952,6 +2084,7 @@ mod tests {
             &mut fills,
             0.0,
             0.0,
+            0.0,
             Some(context),
         );
 
@@ -2010,6 +2143,7 @@ mod tests {
             &mut fills,
             0.0,
             0.0,
+            0.0,
             Some(context),
         );
 
@@ -2035,6 +2169,11 @@ mod tests {
                 max_clip_usdc: 20.0,
                 ..Default::default()
             },
+            // This test asserts the full-loss settlement invariant, not fee
+            // math; zero the curve rate so the expected P&L is exactly the
+            // notional paid (fee behavior is covered by
+            // `taker_fill_charges_curve_fee_and_maker_does_not`).
+            taker_fee_curve_rate: 0.0,
             ..Default::default()
         };
         let mut strat = BuyOnFirstEvent::new(10.0);
@@ -2822,6 +2961,11 @@ mod tests {
             decision_log_jsonl: Some(log_path.clone()),
             decision_log_every_n: 1,
             taker_slippage_bps: 20.0,
+            // This test asserts cash-delta/notional parity for slippage
+            // tracking, not fee math; zero the curve rate so the identity
+            // holds without a fee term (fee behavior is covered by
+            // `taker_fill_charges_curve_fee_and_maker_does_not`).
+            taker_fee_curve_rate: 0.0,
             ..Default::default()
         };
 

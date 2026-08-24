@@ -896,6 +896,12 @@ enum Cmd {
         /// `FANTASY-` prefix is applied to output filenames.
         #[arg(long, default_value_t = false)]
         fantasy: bool,
+        /// Taker fee curve rate for `rate * p * (1-p)` per share, charged on
+        /// every taker fill (Polymarket's crypto taker fee shape). Default
+        /// 0.07 is the validated venue rate; a rate below it requires
+        /// --fantasy and watermarks the run.
+        #[arg(long, default_value = "0.07")]
+        fee_curve_rate: f64,
         /// Run the walk-forward N times at deterministically seeded perturbed
         /// taker latencies and report the P&L spread (p10/p50/p90) instead of a
         /// point estimate. 0 (default) runs once. Runs are serial: a
@@ -1594,6 +1600,7 @@ async fn main() -> Result<()> {
             out_markets,
             out_summary,
             fantasy,
+            fee_curve_rate,
             jitter,
             jitter_latency_spread_ms,
             jitter_seed,
@@ -1671,6 +1678,7 @@ async fn main() -> Result<()> {
                 out_markets,
                 out_summary,
                 fantasy,
+                fee_curve_rate,
                 jitter,
                 jitter_latency_spread_ms,
                 jitter_seed,
@@ -2283,6 +2291,7 @@ async fn walk_forward(
     out_markets: Option<PathBuf>,
     out_summary: Option<PathBuf>,
     fantasy: bool,
+    fee_curve_rate: f64,
     jitter: usize,
     jitter_latency_spread_ms: u64,
     jitter_seed: u64,
@@ -2383,6 +2392,10 @@ async fn walk_forward(
         fantasy,
         strictest_close,
     )?;
+    // Taker fee curve rate floor: a rate below the canonical venue rate
+    // (0.07) is cheaper-than-real and rejected unless --fantasy watermarks it.
+    let fee_rate_watermark =
+        pm_backtest::validate::validate_fee_rate(fee_curve_rate, fantasy)?;
     // Mixed price-basis refusal: a Binance spot tape against an Official strike
     // compares prices on different bases (see the basis doctrine in
     // docs/PROD.md) and is rejected unless --allow-mixed-basis watermarks it.
@@ -2397,9 +2410,18 @@ async fn walk_forward(
     };
     let basis_watermark =
         pm_backtest::config::validate_basis(SpotSource::Binance, strike_source, allow_mixed_basis)?;
-    let watermark = match (latency_watermark, basis_watermark) {
-        (Some(a), Some(b)) => Some(format!("{a},{b}")),
-        (a, b) => a.or(b),
+    // Dedup: --fantasy alone can make both the latency and fee-rate
+    // validators return "FANTASY" independently; collapse consecutive
+    // duplicates so the watermark reads "FANTASY" once, not "FANTASY,FANTASY".
+    let mut watermark_parts: Vec<String> = [latency_watermark, fee_rate_watermark, basis_watermark]
+        .into_iter()
+        .flatten()
+        .collect();
+    watermark_parts.dedup();
+    let watermark = if watermark_parts.is_empty() {
+        None
+    } else {
+        Some(watermark_parts.join(","))
     };
     // Fantasy runs watermark their output filenames so they are unmistakable.
     let out_markets = out_markets.map(|p| apply_fantasy_prefix(&p, fantasy));
@@ -2443,11 +2465,13 @@ async fn walk_forward(
         load_pm_trades,
         use_outcome_label,
         // Fee/rebate accounting is unconditional: fills.rs always applies
-        // `taker_fee_bps` on taker fills and `maker_rebate_bps` on maker fills.
-        // There is no fees_enabled/off-switch bypassing the application code;
-        // the values below are the only fee knob (audit: no skip path found).
+        // `taker_fee_bps` and `taker_fee_curve_rate` on taker fills and
+        // `maker_rebate_bps` on maker fills. There is no fees_enabled/off-
+        // switch bypassing the application code; the values below are the
+        // only fee knobs (audit: no skip path found).
         maker_rebate_bps: 10.0,
         taker_fee_bps: 0.0,
+        taker_fee_curve_rate: fee_curve_rate,
         portfolio_mode,
         clip_fraction_of_equity,
         clip_drawdown_soft_pct,
@@ -2875,6 +2899,11 @@ async fn run_market_backtest(
         snapshot_every_n: 200,
         maker_rebate_bps: 10.0,
         taker_fee_bps: 0.0,
+        // Out of scope for this task: run_market_backtest backs Paper/Live/
+        // BacktestS3, not the walk-forward path this constraint closes.
+        // Left at 0.0 (unchanged pre-existing behavior) rather than silently
+        // changing execution economics for live/paper trading.
+        taker_fee_curve_rate: 0.0,
         max_inventory_imbalance_shares: 1.5,
         taker_slippage_bps: 15.0,
         taker_latency_ms: 0,

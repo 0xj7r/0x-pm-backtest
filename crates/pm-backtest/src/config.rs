@@ -23,6 +23,11 @@ pub struct RunnerConfig {
     pub maker_rebate_bps: f64,
     /// Taker fee (bps). Default 0; configure per market regime.
     pub taker_fee_bps: f64,
+    /// Taker fee curve rate for `rate * p * (1-p)` per share, charged on every
+    /// taker fill at that leg's fill price (Polymarket's crypto taker fee
+    /// shape). Default 0.07 is the validated venue rate; this is IN ADDITION
+    /// to `taker_fee_bps`, which remains 0.0 by default.
+    pub taker_fee_curve_rate: f64,
     /// If |yes_shares - no_shares| exceeds this AFTER a maker fill, cancel
     /// resting orders on the heavy side. Critical safety for paired-MM
     /// strategies: without this, a one-sided book trend can run inventory
@@ -109,6 +114,7 @@ impl Default for RunnerConfig {
             snapshot_every_n: 200,
             maker_rebate_bps: 0.0,
             taker_fee_bps: 0.0,
+            taker_fee_curve_rate: 0.07,
             max_inventory_imbalance_shares: f64::INFINITY,
             taker_slippage_bps: 0.0,
             taker_latency_ms: 0,
@@ -304,6 +310,11 @@ pub struct WalkForwardConfig {
     pub use_outcome_label: bool,
     pub maker_rebate_bps: f64,
     pub taker_fee_bps: f64,
+    /// Taker fee curve rate for `rate * p * (1-p)` per share (Polymarket's
+    /// crypto taker fee shape), charged on every taker fill in addition to
+    /// `taker_fee_bps`. Default 0.07 is the validated venue rate; a rate
+    /// below 0.07 requires `fantasy` (see `validate::validate_fee_rate`).
+    pub taker_fee_curve_rate: f64,
     pub taker_latency_ms: u64,
     /// Explicit grant to run below `TRUTHFUL_LATENCY_FLOOR_MS`. Fantasy runs
     /// proceed but are watermarked (`"FANTASY"`) in the summary and output
@@ -480,6 +491,7 @@ impl Default for WalkForwardConfig {
             use_outcome_label: false,
             maker_rebate_bps: 0.0,
             taker_fee_bps: 0.0,
+            taker_fee_curve_rate: 0.07,
             taker_latency_ms: 0,
             fantasy: false,
             jitter: 0,

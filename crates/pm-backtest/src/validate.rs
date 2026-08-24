@@ -11,6 +11,32 @@ use crate::settlement::venue_taker_delay_ms;
 /// achievable, so the run is rejected unless `--fantasy` opts in.
 pub const TRUTHFUL_LATENCY_FLOOR_MS: u64 = 750;
 
+/// Validated Polymarket crypto taker fee curve rate: `rate * p * (1-p)` per
+/// share. Below this, the engine is assuming a cheaper-than-real fee
+/// schedule, so the run is rejected unless `--fantasy` opts in.
+pub const CANONICAL_TAKER_FEE_CURVE_RATE: f64 = 0.07;
+
+/// Validate the taker fee curve rate against the canonical venue rate.
+///
+/// Returns `Ok(None)` for truthful runs (rate at or above the canonical rate
+/// without a fantasy grant). Returns `Ok(Some("FANTASY"))` when fantasy is
+/// explicitly granted (the run proceeds but is watermarked). Returns an
+/// `Err` mentioning `--fantasy` when the rate is sub-canonical and no grant
+/// was given.
+pub fn validate_fee_rate(rate: f64, fantasy: bool) -> Result<Option<String>> {
+    if fantasy {
+        return Ok(Some("FANTASY".to_string()));
+    }
+    if rate >= CANONICAL_TAKER_FEE_CURVE_RATE {
+        return Ok(None);
+    }
+    Err(anyhow!(
+        "taker fee curve rate {rate} is below the canonical venue rate of \
+         {CANONICAL_TAKER_FEE_CURVE_RATE}; realistic fee costs cannot be modeled that cheap. \
+         Pass --fantasy to override and watermark the run as fantasy."
+    ))
+}
+
 /// Validate the modeled taker latency against the truthful floor.
 ///
 /// Returns `Ok(None)` for truthful runs (latency at or above the floor without
@@ -103,5 +129,21 @@ mod tests {
         );
         // A truthful latency at/above the floor passes unwatermarked.
         assert_eq!(validate_latency_for_era(1250, false, aug_20).unwrap(), None);
+    }
+
+    #[test]
+    fn sub_canonical_fee_rate_requires_fantasy() {
+        let err = validate_fee_rate(0.0, false).unwrap_err();
+        assert!(err.to_string().contains("--fantasy"));
+        assert_eq!(
+            validate_fee_rate(0.0, true).unwrap().as_deref(),
+            Some("FANTASY")
+        );
+    }
+
+    #[test]
+    fn canonical_fee_rate_needs_no_flag_and_no_watermark() {
+        assert_eq!(validate_fee_rate(0.07, false).unwrap(), None);
+        assert_eq!(validate_fee_rate(0.10, false).unwrap(), None);
     }
 }

@@ -17,18 +17,29 @@ test name).
 
 ## 2. Fee-net always
 - Rule: fee/rebate accounting applies unconditionally on every fill; no
-  `fees_enabled`/skip-fee flag exists in the fill path.
+  `fees_enabled`/skip-fee flag exists in the fill path. The validated taker
+  fee curve (`0.07*p*(1-p)` per share, Polymarket's crypto taker fee shape)
+  is charged on every taker fill by default; a sub-canonical rate requires
+  `--fantasy` and watermarks the run.
 - Evidence: at-touch, no-fee accounting on the June executor window
   overstated realized P&L by ~$300 (~1.7% of notional) versus fee-corrected
   accounting (`docs/fill-model-calibration-2026-07.md`).
-- Enforcement: `crates/pm-backtest/src/fills.rs` applies `taker_fee_bps` on
-  every fill, no bypass path (audited, comment at
-  `crates/pm-app/src/main.rs:2447`, commit `3d2c2ab7`). Open gap: the
-  validated `0.07*p*(1-p)` curve
-  (`crates/pm-alpha/src/harness/replay.rs::curve_fee`, test
-  `fee_curve_math_at_half_is_175_cents_per_hundred_shares`) is not yet wired
-  into this path; `taker_fee_bps` is hardcoded `0.0` here and no pm-backtest
-  test covers non-bypassability directly. Tracked, not hidden.
+- Enforcement: `crates/pm-backtest/src/fills.rs` applies `taker_fee_bps` AND
+  `taker_fee_curve_rate` (via `curve_fee`) on every taker fill, no bypass
+  path (audited, comment at `crates/pm-app/src/main.rs:2458`). Maker fills
+  are unaffected (rebate only). Default `taker_fee_curve_rate` is `0.07` in
+  both `RunnerConfig` and `WalkForwardConfig`
+  (`crates/pm-backtest/src/config.rs`), serialized into the config
+  fingerprint. A sub-canonical rate is rejected unless `--fantasy` grants a
+  watermarked override:
+  `crates/pm-backtest/src/validate.rs::validate_fee_rate`, wired into
+  `walk-forward` via `--fee-curve-rate` (default `0.07`) next to the latency
+  floor check in `crates/pm-app/src/main.rs`. Closed 2026-08-24 (golden
+  hash re-recorded; see `tests/golden/README.md`). Tests:
+  `curve_fee_at_half_is_175_cents_per_hundred_shares`,
+  `curve_fee_vanishes_at_extremes`,
+  `taker_fill_charges_curve_fee_and_maker_does_not`,
+  `sub_canonical_fee_rate_requires_fantasy` (all `crates/pm-backtest/src`).
 
 ## 3. Observer-noise stress
 - Rule: the scorecard headline is the spread over N jittered replays

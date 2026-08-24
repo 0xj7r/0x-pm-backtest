@@ -69,8 +69,50 @@ normalization above, both runs produced the same normalized sha256:
 25bcddc6d618c7ac81d6c1e0215da6e5e9153ed26464fe60d9a2908c5538a10d
 ```
 
-`tests/golden/day-2026-06-25.sha256` records this hash as the committed
+`tests/golden/day-2026-06-25.sha256` recorded this hash as the committed
 golden value; `check` printed `GOLDEN: IDENTICAL` against it.
+
+## Hash re-recorded 2026-08-24: taker fee curve became default-on
+
+Constraint 2 (`docs/CONSTRAINTS.md`, "Fee-net always") documented an open
+gap: the validated Polymarket crypto taker fee curve
+(`0.07 * p * (1-p)` per share, charged on every taker fill) existed only as
+an opt-in in `pm-alpha`'s research harness; `pm-backtest`'s
+`taker_fee_bps` was 0.0 and no curve fee was charged at all, so a default
+engine run understated real trading costs. Closing that gap is an
+INTENTIONAL behavior change to the walk-forward engine's fill accounting
+(`crates/pm-backtest/src/fills.rs`, `crates/pm-backtest/src/config.rs`),
+so the golden hash changed and was re-recorded.
+
+`WalkForwardConfig`/`RunnerConfig` gained `taker_fee_curve_rate: f64`
+(default `0.07`, serialized into the config fingerprint). Every taker fill
+now charges `curve_fee(rate, fill_price, shares)` in addition to the
+existing `taker_fee_bps` (unchanged at 0.0). Maker fills are unaffected
+(rebate only). `walk-forward` exposes `--fee-curve-rate` (default `0.07`);
+a rate below the canonical `0.07` requires `--fantasy` and watermarks the
+run (`crates/pm-backtest/src/validate.rs::validate_fee_rate`). The golden
+harness does not pass `--fee-curve-rate`, so it now runs at the new
+default of `0.07` rather than the previous implicit `0.0`.
+
+Audit trail (both hashes are `tests/golden/day-2026-06-25.normalized.json`
+sha256 values for the identical 2026-06-25 replay, same manifest and CLI
+flags):
+
+| | hash | overall `total_pnl` |
+|---|---|---|
+| old (no taker fee curve, `taker_fee_curve_rate` implicitly 0.0) | `25bcddc6d618c7ac81d6c1e0215da6e5e9153ed26464fe60d9a2908c5538a10d` | -22.4948 |
+| new (taker fee curve default-on, rate 0.07) | `41313410e8a700ca40dd467b0fb62d767b202fda536f2af66b084b9d94f1f83a` | -25.2898 |
+
+The old-hash P&L above was reproduced for this audit by rerunning the
+golden replay with `--fee-curve-rate 0.0 --fantasy` (bypassing the new
+sub-canonical-rate floor) against the same manifest and config; it matches
+what the pre-change engine produced. The fee drag over the day's 5 taker
+fills is -$2.80 (about $0.56/fill on notionals sized against the $50 max
+clip), consistent with `0.07 * p * (1-p) * shares` at realistic fill
+prices and share counts: a real but proportionate cost, not a wipeout.
+
+`tests/golden/day-2026-06-25.sha256` now records the new hash;
+`check` prints `GOLDEN: IDENTICAL` against it.
 
 ## Engine is read-only for this harness
 

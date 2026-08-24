@@ -61,17 +61,16 @@ additional stripping was needed for those categories.
 
 ## Determinism proof
 
-The replay was run twice back-to-back with identical inputs and config.
-After the normalization above, the two runs' hashes were compared and found
-identical, confirming the normalized output is deterministic:
+The replay was run twice back-to-back with identical inputs and config
+(record on 2026-08-24, then an independent full `check` re-run). After the
+normalization above, both runs produced the same normalized sha256:
 
 ```
-run 1 (normalized) sha256: <see task-1-report.md for exact hashes>
-run 2 (normalized) sha256: <see task-1-report.md for exact hashes>
+25bcddc6d618c7ac81d6c1e0215da6e5e9153ed26464fe60d9a2908c5538a10d
 ```
 
-Both hashes match. `tests/golden/day-2026-06-25.sha256` records this hash as
-the committed golden value.
+`tests/golden/day-2026-06-25.sha256` records this hash as the committed
+golden value; `check` printed `GOLDEN: IDENTICAL` against it.
 
 ## Engine is read-only for this harness
 

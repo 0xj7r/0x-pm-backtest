@@ -15,10 +15,11 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use crate::discovery::{MarketHandle, spot_symbol_for_market};
-use crate::walkforward::{
-    SpotCache, load_replay_events_for_market, market_close_ns, market_duration_secs_from_slug,
-    market_open_ns, outcome_label_resolved_yes,
+use pm_backtest::accounting::{
+    market_close_ns, market_duration_secs_from_slug, market_open_ns, outcome_label_resolved_yes,
 };
+use pm_backtest::engine::load_replay_events_for_market;
+use pm_backtest::portfolio::SpotCache;
 
 #[derive(Debug, Clone)]
 pub struct AlphaArgs {
@@ -949,7 +950,7 @@ pub async fn run_alpha(store: &TelonexStore, args: AlphaArgs) -> Result<()> {
                 .clone()
                 .unwrap_or_else(|| PathBuf::from("data/cache"));
             Some(std::sync::Arc::new(
-                crate::perp::load_perp_state(store, &cache_root, symbol, &dates).await?,
+                pm_backtest::portfolio::load_perp_state(store, &cache_root, symbol, &dates).await?,
             ))
         }
         None => None,

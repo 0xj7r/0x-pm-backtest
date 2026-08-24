@@ -1,3 +1,9 @@
+//! Post-hoc summarization of a `market-results.jsonl` file into a
+//! `ResultSummary` report. Separate submodule (rather than flattened into
+//! `scorecard`) because it has its own module-private `FillTagAccumulator`
+//! with a different field set than `scorecard`'s own; see
+//! `docs/superpowers/plans/2026-08-23-phase2-extraction-map.md` (tranche 5).
+
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{BufRead, BufReader};

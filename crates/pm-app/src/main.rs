@@ -20,21 +20,18 @@ use std::time::Instant;
 
 mod alpha;
 mod discovery;
-mod perp;
 use pm_shadow as shadow;
 mod prep_cache;
-mod result_summary;
-mod runner;
-mod walkforward;
 
-use result_summary::{print_result_summary, summarize_markets_jsonl, write_result_summary_json};
-use runner::{RunnerConfig, pretty_print, run_backtest};
+use pm_backtest::accounting::pretty_print;
+use pm_backtest::config::{RunnerConfig, WalkForwardConfig};
+use pm_backtest::engine::{StratId, run_backtest, run_walkforward};
+use pm_backtest::scorecard::{
+    print_result_summary, print_summary, summarize_markets_jsonl, write_market_results_jsonl_atomic,
+    write_result_summary_json, write_summary_json_atomic,
+};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
-use walkforward::{
-    StratId, WalkForwardConfig, print_summary, run_walkforward, write_market_results_jsonl_atomic,
-    write_summary_json_atomic,
-};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -2289,7 +2286,7 @@ async fn walk_forward(
         ));
     }
     if use_outcome_label {
-        crate::walkforward::validate_outcome_labels(&markets)?;
+        pm_backtest::accounting::validate_outcome_labels(&markets)?;
     }
 
     let strategies = parse_strategies(&strategies_csv)?;

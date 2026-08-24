@@ -17,6 +17,12 @@ use crate::config::WalkForwardConfig;
 use crate::engine::{MetaSampleLimits, StratId, evaluate_meta_calibration, filter_meta_samples_for_training, market_balanced_meta_samples};
 use crate::portfolio::{SharedRunConfig, VolatilityBand};
 
+mod summary;
+pub use summary::{
+    DailyResultSummary, FillTagSummary, ResultSummary, print_result_summary,
+    summarize_markets_jsonl, write_result_summary_json,
+};
+
 #[derive(Debug, Clone, Serialize)]
 pub struct WalkForwardSummary {
     pub markets_attempted: usize,

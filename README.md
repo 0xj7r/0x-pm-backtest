@@ -18,10 +18,10 @@ crates/
 ├── pm-risk/              # Kelly/fractional sizing, PortfolioState (drawdown, daily/per-market caps)
 ├── pm-telonex-loader/    # S3/local-cache streaming loaders (book, trades, onchain, Binance); nautilus-free
 ├── pm-model/             # canonical 4-score model + online meta-calibrator (engine research layer)
-├── pm-alpha/             # belief (BSM digital), vol, fee curve, ExoState features, decide_entry SSOT
+├── pm-alpha/             # belief (BSM digital), vol, fee curve, ExoState features, decide_entry SSOT, config fingerprint
 ├── pm-strategy/          # Strategy trait + NoopStrategy + the test-only golden fixture
 ├── pm-backtest/          # the engine: fills, accounting, walk-forward, portfolio, scorecard
-├── pm-shadow/            # live-twin log-only engine (JSONL stream, executor tail seam)
+├── pm-shadow/            # live twin: runs a Strategy log-only (JSONL stream, executor tail seam)
 └── pm-app/               # CLI: shadow | alpha | walk-forward | discover-* | prep-cache | summarize-markets
 ```
 

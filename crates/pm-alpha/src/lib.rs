@@ -17,6 +17,7 @@ pub mod equivalence;
 mod decide_construction_parity;
 pub mod fair_value;
 pub mod fair_value_twap;
+pub mod fingerprint;
 pub mod harness;
 pub mod model;
 pub mod regime;

@@ -40,6 +40,15 @@ live cycle. What `--strategies` accepts:
 
 Neither is alpha. The fixture loses money on the pinned day, on purpose.
 
+The live twin (`pm-app shadow`) drives the same trait: `ShadowCore` takes a
+`Box<dyn Strategy + Send>`, hands each open market's book to `on_event` as a
+`ReplayEvent`, and logs every returned buy as a WOULD_ENTER it then probes and
+settles. Its flags are engine concerns only (feeds, cadence, belief model,
+probe timing); thresholds, gates and sizing belong to a strategy's own config.
+`--strategy` accepts `noop` alone, so today's stream is entry-free by
+construction. The `fixture` is refused there on purpose: its one-shot latch
+keys off a replayed tape and would mean nothing against live feeds.
+
 ## Quant signals (SSOT)
 
 Belief: BSM binary digital \(\hat{p}_{\text{up}} = \Phi(\ln(S/K) / (\sigma_{\text{bar}}\sqrt{\tau}))\)

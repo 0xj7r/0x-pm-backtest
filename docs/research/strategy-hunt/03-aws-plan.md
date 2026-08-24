@@ -4,7 +4,7 @@ Date: 2026-06-16
 Bankroll: **$1,000**  
 Validation window: **2026-02-12 → 2026-05-20** (Feb–May; HOLDOUT 2026-05-19+ stays sealed)  
 Credentials: `AWS_PROFILE=visumlabs`  
-Runbook: [`docs/aws-backtest-runbook.md`](../../aws-backtest-runbook.md)
+Runbook: archived 2026-08-24, see [`docs/archive/2026-07/aws-backtest-runbook.md`](../../archive/2026-07/aws-backtest-runbook.md) (historical record; the cloud-runner design that replaces it is in the framework-reset spec)
 
 ## Scorecard status (VERIFY+TUNE not complete)
 

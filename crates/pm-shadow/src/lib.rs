@@ -22,7 +22,7 @@ use anyhow::{Context, Result};
 use pm_alpha::{
     calibrator::{exo_features, EXO_FEATURES},
     dir_features, harness::spot_ret_bps, regime, AlphaModel, AlphaModelConfig, ExoState,
-    MarketMeta, PerpState, Token, VolEstimator, DIR_FEATURES,
+    fingerprint::config_fingerprint, MarketMeta, PerpState, Token, VolEstimator, DIR_FEATURES,
 };
 use pm_strategy::{
     regime::WhipsawRiskSnapshot, Ctx, NoopStrategy, Side as StratSide, Strategy,
@@ -729,47 +729,6 @@ pub struct ShadowConfig {
     pub latency_probe_ms: u64,
     pub perp_price_weight: f64,
     pub vol_estimator: VolEstimator,
-}
-
-/// 16-hex sha256 prefix of the canonical (sorted-keys) JSON of a resolved
-/// config. Mirrors `pm_backtest::fingerprint::config_fingerprint`; duplicated
-/// here because pm-shadow intentionally does not depend on pm-backtest.
-fn config_fingerprint<T: serde::Serialize>(cfg: &T) -> String {
-    fn sort_value(value: &mut serde_json::Value) {
-        match value {
-            serde_json::Value::Object(map) => {
-                let mut entries: Vec<(String, serde_json::Value)> =
-                    map.iter_mut().map(|(k, v)| (k.clone(), v.take())).collect();
-                for (_, v) in &mut entries {
-                    sort_value(v);
-                }
-                entries.sort_by(|a, b| a.0.cmp(&b.0));
-                map.clear();
-                for (k, v) in entries {
-                    map.insert(k, v);
-                }
-            }
-            serde_json::Value::Array(items) => {
-                for item in items {
-                    sort_value(item);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let mut value = serde_json::to_value(cfg).unwrap_or(serde_json::Value::Null);
-    sort_value(&mut value);
-    let canon = serde_json::to_string(&value).unwrap_or_default();
-    let mut hasher = sha2::Sha256::new();
-    use sha2::Digest;
-    hasher.update(canon.as_bytes());
-    let digest = hasher.finalize();
-    digest
-        .iter()
-        .map(|b| format!("{:02x}", b))
-        .collect::<String>()[..16]
-        .to_string()
 }
 
 /// Build `ShadowConfig` from CLI/runtime args.

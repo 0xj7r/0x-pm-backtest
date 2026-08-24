@@ -11,7 +11,15 @@ pub mod accounting;
 pub mod config;
 pub mod engine;
 pub mod fills;
-pub mod fingerprint;
+/// Config fingerprinting, re-exported from pm-alpha.
+///
+/// The implementation lives in `pm_alpha::fingerprint` because pm-shadow needs
+/// the same function and depends on pm-alpha but deliberately not on
+/// pm-backtest. This module keeps `pm_backtest::fingerprint::config_fingerprint`
+/// working for the engine and scorecard call sites.
+pub mod fingerprint {
+    pub use pm_alpha::fingerprint::config_fingerprint;
+}
 pub mod jitter;
 pub mod portfolio;
 pub mod scorecard;

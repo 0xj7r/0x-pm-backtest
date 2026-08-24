@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Archive-era analyzer: post-hoc over results produced by strategies deleted
+# in the framework reset (hence the bonereaper_v2 --strategy default). Kept to
+# re-read those archived runs, not rewritten for the current engine.
 """Run the standard BTC5m post-fill diagnostic pack."""
 
 from __future__ import annotations

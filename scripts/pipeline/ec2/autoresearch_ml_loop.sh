@@ -2,6 +2,13 @@
 # Minimal autoresearch harness for pm-app ML calibration experiments.
 # Defaults to dry-run. Use --execute to create detached worktrees and run
 # candidate commands.
+#
+# The gating itself is strategy-agnostic: it compares log-loss and Brier
+# between two summary JSONs, so the lanes are live even though no deployable
+# strategy exists. --strategy only selects which per-strategy block of the
+# summary to read; it defaults to `noop` because that is the only strategy
+# `pm-app walk-forward` ships (the previous default, bonereaper_v2, was
+# deleted in the framework reset).
 set -euo pipefail
 
 usage() {
@@ -84,9 +91,9 @@ Autoresearch loop:
   7. PASS leaves the worktree for review; FAIL removes the worktree.
 
 Useful commands:
-  scripts/pipeline/ec2/autoresearch_ml_loop.sh gate /tmp/base.json /tmp/candidate.json bonereaper_v2
-  scripts/pipeline/ec2/autoresearch_ml_loop.sh run --budget 3 --baseline /tmp/base.json --commands /tmp/candidates.txt --strategy bonereaper_v2
-  scripts/pipeline/ec2/autoresearch_ml_loop.sh run --budget 3 --baseline /tmp/base.json --commands /tmp/candidates.txt --strategy bonereaper_v2 --execute
+  scripts/pipeline/ec2/autoresearch_ml_loop.sh gate /tmp/base.json /tmp/candidate.json noop
+  scripts/pipeline/ec2/autoresearch_ml_loop.sh run --budget 3 --baseline /tmp/base.json --commands /tmp/candidates.txt --strategy noop
+  scripts/pipeline/ec2/autoresearch_ml_loop.sh run --budget 3 --baseline /tmp/base.json --commands /tmp/candidates.txt --strategy noop --execute
 PLAN
 }
 
@@ -94,7 +101,7 @@ cmd_gate() {
     need_cmd jq
     local baseline="${1:-}"
     local candidate="${2:-}"
-    local strategy="${3:-bonereaper_v2}"
+    local strategy="${3:-noop}"
     [ -f "$baseline" ] || die "baseline summary not found: $baseline"
     [ -f "$candidate" ] || die "candidate summary not found: $candidate"
 
@@ -147,7 +154,7 @@ cmd_run() {
     local budget=""
     local baseline=""
     local commands=""
-    local strategy="bonereaper_v2"
+    local strategy="noop"
     local execute="0"
     local keep_fail="0"
     local base_ref="HEAD"

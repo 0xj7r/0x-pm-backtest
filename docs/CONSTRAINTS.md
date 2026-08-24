@@ -91,7 +91,8 @@ future strategy must pass.
 - Evidence: a parity review found the startup fingerprint omitted
   belief-model params, so drift outside `DecideConfig` went undetected
   until coverage was widened (commit `4b40575c`).
-- Enforcement: `crates/pm-backtest/src/fingerprint.rs::config_fingerprint`;
+- Enforcement: `crates/pm-alpha/src/fingerprint.rs::config_fingerprint`
+  (re-exported as `pm_backtest::fingerprint` for the engine call sites);
   test `canonical_order_does_not_matter`. Stamped as the first JSONL event
   of every stream in `crates/pm-shadow/src/lib.rs`.
 
